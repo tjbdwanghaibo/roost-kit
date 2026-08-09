@@ -2,6 +2,10 @@ module github.com/tjbdwanghaibo/cube-kit
 
 go 1.25.0
 
+// Local multi-repository development; remove after syncstream is included in a
+// released cube-core version and bump the requirement below.
+replace github.com/tjbdwanghaibo/cube-core => ../cube-core
+
 require (
 	github.com/nats-io/nats.go v1.52.0
 	github.com/redis/go-redis/v9 v9.19.0
