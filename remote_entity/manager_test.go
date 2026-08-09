@@ -2,10 +2,10 @@ package remote_entity
 
 import (
 	"context"
+	"errors"
 	"github.com/tjbdwanghaibo/cube-core/entity"
 	"github.com/tjbdwanghaibo/cube-core/obs"
 	fredis "github.com/tjbdwanghaibo/cube-core/redis"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +18,24 @@ type mockVersionedLock struct {
 	acquired bool
 	version  int64
 	locks    int
+}
+
+type hookVersionedLock struct {
+	*mockVersionedLock
+	once   sync.Once
+	onLock func()
+}
+
+func (l *hookVersionedLock) Lock(ctx context.Context) error {
+	if err := l.mockVersionedLock.Lock(ctx); err != nil {
+		return err
+	}
+	l.once.Do(func() {
+		if l.onLock != nil {
+			l.onLock()
+		}
+	})
+	return nil
 }
 
 func (l *mockVersionedLock) TryLock(_ context.Context) error {
@@ -119,7 +137,7 @@ func (l *mockLoader) LoadRemoteEntity(id int64, _ entity.EntityKind) entity.IThr
 	return e
 }
 
-func (l *mockLoader) SaveRemoteEntity(e entity.IThreadSafeRemoteEntity) error {
+func (l *mockLoader) SaveRemoteEntity(e entity.IThreadSafeRemoteEntity, _ entity.RemoteEntityMarkerLease) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.saveErr != nil {
@@ -133,7 +151,7 @@ func (l *mockLoader) SnapshotRemoteEntitySync(_ entity.IThreadSafeRemoteEntity) 
 	return entity.RemoteSyncSnapshot{Items: []entity.RemoteSyncItem{{Collection: "test", Data: []byte("sync")}}}
 }
 
-func (l *mockLoader) DelRemoteEntity(e entity.IThreadSafeRemoteEntity) error {
+func (l *mockLoader) DelRemoteEntity(e entity.IThreadSafeRemoteEntity, _ entity.RemoteEntityMarkerLease) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.delErr != nil {
@@ -150,39 +168,70 @@ func (l *mockLoader) CheckEntityExist(_ int64, _ entity.EntityKind) bool {
 // --- Mock Marker Store ---
 
 type mockMarkerStore struct {
-	mu    sync.Mutex
-	marks map[int64]bool
-	err   error
+	mu     sync.Mutex
+	marks  map[int64]bool
+	leases map[int64]entity.RemoteEntityMarkerLease
+	err    error
 }
 
 func newMockMarkerStore() *mockMarkerStore {
-	return &mockMarkerStore{marks: make(map[int64]bool)}
+	return &mockMarkerStore{marks: make(map[int64]bool), leases: make(map[int64]entity.RemoteEntityMarkerLease)}
 }
 
-func (s *mockMarkerStore) IsMarked(_ context.Context, id int64) (bool, error) {
+func (s *mockMarkerStore) GetMarker(_ context.Context, id int64) (bool, entity.RemoteEntityMarkerLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
-		return false, s.err
+		return false, entity.RemoteEntityMarkerLease{}, s.err
 	}
-	return s.marks[id], nil
+	return s.marks[id], s.leases[id], nil
 }
 
-func (s *mockMarkerStore) Mark(_ context.Context, id int64) error {
+func (s *mockMarkerStore) Mark(_ context.Context, id int64, ownerSid int32) (entity.RemoteEntityMarkerLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	lease := s.leases[id]
+	if s.marks[id] {
+		return entity.RemoteEntityMarkerLease{}, errors.New("marker already shared")
+	}
+	if lease.OwnerSid != 0 && lease.OwnerSid != ownerSid {
+		return entity.RemoteEntityMarkerLease{}, errors.New("marker owner mismatch")
+	}
+	lease.OwnerSid = ownerSid
+	lease.Fence++
+	lease.Shared = true
 	s.marks[id] = true
-	return nil
+	s.leases[id] = lease
+	return lease, nil
 }
 
-func (s *mockMarkerStore) Unmark(_ context.Context, id int64) error {
+func (s *mockMarkerStore) MarkExpected(_ context.Context, id int64, expected entity.RemoteEntityMarkerLease) (entity.RemoteEntityMarkerLease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.leases[id]
+	current.Shared = s.marks[id]
+	if current != expected || current.Shared {
+		return entity.RemoteEntityMarkerLease{}, errors.New("marker compare-and-swap failed")
+	}
+	next := entity.RemoteEntityMarkerLease{OwnerSid: expected.OwnerSid, Fence: expected.Fence + 1, Shared: true}
+	s.marks[id] = true
+	s.leases[id] = next
+	return next, nil
+}
+
+func (s *mockMarkerStore) Unmark(_ context.Context, id int64, lease entity.RemoteEntityMarkerLease) (entity.RemoteEntityMarkerLease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
-		return s.err
+		return entity.RemoteEntityMarkerLease{}, s.err
+	}
+	if !s.marks[id] || !lease.Shared {
+		return entity.RemoteEntityMarkerLease{}, errors.New("marker mismatch")
 	}
 	delete(s.marks, id)
-	return nil
+	next := entity.RemoteEntityMarkerLease{OwnerSid: lease.OwnerSid, Fence: lease.Fence + 1}
+	s.leases[id] = next
+	return next, nil
 }
 
 // --- Mock Syncer ---
@@ -319,7 +368,7 @@ func TestManager_IsMarkedReadsMarkerStoreWithoutWrapper(t *testing.T) {
 		RemotePolicy: entity.RemotePolicyManaged,
 	})
 	fullID := testRemoteFullIDWithKind(7100, category, kind)
-	if err := marker.Mark(context.Background(), fullID); err != nil {
+	if _, err := marker.Mark(context.Background(), fullID, 1000); err != nil {
 		t.Fatal(err)
 	}
 
@@ -346,7 +395,7 @@ func TestWrapper_UnmarkRemotePersistsAndSyncs(t *testing.T) {
 	e.SetExcludeSId(0)
 	e.SetEntityVersion(4)
 	loader.entities[fullID] = e
-	if err := marker.Mark(context.Background(), fullID); err != nil {
+	if _, err := marker.Mark(context.Background(), fullID, 3001); err != nil {
 		t.Fatal(err)
 	}
 	w := mgr.GetOrCreate(fullID, 1, 1).(*remoteEntityWrapper)
@@ -356,7 +405,7 @@ func TestWrapper_UnmarkRemotePersistsAndSyncs(t *testing.T) {
 	if err := w.UnmarkRemote(context.Background()); err != nil {
 		t.Fatalf("UnmarkRemote error: %v", err)
 	}
-	if marked, err := marker.IsMarked(context.Background(), fullID); err != nil || marked {
+	if marked, _, err := marker.GetMarker(context.Background(), fullID); err != nil || marked {
 		t.Fatalf("marker marked=%v err=%v, want false", marked, err)
 	}
 	if e.ExcludeSId() != 3001 {
@@ -370,6 +419,42 @@ func TestWrapper_UnmarkRemotePersistsAndSyncs(t *testing.T) {
 	}
 	if len(syncer.synced) != 1 || syncer.synced[0] != fullID {
 		t.Fatalf("synced=%v, want [%d]", syncer.synced, fullID)
+	}
+}
+
+func TestWrapperMarkRemoteRefreshesMarkerAfterDistributedLock(t *testing.T) {
+	mgr := newRemoteEntityManager(newMockVersionedLockFactory(), DefaultConfig(), 3001)
+	marker := newMockMarkerStore()
+	mgr.SetMarkerStore(marker)
+
+	fullID := testRemoteFullID(901)
+	expected := entity.RemoteEntityMarkerLease{OwnerSid: 3001, Fence: 2}
+	marker.leases[fullID] = expected
+	w := mgr.GetOrCreate(fullID, 1, 1).(*remoteEntityWrapper)
+	var winner entity.RemoteEntityMarkerLease
+	var winnerErr error
+	w.rMu = &hookVersionedLock{
+		mockVersionedLock: &mockVersionedLock{},
+		onLock: func() {
+			winner, winnerErr = marker.MarkExpected(context.Background(), fullID, expected)
+		},
+	}
+
+	if release, err := w.MarkRemote(context.Background()); err == nil {
+		if release != nil {
+			release()
+		}
+		t.Fatal("stale mark must fail after another server marks while waiting for the lock")
+	}
+	if winnerErr != nil {
+		t.Fatalf("simulated winning mark: %v", winnerErr)
+	}
+	shared, observed, err := marker.GetMarker(context.Background(), fullID)
+	if err != nil || !shared || observed != winner {
+		t.Fatalf("marker shared=%v lease=%#v err=%v, want winner %#v", shared, observed, err, winner)
+	}
+	if observed.Fence != 3 {
+		t.Fatalf("fence=%d, want exactly one transition to fence 3", observed.Fence)
 	}
 }
 
@@ -572,6 +657,80 @@ func TestPrepareRemoteEntities_AlignsLoadedEntityVersion(t *testing.T) {
 
 	if e.EntityVersion() != version {
 		t.Fatalf("loaded entity version: got %d, want %d", e.EntityVersion(), version)
+	}
+}
+
+func TestWrapper_LocalEntityDoesNotBecomeMarkedFromDefaultExcludeSid(t *testing.T) {
+	factory := newMockVersionedLockFactory()
+	mgr := newRemoteEntityManager(factory, DefaultConfig(), 2001)
+	store := newMockMarkerStore()
+	mgr.SetMarkerStore(store)
+
+	const rawID int64 = 107
+	id := testRemoteFullID(rawID)
+	entity.Mgr = entity.NewEntityManager()
+	local := newTestRemoteEntity(rawID, 1, 1)
+	entity.Mgr.Add(local)
+	t.Cleanup(func() { entity.Mgr = nil })
+
+	w := mgr.GetOrCreate(id, 1, 1)
+	release, err := w.TryCastEntity()
+	if err != nil {
+		t.Fatalf("first local cast failed: %v", err)
+	}
+	release()
+
+	if w.IsMarked() {
+		t.Fatal("local entity must not become marked from default ExcludeSId=0")
+	}
+	if local.ExcludeSId() != 2001 {
+		t.Fatalf("ExcludeSId=%d, want local sid 2001", local.ExcludeSId())
+	}
+
+	lock := factory.locks[id]
+	if lock == nil {
+		t.Fatal("expected wrapper lock to be allocated")
+	}
+	if lock.LockCount() != 0 {
+		t.Fatalf("local cast must not acquire distributed lock, got %d", lock.LockCount())
+	}
+
+	release, err = w.TryCastEntity()
+	if err != nil {
+		t.Fatalf("second local cast failed: %v", err)
+	}
+	release()
+	if lock.LockCount() != 0 {
+		t.Fatalf("cached local marker must not acquire distributed lock, got %d", lock.LockCount())
+	}
+}
+
+func TestResolveRemotePersistenceLeaseUsesLocalEpochAndRejectsSharedWrites(t *testing.T) {
+	factory := newMockVersionedLockFactory()
+	mgr := newRemoteEntityManager(factory, DefaultConfig(), 2001)
+	store := newMockMarkerStore()
+	mgr.SetMarkerStore(store)
+
+	const kind entity.EntityKind = 91
+	const category entity.EntityCategory = 1
+	entity.MustRegisterEntityKindDefs(entity.EntityKindDef{Kind: kind, Category: category, RemotePolicy: entity.RemotePolicyManaged})
+	id := testRemoteFullIDWithKind(108, category, kind)
+	store.leases[id] = entity.RemoteEntityMarkerLease{OwnerSid: 2001, Fence: 6}
+	lease, managed, err := mgr.ResolveRemotePersistenceLease(context.Background(), id)
+	if err != nil || !managed || lease.Fence != 6 || lease.OwnerSid != 2001 || lease.Shared {
+		t.Fatalf("local lease = %#v, managed=%v, err=%v", lease, managed, err)
+	}
+
+	store.marks[id] = true
+	store.leases[id] = entity.RemoteEntityMarkerLease{OwnerSid: 2001, Fence: 7, Shared: true}
+	if _, managed, err = mgr.ResolveRemotePersistenceLease(context.Background(), id); !managed || err == nil {
+		t.Fatalf("shared ordinary persistence must be rejected: managed=%v err=%v", managed, err)
+	}
+
+	store.marks[id] = false
+	store.leases[id] = entity.RemoteEntityMarkerLease{OwnerSid: 3001, Fence: 8}
+	if _, managed, err = mgr.ResolveRemotePersistenceLease(context.Background(), id); !managed || err == nil {
+		t.Fatalf("foreign local owner must be rejected: managed=%v err=%v", managed, err)
 	}
 }
 

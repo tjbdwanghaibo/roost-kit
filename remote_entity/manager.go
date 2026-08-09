@@ -2,12 +2,12 @@ package remote_entity
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	fctx "github.com/tjbdwanghaibo/cube-core/ctx"
 	"github.com/tjbdwanghaibo/cube-core/entity"
 	"github.com/tjbdwanghaibo/cube-core/obs"
 	fredis "github.com/tjbdwanghaibo/cube-core/redis"
-	"errors"
-	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -125,19 +125,71 @@ func (m *remoteEntityManager) IsRemoteMarked(id int64) bool {
 		return false
 	}
 	if w, ok := m.Get(id); ok && w != nil {
-		return w.IsMarked()
+		cached, ok := w.(*remoteEntityWrapper)
+		if !ok || !cached.markerKnown() {
+			slog.Warn("remote_entity: marker state unknown, using marked path", "id", id)
+			return true
+		}
+		ctx, cancel := context.WithTimeout(fctx.BaseContext(), m.cfg.OpTimeout)
+		defer cancel()
+		if err := cached.ensureMarker(ctx); err != nil {
+			slog.Warn("remote_entity: marker refresh failed, using marked path", "id", id, "err", err)
+			return true
+		}
+		return cached.IsMarked()
 	}
 	if m.markerStore == nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(fctx.BaseContext(), m.cfg.OpTimeout)
 	defer cancel()
-	marked, err := m.markerStore.IsMarked(ctx, id)
+	marked, _, err := m.markerStore.GetMarker(ctx, id)
 	if err != nil {
 		slog.Warn("remote_entity: marker check failed, using marked path", "id", id, "err", err)
 		return true
 	}
 	return marked
+}
+
+// ResolveRemotePersistenceLease supplies the current ownership generation for
+// the normal checkpoint path. Once an entity is shared, mutations must go
+// through PrepareRemoteEntities/TryCastEntity so that the distributed lock is
+// held; accepting an ordinary asynchronous save here would bypass that rule.
+func (m *remoteEntityManager) ResolveRemotePersistenceLease(ctx context.Context, id int64) (entity.RemoteEntityMarkerLease, bool, error) {
+	if m == nil || id == 0 || !entity.IsRemoteCapableEntityID(id) {
+		return entity.RemoteEntityMarkerLease{}, false, nil
+	}
+	meta := entity.ResolveEntityID(id)
+	if meta.FullID == 0 || !entity.IsEntityKindRemoteManaged(meta.Kind) {
+		return entity.RemoteEntityMarkerLease{}, false, nil
+	}
+	w := m.getOrCreate(meta.FullID, meta.Category, meta.Kind)
+	if w == nil {
+		return entity.RemoteEntityMarkerLease{}, false, fmt.Errorf("remote_entity: invalid persistence entity %d", id)
+	}
+	w.ownershipMu.RLock()
+	defer w.ownershipMu.RUnlock()
+	if ctx == nil {
+		ctx = fctx.BaseContext()
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, m.cfg.OpTimeout)
+		defer cancel()
+	}
+	if err := w.refreshMarked(ctx); err != nil {
+		return entity.RemoteEntityMarkerLease{}, true, fmt.Errorf("remote_entity: resolve persistence marker %d: %w", meta.FullID, err)
+	}
+	w.markerMu.RLock()
+	lease := w.markerLease
+	w.markerMu.RUnlock()
+	if w.IsMarked() {
+		return lease, true, fmt.Errorf("remote_entity: shared entity %d requires remote guard", meta.FullID)
+	}
+	if !w.isLocalOwner() {
+		return lease, true, fmt.Errorf("remote_entity: local entity %d is owned by sid %d", meta.FullID, w.leaseOwner())
+	}
+	return lease, true, nil
 }
 
 // PrepareRemoteEntities is the batch entry point for nest dispatch.
@@ -163,11 +215,12 @@ func (m *remoteEntityManager) PrepareRemoteEntities(ids []int64) (release func()
 			err = fmt.Errorf("remote_entity: invalid id %d", id)
 			return
 		}
-		if err := w.refreshMarked(fctx.BaseContext()); err != nil {
+		refreshErr := w.refreshMarked(fctx.BaseContext())
+		if refreshErr != nil {
 			slog.Warn("remote_entity: mark refresh failed, using remote path",
-				"id", meta.FullID, "err", err)
+				"id", meta.FullID, "err", refreshErr)
 		}
-		if w.IsMarked() {
+		if refreshErr != nil || !w.markerKnown() || w.IsMarked() {
 			remoteIds = append(remoteIds, meta.FullID)
 		} else {
 			localIds = append(localIds, meta.FullID)
