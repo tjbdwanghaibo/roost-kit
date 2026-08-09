@@ -62,7 +62,7 @@ func TestJetStreamSyncBusPublishesAndPropagatesHandlerError(t *testing.T) {
 	if js.publishes[0].subject != "cube.sync.remote_entity" {
 		t.Fatalf("publish subject=%q", js.publishes[0].subject)
 	}
-	if js.publishes[0].opts.MsgID != "sync:remote_entity:101:3:12" {
+	if js.publishes[0].opts.MsgID != "sync:remote_entity:101:3:12:0" {
 		t.Fatalf("publish msg id=%q", js.publishes[0].opts.MsgID)
 	}
 }

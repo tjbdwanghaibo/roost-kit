@@ -191,8 +191,12 @@ func syncMsgID(msg *fsync.SyncMsg) string {
 	if msg == nil || msg.Topic == "" || msg.Key == 0 || msg.Version == 0 || msg.FromSid == 0 {
 		return ""
 	}
-	return fmt.Sprintf("sync:%s:%d:%d:%d", msg.Topic, msg.Key, msg.Version, msg.FromSid)
+	return fmt.Sprintf("sync:%s:%d:%d:%d:%d", msg.Topic, msg.Key, msg.Version, msg.FromSid, msg.Part)
 }
+
+// PublishConfirmed satisfies syncstream's confirmation capability. JetStream
+// Publish returns only after the server acknowledges persistence.
+func (b *jetStreamSyncBus) PublishConfirmed(msg *fsync.SyncMsg) error { return b.Publish(msg) }
 
 func sanitizeSyncName(s string) string {
 	s = strings.TrimSpace(s)
