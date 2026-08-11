@@ -142,6 +142,38 @@ etcd:
 - 外部依赖不可用时，应通过 health/ready 暴露故障，而不是在生产环境静默降级。
 - 后台 consumer、watcher、ticker 必须在 Mod 停止时退出；业务停服时先停止接入，再 flush 和关闭依赖。
 
+### etcd 多服本地镜像
+
+`etcd.NewLocalMirror` 将一个 etcd prefix 的 revision 快照和后续 watch 映射为进程内强类型结构。初始化 watch 从快照 `Revision+1` 开始，断线或 compact 后重新获取完整快照，因此不会留下 Get/Watch 间隙。读取结果经过 `Clone`，调用方修改嵌套 map/slice 不会与 watch 更新产生数据竞争。
+
+```go
+type SharedRule struct {
+    Enabled bool              `json:"enabled"`
+    Params  map[string]string `json:"params"`
+}
+
+cfg := etcd.JSONLocalMirrorConfig[SharedRule]("/cube/shared-rules/")
+mirror, err := etcd.NewLocalMirror(ctx, etcdClient, cfg)
+if err != nil {
+    return err
+}
+defer mirror.Close()
+
+if err := mirror.WaitForSync(ctx); err != nil {
+    return err
+}
+entry, ok, err := mirror.GetEntry("/cube/shared-rules/battle")
+if err == nil && ok {
+    next := entry.Value
+    next.Enabled = true
+    updated, err := mirror.PublishIfRevision(ctx, entry.Key, entry.ModRevision, next)
+    // updated=false 表示其他服务器已经先更新，应重新读取后再决定是否重试。
+    _, _ = updated, err
+}
+```
+
+`Publish/Delete` 是 last-write-wins；需要防止多服覆盖时使用 `PublishIfRevision/DeleteIfRevision`。发布成功后本地值仍以 watch 回流为准，不在调用端提前修改，以确保所有服务器观察到相同的 etcd revision 顺序。`Status().Synced=false` 时已有数据可能陈旧，业务应根据 `LastError` 决定拒绝请求或降级。
+
 ### 开发与验证
 
 ```bash
@@ -151,6 +183,44 @@ go test ./...
 ```
 
 新增 Mod 时，请同时提供：配置读取、`Registry` capability、health、必要的指标、确定的 Stop 行为以及不依赖真实外部服务的测试替身。
+
+### 实时帧复制 Transport
+
+`replication` 包承接 `cube-core/replication` 之上的通用网络发送策略：
+
+- `AsyncTransport` 为每个 Session 建立独立的 latest-only Datagram Lane 和有界 Reliable Lane。
+- 同一 Frame 的全部应用层分片原子入队，新 Frame 只会整体替换旧 Frame。
+- `QUICTransport` 同时提供 QUIC DATAGRAM 和长度帧 Reliable Stream，是默认生产选择。
+- `KCPTransport` 使用加密 + FEC 的 OOB 通道发送 Snapshot，以 KCP 字节流发送长度帧可靠消息。
+- `UDPTransport` 只提供带 per-session AES-GCM 与防重放窗口的 Datagram；它没有可靠 Lane。
+- `CompositeTransport` 可把受保护 UDP 与已有可靠连接组合为 core Transport。
+- Session 注册和移除由 core Replicator 自动传递，房间业务不需要维护第二份网络队列生命周期。
+- 默认拒绝缺片、重复片、混合 Frame 和 checksum 错误的 Datagram batch；仅在可信上游已完成等价校验时才允许开启 opaque 模式。
+- Session 移除后必须等待 draining 完成才能复用 ID；可靠发送失败会终止该 Session 的两条 Lane，防止后续消息越序。
+- `Close` 支持并发和重复等待，不会为每次超时调用遗留 WaitGroup waiter。
+
+协议连接必须先经过网关鉴权并调用具体 Transport 的 `BindSession`，再调用 `FrameReplicationManager.RegisterSession`；后者会把 Session 生命周期自动传递到底层。推荐装配方式：
+
+```go
+protocol := replication.NewQUICTransport(replication.QUICTransportConfig{})
+async, err := replication.NewAsyncTransport(protocol, replication.DefaultAsyncTransportConfig())
+if err != nil {
+    return err
+}
+if err := manager.SetTransport(async); err != nil {
+    return err
+}
+
+// TLS/登录票据认证完成后：
+if err := protocol.BindSession(sessionID, quicConnection); err != nil {
+    return err
+}
+if err := manager.RegisterSession(corereplication.SessionInfo{ID: sessionID, OwnerID: playerID}); err != nil {
+    return err
+}
+```
+
+生产环境应配置非阻塞错误回调、发送超时和容量，并监控 active/draining、pending/in-flight、dropped frame、reliable abandoned/backpressure、send/receive/auth errors。UDP/KCP 仍需接入层提供登录握手、密钥派生与轮换、Cookie/限速和 DDoS 防护；QUIC 必须使用正式证书校验和固定 ALPN。完整约束见 `cube/docs/frame-replication-design.md`。
 
 ### 许可证
 
