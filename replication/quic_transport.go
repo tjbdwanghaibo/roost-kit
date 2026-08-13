@@ -8,7 +8,6 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	quic "github.com/quic-go/quic-go"
 	core "github.com/tjbdwanghaibo/cube-core/replication"
