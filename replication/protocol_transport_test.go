@@ -190,6 +190,25 @@ func TestQUICTransportDatagramAndReliableLoopback(t *testing.T) {
 	if payload, err := client.ReceiveReliable(ctx, session); err != nil || string(payload) != "quic-reliable" {
 		t.Fatalf("QUIC reliable payload=%q err=%v", payload, err)
 	}
+	deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	if err := server.SendReliable(deadlineCtx, session, []byte("deadline-scoped")); err != nil {
+		deadlineCancel()
+		t.Fatal(err)
+	}
+	if payload, err := client.ReceiveReliable(deadlineCtx, session); err != nil || string(payload) != "deadline-scoped" {
+		deadlineCancel()
+		t.Fatalf("QUIC deadline payload=%q err=%v", payload, err)
+	}
+	<-deadlineCtx.Done()
+	deadlineCancel()
+	backgroundCtx, backgroundCancel := context.WithTimeout(context.Background(), time.Second)
+	defer backgroundCancel()
+	if err := server.SendReliable(backgroundCtx, session, []byte("after-deadline")); err != nil {
+		t.Fatalf("previous write deadline leaked into reused stream: %v", err)
+	}
+	if payload, err := client.ReceiveReliable(backgroundCtx, session); err != nil || string(payload) != "after-deadline" {
+		t.Fatalf("previous read deadline leaked into reused stream: payload=%q err=%v", payload, err)
+	}
 }
 
 func TestKCPTransportOOBAndReliableLoopback(t *testing.T) {

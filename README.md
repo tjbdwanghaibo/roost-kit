@@ -56,10 +56,31 @@ Stop:    停止后台任务并关闭连接
 | `etcd` | 服务注册/发现、lease 保活、选主和 watcher |
 | `ops` | 运维 HTTP 入口，承载 health、ready、metrics 与 admin 接入 |
 | `lock` | 基于 core 锁抽象的 Mod 装配 |
-| `sync` | NATS/JetStream 数据同步 transport |
-| `remote_entity` | 跨服务 entity 路由、加载、同步与版本锁 |
+| `nest` | 实例化 Nest Engine 的 App Mod，向启动层提供可注入 `nest.Client` |
+| `gateway` | 玩家接入层的限流、超时和 panic 隔离中间件 |
+| `sync` | NATS/JetStream 数据同步 transport；房间 Subject 订阅、20Hz 合帧和可靠 retiring |
+| `spatial` | 通用整数网格坐标、并发 Terrain、ID-only AOI BlockIndex 与 A* 寻路 |
+| `remote_entity` | 跨服务 entity 原子事务、不可变快照、outbox 与版本锁 |
 | `configdata` | 配置加载、快照发布和热更辅助 |
 | `statslog` | 周期性运行时统计日志 |
+
+### Nest 与玩家接入装配
+
+`nest.NewMod(getter)` 创建并持有一个 Core Nest Engine；它不会设置旧的
+`nest.Nest` 全局变量。Service 在 `Init` 阶段从 Registry 获取 `nest.Client`，再构造
+codegen 生成的 Sender：
+
+```go
+nestMod := kitnest.NewMod(entityGetter)
+app.Mods(nestMod)
+
+client := app.MustLookup[corenest.Client](registry, mods.ModNest)
+bagSender := bagsender.NewBagSender(client)
+```
+
+可配置项为 `nest.worker_num`、`nest.heartbeat_worker_num`、
+`nest.queue_capacity`、`nest.tick_duration` 和 `nest.request_timeout`。接入端建议组合
+Core `gateway.RequireAuthenticated` 与 Kit `gateway.RateLimit`、`Timeout`、`Recover`。
 | `mods` | 可复用 Mod capability 名称常量 |
 
 ### 最小装配
@@ -174,6 +195,29 @@ if err == nil && ok {
 
 `Publish/Delete` 是 last-write-wins；需要防止多服覆盖时使用 `PublishIfRevision/DeleteIfRevision`。发布成功后本地值仍以 watch 回流为准，不在调用端提前修改，以确保所有服务器观察到相同的 etcd revision 顺序。`Status().Synced=false` 时已有数据可能陈旧，业务应根据 `LastError` 决定拒绝请求或降级。
 
+需要在值变化时主动更新派生状态时，直接订阅镜像，不需要业务自行消费 watcher channel：
+
+```go
+subscription, err := coreetcd.SubscribeLocalMirror(mirror, ctx, func(ctx context.Context, change coreetcd.LocalMirrorChange[SharedRule]) error {
+    switch change.Type {
+    case coreetcd.LocalMirrorSnapshot:
+        // 首次订阅和断线重同步都会进入这里；应原子替换派生状态。
+        replaceRules(change.Snapshot, change.Revision)
+    case coreetcd.LocalMirrorPut:
+        updateRule(change.Key, change.Entry.Value, change.Revision)
+    case coreetcd.LocalMirrorDelete:
+        removeRule(change.Key, change.Revision)
+    }
+    return nil
+}, coreetcd.LocalMirrorSubscribeOptions{QueueCapacity: 256})
+if err != nil {
+    return err
+}
+defer subscription.Close()
+```
+
+每个订阅按 revision 串行回调，且回调不持有 Mirror 锁；`Entry/Previous/Snapshot` 都是该回调独享的深拷贝。队列满时只关闭慢订阅并令 `subscription.Err()` 返回 `ErrMirrorSubscriberSlow`，Mirror 与其他订阅继续工作。生产服务应监控 `Done()` 与 `Err()` 并按“重新订阅后以首个 Snapshot 覆盖派生状态”的方式恢复。阻塞型回调必须响应传入的 `ctx`；停服有期限时使用 `CloseWithContext`。
+
 ### 开发与验证
 
 ```bash
@@ -221,6 +265,67 @@ if err := manager.RegisterSession(corereplication.SessionInfo{ID: sessionID, Own
 ```
 
 生产环境应配置非阻塞错误回调、发送超时和容量，并监控 active/draining、pending/in-flight、dropped frame、reliable abandoned/backpressure、send/receive/auth errors。UDP/KCP 仍需接入层提供登录握手、密钥派生与轮换、Cookie/限速和 DDoS 防护；QUIC 必须使用正式证书校验和固定 ALPN。完整约束见 `cube/docs/frame-replication-design.md`。
+
+### Observer-free 房间状态同步
+
+`sync.RoomReplication` 承接 core 的 `SubjectSyncState` 与 `SubscriptionCoordinator`，适合 AOI、开房间和有限 LOD/权限视图：
+
+- Entity 只保存 dirty、内容版本和 Packer，不保存 Observer。
+- 同一 Profile 的冻结 Payload 在全部 Subscriber 之间共享。
+- Room Frame 与每个 Subscriber 的 Session Sequence 独立推进；下游拒绝整批时二者都不跳号。
+- `RoomTransportSink` 将 Snapshot/Leave 放入可靠 lane、将 Delta 分片放入 latest-only datagram lane；object ref 与 baseline 按 `(room, session)` 隔离，避免不同 LOD 客户端互相污染。
+- `Start(ctx, 0)` 默认按 50ms（20Hz）合并 dirty；`FlushSubject`/`FlushDirty` 可主动刷新。
+- `RetireSubject` 在可靠 Leave 全部接纳前保留 Subject，并由 worker 自动重试。
+- `ReliableRoomFrameSink` 必须满足 all-or-none admission；不可将会部分入队、但只返回单个成功标志的发送循环直接作为下游。
+
+```go
+room, err := sync.NewRoomReplication(roomID, frameSink)
+if err != nil {
+    return err
+}
+if err := room.RegisterSubject(subjectState); err != nil {
+    return err
+}
+if err := room.Start(ctx, 50*time.Millisecond); err != nil {
+    return err
+}
+defer room.Stop(shutdownCtx)
+
+_, err = room.Subscribe(ctx, subscriber, subjectState.SubjectID(), entity.SyncProfile{
+    Key: "near", LOD: 1, SchemaVersion: 3,
+})
+```
+
+生产网络桥使用 `sync.NewRoomTransportSink`，其下游必须实现
+`replication.AtomicBatchTransport`（通常为 `AsyncTransport`）。同一批中只有所有
+session 都有容量时才提交 Room sequence/dirty；Session resolver 必须绑定到已认证且
+已完成 `BindSession` 的连接。客户端用 `DecodeRoomWireFrame` 和
+`DecodeRoomSubjectUpdate` 解码，并在 gap/checksum/baseline 错误时请求可靠 full resync。
+
+生产监控至少包含 `AdmittedFrames`、`AdmittedEntries`、`FailedBatches`、`FlushFailures`、`PendingSubjects`、`PendingRetirements` 和 `LastError`。`PendingRetirements` 持续增长通常表示可靠下游不可用或客户端路由异常，应影响 readiness，而不是静默丢弃 Leave；停服最后一次 flush 失败会由 `Stop` 返回。
+
+### Nest transaction WAL 与 outbox
+
+`nestwal` 为 core Nest transaction 提供分段 commit WAL、group commit、CRC 恢复、顺序 replay、双槽 ack、transactional outbox 和主动 flush。生成 DAO 的 mutation 可通过 `CheckpointApplier` 复用现有 `checkpoint.StorageBackend`，effect publisher 必须按 `Effect.ID` 幂等。
+
+```go
+walOpts := nestwal.DefaultOptions("./data/nest-wal")
+walOpts.OnFatal = stopAndFenceProcess
+
+runtime, err := nestwal.OpenRuntime(
+    walOpts,
+    nestwal.CheckpointApplier{Backend: backend},
+    publisher,
+    nestwal.DefaultCommitterOptions(),
+)
+if err != nil {
+    return err
+}
+
+nestMod := nestkit.NewMod(getter, runtime.NestOption())
+```
+
+`strict` handler 在返回成功前等待 group fsync；`async` 等待 write 并由后台周期刷盘。WAL replay 只在 entity guard 解锁后开始，避免与既有 release checkpoint 并发。停服应先停止接流并排空 Nest，再调用 `runtime.Shutdown(ctx)`。`ErrCommitIndeterminate` 是必须 fencing 并重启恢复的终止性错误，不能在线 rollback 后继续服务。
 
 ### 许可证
 

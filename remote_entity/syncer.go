@@ -2,107 +2,110 @@ package remote_entity
 
 import (
 	"context"
-	fctx "github.com/tjbdwanghaibo/cube-core/ctx"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"github.com/tjbdwanghaibo/cube-core/entity"
 	"github.com/tjbdwanghaibo/cube-core/replica"
-	"log/slog"
+	"hash/fnv"
 )
 
-const syncTopicRemoteEntity = "remote_entity"
+const syncTopicRemoteSnapshot = "remote_entity_snapshot"
 
-// remoteSyncer implements entity.IRemoteEntitySyncer using ISyncBus.
+// remoteSyncer publishes immutable snapshots and renewable interests.
 type remoteSyncer struct {
-	replicator *replica.Replicator
+	snapshotRep *replica.Replicator
+	interestRep *replica.Replicator
+	mgr         *remoteEntityManager
 }
 
-func newRemoteSyncer(replicator *replica.Replicator) *remoteSyncer {
-	return &remoteSyncer{replicator: replicator}
+func newRemoteSyncer(snapshot *replica.Replicator) *remoteSyncer {
+	return &remoteSyncer{snapshotRep: snapshot}
 }
 
-var _ entity.IRemoteEntitySyncer = (*remoteSyncer)(nil)
-
-func (s *remoteSyncer) SyncEntity(id int64, version int64, collection string, data []byte) error {
-	return s.SyncEntityWithContext(fctx.BaseContext(), id, version, collection, data)
+type remoteSnapshotWire struct {
+	Delete bool                        `json:"delete,omitempty"`
+	Key    entity.RemoteSnapshotKey    `json:"key"`
+	Update entity.RemoteSnapshotRecord `json:"update,omitempty"`
 }
 
-func (s *remoteSyncer) SyncEntityWithContext(ctx context.Context, id int64, version int64, collection string, data []byte) error {
-	if s == nil || s.replicator == nil {
+func (s *remoteSyncer) PublishRemoteSnapshot(ctx context.Context, update entity.RemoteSnapshotRecord) error {
+	if s == nil || s.snapshotRep == nil {
 		return nil
 	}
-	if ctx == nil {
-		ctx = fctx.BaseContext()
+	if s.mgr != nil && s.mgr.remote != nil && !s.mgr.remote.interests.interested(update.Key) {
+		return nil
 	}
-	payload, err := entity.EncodeRemoteSyncPayload(collection, data)
+	raw, err := json.Marshal(remoteSnapshotWire{Key: update.Key, Update: update.Clone()})
 	if err != nil {
 		return err
 	}
-	err = s.replicator.Publish(ctx, replica.Envelope{
-		Key:     id,
-		Version: version,
-		Op:      replica.OpUpsert,
-		Payload: payload,
+	return s.snapshotRep.Publish(ctx, replica.Envelope{Key: remoteSnapshotReplicaKey(update.Key), Version: int64(update.StateVersion), Op: replica.OpUpsert, Payload: raw})
+}
+
+func (s *remoteSyncer) PublishRemoteInterest(ctx context.Context, interest entity.RemoteSnapshotInterest, release bool) error {
+	if s == nil || s.interestRep == nil {
+		return nil
+	}
+	raw, err := json.Marshal(remoteInterestWire{Release: release, Interest: interest})
+	if err != nil {
+		return err
+	}
+	return s.interestRep.Publish(ctx, replica.Envelope{
+		Key: remoteInterestReplicaKey(interest), Version: interest.ExpiresAt,
+		Op: replica.OpUpsert, Payload: raw,
 	})
+}
+
+func (s *remoteSyncer) DeleteRemoteSnapshot(ctx context.Context, key entity.RemoteSnapshotKey, version uint64) error {
+	if s == nil || s.snapshotRep == nil {
+		return nil
+	}
+	raw, err := json.Marshal(remoteSnapshotWire{Delete: true, Key: key})
 	if err != nil {
-		slog.Warn("remote_entity: sync publish failed", "id", id, "err", err)
+		return err
+	}
+	return s.snapshotRep.Publish(ctx, replica.Envelope{Key: remoteSnapshotReplicaKey(key), Version: int64(version), Op: replica.OpUpsert, Payload: raw})
+}
+
+// remoteSnapshotReplicaKey defines the ordering/deduplication domain. Every
+// independently versioned tenant/entity/kind/scope/policy snapshot needs its
+// own key; using EntityID alone drops sibling snapshots at the same version.
+func remoteSnapshotReplicaKey(key entity.RemoteSnapshotKey) int64 {
+	h := fnv.New64a()
+	var raw [22]byte
+	binary.BigEndian.PutUint32(raw[0:4], key.Tenant)
+	binary.BigEndian.PutUint64(raw[4:12], uint64(key.EntityID))
+	binary.BigEndian.PutUint16(raw[12:14], uint16(key.Kind))
+	binary.BigEndian.PutUint32(raw[14:18], key.Scope)
+	binary.BigEndian.PutUint32(raw[18:22], key.Policy)
+	_, _ = h.Write(raw[:])
+	result := int64(h.Sum64() & ((1 << 63) - 1))
+	if result == 0 {
+		return 1
+	}
+	return result
+}
+
+type remoteSnapshotReplicaStore struct{ mgr *remoteEntityManager }
+
+func (s remoteSnapshotReplicaStore) ApplyReplica(ctx context.Context, env replica.Envelope) error {
+	if s.mgr == nil || s.mgr.remote == nil || len(env.Payload) == 0 {
+		return nil
+	}
+	var wire remoteSnapshotWire
+	if err := json.Unmarshal(env.Payload, &wire); err != nil {
+		return err
+	}
+	if wire.Delete {
+		return s.mgr.remote.cache.Delete(ctx, wire.Key)
+	}
+	err := s.mgr.remote.cache.ApplyUpdate(ctx, wire.Update)
+	if errors.Is(err, entity.ErrRemoteSnapshotGap) || errors.Is(err, entity.ErrRemoteSnapshotEpochMismatch) || errors.Is(err, entity.ErrRemoteSnapshotSchemaMismatch) {
+		_, _, loadErr := s.mgr.remote.cache.LoadAuthoritative(ctx, wire.Update.Key, entity.RemoteReadMonotonic, wire.Update.StateVersion)
+		return loadErr
 	}
 	return err
 }
 
-func (s *remoteSyncer) SyncDelEntity(id int64, version int64) error {
-	return s.SyncDelEntityWithContext(fctx.BaseContext(), id, version)
-}
-
-func (s *remoteSyncer) SyncDelEntityWithContext(ctx context.Context, id int64, version int64) error {
-	if s == nil || s.replicator == nil {
-		return nil
-	}
-	if ctx == nil {
-		ctx = fctx.BaseContext()
-	}
-	err := s.replicator.PublishDelete(ctx, id, version)
-	if err != nil {
-		slog.Warn("remote_entity: sync del publish failed", "id", id, "err", err)
-	}
-	return err
-}
-
-type remoteReplicaStore struct {
-	mgr *remoteEntityManager
-}
-
-func (s remoteReplicaStore) ApplyReplica(_ context.Context, env replica.Envelope) error {
-	if s.mgr == nil || env.Key == 0 {
-		return nil
-	}
-	w, ok := s.mgr.Get(env.Key)
-	if env.Op == replica.OpDelete {
-		if !ok {
-			return nil
-		}
-		return w.TryDelEntity()
-	}
-	if !ok {
-		meta := entity.ResolveEntityID(env.Key)
-		w = s.mgr.getOrCreate(meta.FullID, meta.Category, meta.Kind)
-		if w == nil {
-			return nil
-		}
-	}
-	rw, ok := w.(*remoteEntityWrapper)
-	if ok {
-		rw.ensureLoadedForReplica()
-	}
-	return w.TryUpdateEntity(env.Version, env.Payload)
-}
-
-// noopSyncer is a no-op syncer for single-server deployments (no sync bus available).
-type noopSyncer struct{}
-
-var _ entity.IRemoteEntitySyncer = (*noopSyncer)(nil)
-
-func (s *noopSyncer) SyncEntity(_ int64, _ int64, _ string, _ []byte) error { return nil }
-func (s *noopSyncer) SyncDelEntity(_ int64, _ int64) error                  { return nil }
-func (s *noopSyncer) SyncEntityWithContext(context.Context, int64, int64, string, []byte) error {
-	return nil
-}
-func (s *noopSyncer) SyncDelEntityWithContext(context.Context, int64, int64) error { return nil }
+var _ entity.IRemoteSnapshotPublisher = (*remoteSyncer)(nil)

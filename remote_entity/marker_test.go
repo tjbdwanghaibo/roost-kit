@@ -26,26 +26,47 @@ func (s *markerEvalStub) Eval(_ context.Context, script string, _ []string, args
 	}
 	field := args[0].(string)
 	switch script {
-	case markerGetScript:
+	case ownershipGetScript:
 		return s.values[field], nil
-	case markerMarkFenceScript:
-		if len(args) != 3 {
-			return nil, errors.New("invalid mark args")
+	case ownershipClaimScript:
+		if len(args) != 2 {
+			return nil, errors.New("invalid claim args")
 		}
-		expected := args[1].(string)
-		owner := args[2].(string)
-		if s.values[field] != expected {
+		owner := args[1].(string)
+		if current := s.values[field]; current != "" {
+			_, lease, err := parseMarkerLease(current)
+			if err == nil && lease.OwnerSid == mustParseMarkerOwner(owner) {
+				return current, nil
+			}
 			return "", nil
 		}
-		_, lease, err := parseMarkerLease(expected)
-		if expected == "" {
-			lease = entity.RemoteEntityMarkerLease{}
-			err = nil
+		value := "local:" + owner + ":1:1"
+		s.values[field] = value
+		return value, nil
+	case ownershipEnterSharedScript:
+		if len(args) != 2 || s.values[field] != args[1].(string) {
+			return "", nil
 		}
+		_, lease, err := parseMarkerLease(s.values[field])
 		if err != nil || lease.Shared {
 			return "", nil
 		}
-		value := formatMarkerLease(entity.RemoteEntityMarkerLease{OwnerSid: mustParseMarkerOwner(owner), Fence: lease.Fence + 1, Shared: true})
+		lease.MarkerEpoch++
+		lease.Shared = true
+		value := formatMarkerLease(lease)
+		s.values[field] = value
+		return value, nil
+	case ownershipLeaveSharedScript:
+		if len(args) != 2 || s.values[field] != args[1].(string) {
+			return "", nil
+		}
+		_, lease, err := parseMarkerLease(s.values[field])
+		if err != nil || !lease.Shared {
+			return "", nil
+		}
+		lease.MarkerEpoch++
+		lease.Shared = false
+		value := formatMarkerLease(lease)
 		s.values[field] = value
 		return value, nil
 	default:
@@ -54,56 +75,61 @@ func (s *markerEvalStub) Eval(_ context.Context, script string, _ []string, args
 }
 
 func mustParseMarkerOwner(raw string) int32 {
-	_, lease, _ := parseMarkerLease("local:" + raw + ":1")
+	_, lease, _ := parseMarkerLease("local:" + raw + ":1:1")
 	return lease.OwnerSid
 }
 
-func TestMockMarkerStorePreservesOwnershipEpochAcrossUnmark(t *testing.T) {
+func TestMockOwnershipStorePreservesEpochAcrossModeTransitions(t *testing.T) {
 	store := newMockMarkerStore()
-	first, err := store.Mark(context.Background(), 42, 1001)
-	if err != nil || !first.Shared || first.Fence != 1 {
-		t.Fatalf("first mark = %#v, err=%v", first, err)
+	claimed, err := store.ClaimOwnership(context.Background(), 42, 1001)
+	if err != nil || claimed.Shared || claimed.MarkerEpoch != 1 {
+		t.Fatalf("claim = %#v, err=%v", claimed, err)
 	}
-	local, err := store.Unmark(context.Background(), 42, first)
-	if err != nil || local.Shared || local.Fence != 2 || local.OwnerSid != 1001 {
-		t.Fatalf("unmark = %#v, err=%v", local, err)
+	shared, err := store.EnterSharedExpected(context.Background(), 42, claimed)
+	if err != nil || !shared.Shared || shared.MarkerEpoch != 2 {
+		t.Fatalf("enter shared = %#v, err=%v", shared, err)
 	}
-	shared, observed, err := store.GetMarker(context.Background(), 42)
-	if err != nil || shared || observed != local {
-		t.Fatalf("local state shared=%v lease=%#v err=%v", shared, observed, err)
+	local, err := store.LeaveSharedExpected(context.Background(), 42, shared)
+	if err != nil || local.Shared || local.MarkerEpoch != 3 || local.OwnerSid != 1001 {
+		t.Fatalf("leave shared = %#v, err=%v", local, err)
 	}
-	second, err := store.Mark(context.Background(), 42, 1001)
-	if err != nil || !second.Shared || second.Fence != 3 {
-		t.Fatalf("second mark = %#v, err=%v", second, err)
+	observed, found, err := store.GetOwnership(context.Background(), 42)
+	if err != nil || !found || observed != local {
+		t.Fatalf("ownership found=%v lease=%#v err=%v", found, observed, err)
 	}
 }
 
 func TestParseMarkerLeasePreservesModeAndFence(t *testing.T) {
-	shared, lease, err := parseMarkerLease("shared:1001:9")
-	if err != nil || !shared || !lease.Shared || lease.OwnerSid != 1001 || lease.Fence != 9 {
+	shared, lease, err := parseMarkerLease("shared:1001:9:4")
+	if err != nil || !shared || !lease.Shared || lease.OwnerSid != 1001 || lease.MarkerEpoch != 9 || lease.RouteEpoch != 4 {
 		t.Fatalf("shared parse = %v %#v %v", shared, lease, err)
 	}
-	shared, lease, err = parseMarkerLease("local:1001:10")
-	if err != nil || shared || lease.Shared || lease.OwnerSid != 1001 || lease.Fence != 10 {
+	shared, lease, err = parseMarkerLease("local:1001:10:4")
+	if err != nil || shared || lease.Shared || lease.OwnerSid != 1001 || lease.MarkerEpoch != 10 || lease.RouteEpoch != 4 {
 		t.Fatalf("local parse = %v %#v %v", shared, lease, err)
 	}
 }
 
-func TestRedisMarkerMarkExpectedRejectsStaleLocalLease(t *testing.T) {
+func TestRedisOwnershipClaimAndEnterSharedRejectStaleLease(t *testing.T) {
 	redis := newMarkerEvalStub()
 	store := newRedisMarkerForEval(redis, "marks")
-	expected := entity.RemoteEntityMarkerLease{OwnerSid: 1001, Fence: 2}
-	redis.values["42"] = formatMarkerLease(expected)
-
-	first, err := store.MarkExpected(context.Background(), 42, expected)
-	if err != nil || !first.Shared || first.Fence != 3 || first.OwnerSid != 1001 {
-		t.Fatalf("first mark = %#v, err=%v", first, err)
+	expected, err := store.ClaimOwnership(context.Background(), 42, 1001)
+	if err != nil || expected != (entity.RemoteEntityMarkerLease{OwnerSid: 1001, MarkerEpoch: 1, RouteEpoch: 1}) {
+		t.Fatalf("claim = %#v, err=%v", expected, err)
 	}
-	if _, err = store.MarkExpected(context.Background(), 42, expected); err == nil {
+	if _, err = store.ClaimOwnership(context.Background(), 42, 2002); err == nil {
+		t.Fatal("a second owner must not claim an existing lease")
+	}
+
+	first, err := store.EnterSharedExpected(context.Background(), 42, expected)
+	if err != nil || !first.Shared || first.MarkerEpoch != 2 || first.OwnerSid != 1001 || first.RouteEpoch != 1 {
+		t.Fatalf("enter shared = %#v, err=%v", first, err)
+	}
+	if _, err = store.EnterSharedExpected(context.Background(), 42, expected); err == nil {
 		t.Fatal("stale expected lease must not overwrite an existing shared lease")
 	}
-	shared, observed, err := store.GetMarker(context.Background(), 42)
-	if err != nil || !shared || observed != first {
-		t.Fatalf("marker after stale mark shared=%v lease=%#v err=%v", shared, observed, err)
+	observed, found, err := store.GetOwnership(context.Background(), 42)
+	if err != nil || !found || observed != first {
+		t.Fatalf("ownership after stale transition found=%v lease=%#v err=%v", found, observed, err)
 	}
 }

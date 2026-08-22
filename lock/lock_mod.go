@@ -19,8 +19,7 @@ func (m *LockMod) Name() app.ModName         { return mods.ModLock }
 func (m *LockMod) Init(_ *viper.Viper) error { return nil }
 
 func (m *LockMod) Provide(r *app.Registry) error {
-	flock.Mgr = flock.NewLockManager(nil)
-	return r.Register(mods.ModLock, flock.Mgr)
+	return r.Register(mods.ModLock, flock.NewLockManager(nil))
 }
 
 func (m *LockMod) Start() error { return nil }

@@ -40,6 +40,22 @@ type ReliableSender interface {
 	SendReliable(context.Context, core.SessionID, []byte) error
 }
 
+// OutboundFrame is one already-framed replication message. Exactly one of
+// Datagrams and Reliable must be populated. Datagram fragments belong to one
+// complete frame and are admitted/replaced as a unit.
+type OutboundFrame struct {
+	Session   core.SessionID
+	Datagrams [][]byte
+	Reliable  []byte
+}
+
+// AtomicBatchTransport accepts all frames or none of them. Higher-level
+// schedulers use this boundary so their sequence counters and dirty state are
+// committed only after transport ownership has been transferred.
+type AtomicBatchTransport interface {
+	AdmitBatch(context.Context, []OutboundFrame) error
+}
+
 // CompositeTransport joins independent unreliable and reliable network lanes.
 // A QUIC adapter, for example, can supply a DATAGRAM sender and a stream sender.
 type CompositeTransport struct {

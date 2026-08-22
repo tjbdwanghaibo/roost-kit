@@ -94,6 +94,7 @@ type StatsLogMod struct {
 	nextProviderID uint64
 	lastNestWork   nest.DispatcherWorkStats
 	lastNestAt     time.Time
+	registry       *app.Registry
 
 	started  bool
 	stopCh   chan struct{}
@@ -143,6 +144,7 @@ func (m *StatsLogMod) Provide(r *app.Registry) error {
 	if r == nil {
 		return nil
 	}
+	m.registry = r
 	return r.Register(mods.ModStatsLog, m)
 }
 
@@ -279,11 +281,11 @@ func (m *StatsLogMod) collect() StatsRecord {
 			SysBytes:       ms.Sys,
 			NumGC:          ms.NumGC,
 		},
-		Entity:    collectEntityStats(),
+		Entity:    m.collectEntityStats(),
 		Providers: m.collectProviders(),
 	}
-	if nest.Nest != nil {
-		record.Nest = m.formatNestStats(nest.Nest.Stats(), now)
+	if runtime, ok := app.Lookup[interface{ Stats() nest.DispatcherStats }](m.registry, mods.ModNest); ok && runtime != nil {
+		record.Nest = m.formatNestStats(runtime.Stats(), now)
 	}
 	return record
 }
@@ -328,16 +330,20 @@ func (m *StatsLogMod) closeFile() {
 	}
 }
 
-func collectEntityStats() EntityStats {
+func (m *StatsLogMod) collectEntityStats() EntityStats {
 	stats := EntityStats{
 		ByCategory: make(map[string]int),
 		ByKind:     make(map[string]int),
 	}
-	if entity.Mgr == nil {
+	runtime, ok := app.Lookup[interface {
+		Len() int
+		Range(func(entity.IThreadSafeEntity) bool)
+	}](m.registry, mods.ModEntityRuntime)
+	if !ok || runtime == nil {
 		return stats
 	}
-	stats.Total = entity.Mgr.Len()
-	entity.Mgr.Range(func(e entity.IThreadSafeEntity) bool {
+	stats.Total = runtime.Len()
+	runtime.Range(func(e entity.IThreadSafeEntity) bool {
 		if e == nil {
 			return true
 		}

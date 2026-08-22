@@ -3,10 +3,9 @@ package remote_entity
 import (
 	"context"
 	crand "crypto/rand"
-	fredis "github.com/tjbdwanghaibo/cube-core/redis"
-	"encoding/hex"
 	"errors"
 	"fmt"
+	fredis "github.com/tjbdwanghaibo/cube-core/redis"
 	"math/rand/v2"
 	"strconv"
 	"sync"
@@ -17,19 +16,22 @@ var (
 	ErrVersionedLockNotAcquired = errors.New("versioned lock not acquired")
 	ErrVersionedLockNotOwned    = errors.New("versioned lock not owned")
 	ErrVersionedLockExpired     = errors.New("versioned lock expired")
+	ErrVersionedLockConfig      = errors.New("versioned lock invalid configuration")
 )
 
 // versionedLock implements fredis.IVersionedLock.
 type versionedLock struct {
-	redis fredis.IRedis
-	key   string
-	token string
-	ttl   time.Duration
-	opts  fredis.VersionedLockOptions
+	redis   fredis.IRedis
+	key     string
+	token   string
+	ttl     time.Duration
+	opts    fredis.VersionedLockOptions
+	initErr error
 
 	mu       sync.Mutex
 	acquired bool
 	version  int64
+	fence    uint64
 
 	// async touch
 	touchMu     sync.Mutex
@@ -41,9 +43,6 @@ type versionedLock struct {
 var _ fredis.IVersionedLock = (*versionedLock)(nil)
 
 func newVersionedLock(redis fredis.IRedis, id int64, opts fredis.VersionedLockOptions) *versionedLock {
-	if opts.TTL <= 0 {
-		panic("versioned lock TTL must be > 0")
-	}
 	key := "lock:" + opts.Key + ":" + strconv.FormatInt(id, 10)
 
 	l := &versionedLock{
@@ -52,6 +51,18 @@ func newVersionedLock(redis fredis.IRedis, id int64, opts fredis.VersionedLockOp
 		token: generateToken(),
 		ttl:   opts.TTL,
 		opts:  opts,
+	}
+	if redis == nil {
+		l.initErr = fmt.Errorf("%w: redis client is nil", ErrVersionedLockConfig)
+	}
+	if opts.TTL < time.Millisecond {
+		l.initErr = errors.Join(l.initErr, fmt.Errorf("%w: TTL must be at least 1ms", ErrVersionedLockConfig))
+	}
+	if opts.RetryCount < 0 {
+		l.opts.RetryCount = 0
+	}
+	if opts.RetryInterval < 0 {
+		l.opts.RetryInterval = 0
 	}
 
 	// Normalize async touch params
@@ -62,13 +73,28 @@ func newVersionedLock(redis fredis.IRedis, id int64, opts fredis.VersionedLockOp
 		if opts.AsyncTouchInterval <= 0 {
 			opts.AsyncTouchInterval = opts.TTL / 3
 		}
+		if opts.AsyncTouchExtend < time.Millisecond || opts.AsyncTouchInterval < time.Millisecond {
+			l.initErr = errors.Join(l.initErr, fmt.Errorf("%w: async touch durations must be at least 1ms", ErrVersionedLockConfig))
+		}
 		l.opts = opts
+	}
+	if l.opts.RetryCount < 0 {
+		l.opts.RetryCount = 0
+	}
+	if l.opts.RetryInterval < 0 {
+		l.opts.RetryInterval = 0
 	}
 
 	return l
 }
 
 func (l *versionedLock) TryLock(ctx context.Context) error {
+	if err := l.validationError(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -77,7 +103,7 @@ func (l *versionedLock) TryLock(ctx context.Context) error {
 	}
 
 	ttlMs := l.ttl.Milliseconds()
-	result, err := l.redis.Eval(ctx, versionedTryLockLua, []string{l.key}, l.token, ttlMs)
+	result, err := l.redis.Eval(ctx, versionedTryLockLua, []string{l.key, l.key + ":fence"}, l.token, ttlMs)
 	if err != nil {
 		return fmt.Errorf("versioned lock redis error: %w", err)
 	}
@@ -86,12 +112,13 @@ func (l *versionedLock) TryLock(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("versioned lock parse error: %w", err)
 	}
-	if len(vals) < 2 || vals[0] == 0 {
+	if len(vals) < 3 || vals[0] == 0 {
 		return ErrVersionedLockNotAcquired
 	}
 
 	l.acquired = true
 	l.version = vals[1]
+	l.fence = uint64(vals[2])
 
 	if l.opts.AutoAsyncTouch {
 		l.startAsyncTouchLocked()
@@ -101,6 +128,12 @@ func (l *versionedLock) TryLock(ctx context.Context) error {
 }
 
 func (l *versionedLock) Lock(ctx context.Context) error {
+	if err := l.validationError(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	retryCount := l.opts.RetryCount
 	retryInterval := l.opts.RetryInterval
 
@@ -123,7 +156,7 @@ func (l *versionedLock) Lock(ctx context.Context) error {
 		}
 
 		if i < retryCount && retryInterval > 0 {
-			backoff := retryInterval * time.Duration(1<<i)
+			backoff := boundedBackoff(retryInterval, i)
 			jitter := time.Duration(float64(backoff) * (0.5 + rand.Float64()*0.5))
 			select {
 			case <-ctx.Done():
@@ -136,10 +169,19 @@ func (l *versionedLock) Lock(ctx context.Context) error {
 }
 
 func (l *versionedLock) Unlock(ctx context.Context, newVersion int64, versionTTL time.Duration) error {
+	if err := l.validationError(); err != nil {
+		return err
+	}
 	return l.UnlockWithRetry(ctx, newVersion, versionTTL, l.opts.RetryCount, l.opts.RetryInterval)
 }
 
 func (l *versionedLock) UnlockWithRetry(ctx context.Context, newVersion int64, versionTTL time.Duration, retryCount int, retryInterval time.Duration) error {
+	if err := l.validationError(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	l.stopAsyncTouch()
 
 	l.mu.Lock()
@@ -187,7 +229,7 @@ func (l *versionedLock) UnlockWithRetry(ctx context.Context, newVersion int64, v
 		}
 
 		if i < retryCount && retryInterval > 0 {
-			backoff := retryInterval * time.Duration(1<<i)
+			backoff := boundedBackoff(retryInterval, i)
 			jitter := time.Duration(float64(backoff) * (0.5 + rand.Float64()*0.5))
 			select {
 			case <-ctx.Done():
@@ -200,18 +242,42 @@ func (l *versionedLock) UnlockWithRetry(ctx context.Context, newVersion int64, v
 }
 
 func (l *versionedLock) Version() int64 {
+	if l == nil {
+		return 0
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.version
 }
 
+func (l *versionedLock) Fence() uint64 {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.fence
+}
+
 func (l *versionedLock) IsAcquired() bool {
+	if l == nil {
+		return false
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.acquired
 }
 
 func (l *versionedLock) Touch(ctx context.Context, duration time.Duration) error {
+	if err := l.validationError(); err != nil {
+		return err
+	}
+	if duration < time.Millisecond {
+		return fmt.Errorf("%w: touch duration must be at least 1ms", ErrVersionedLockConfig)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	l.mu.Lock()
 	if !l.acquired {
 		l.mu.Unlock()
@@ -240,6 +306,12 @@ func (l *versionedLock) Touch(ctx context.Context, duration time.Duration) error
 }
 
 func (l *versionedLock) Refresh(ctx context.Context) error {
+	if err := l.validationError(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	l.mu.Lock()
 	if !l.acquired {
 		l.mu.Unlock()
@@ -266,6 +338,9 @@ func (l *versionedLock) Refresh(ctx context.Context) error {
 }
 
 func (l *versionedLock) Close() error {
+	if err := l.validationError(); err != nil {
+		return err
+	}
 	l.stopAsyncTouch()
 
 	l.mu.Lock()
@@ -351,15 +426,41 @@ func newVersionedLockFactory(redis fredis.IRedis) *versionedLockFactory {
 }
 
 func (f *versionedLockFactory) NewVersionedLock(id int64, opts fredis.VersionedLockOptions) fredis.IVersionedLock {
+	if f == nil {
+		return newVersionedLock(nil, id, opts)
+	}
 	return newVersionedLock(f.redis, id, opts)
 }
 
 // --- Helpers ---
 
 func generateToken() string {
-	b := make([]byte, 16)
-	crand.Read(b)
-	return hex.EncodeToString(b)
+	return crand.Text()
+}
+
+func (l *versionedLock) validationError() error {
+	if l == nil {
+		return fmt.Errorf("%w: lock is nil", ErrVersionedLockConfig)
+	}
+	return l.initErr
+}
+
+func boundedBackoff(base time.Duration, attempt int) time.Duration {
+	const maxBackoff = 30 * time.Second
+	if base <= 0 {
+		return 0
+	}
+	if attempt > 30 {
+		attempt = 30
+	}
+	if base > maxBackoff/time.Duration(1<<attempt) {
+		return maxBackoff
+	}
+	backoff := base * time.Duration(1<<attempt)
+	if backoff > maxBackoff {
+		return maxBackoff
+	}
+	return backoff
 }
 
 func toInt64Slice(v any) ([]int64, error) {

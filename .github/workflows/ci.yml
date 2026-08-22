@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      core_ref:
+        description: cube-core ref used by local-source integration
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  released-core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go mod download
+      - run: go mod verify
+      - run: go mod tidy
+      - run: git diff --exit-code -- go.mod go.sum
+      - run: go test ./...
+      - if: runner.os == 'Linux'
+        run: go vet ./...
+      - if: runner.os == 'Linux'
+        run: go test -race ./checkpoint ./remote_entity ./nest ./nestwal ./replication ./etcd ./mongo ./nats
+
+  local-core-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cube-kit
+      - uses: actions/checkout@v4
+        with:
+          repository: tjbdwanghaibo/cube-core
+          ref: ${{ inputs.core_ref || 'main' }}
+          path: cube-core
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cube-kit/go.mod
+          cache-dependency-path: |
+            cube-kit/go.sum
+            cube-core/go.sum
+      - working-directory: cube-kit
+        run: go mod edit -replace github.com/tjbdwanghaibo/cube-core=../cube-core
+      - working-directory: cube-kit
+        run: go mod verify
+      - working-directory: cube-kit
+        run: go test ./...
+      - working-directory: cube-kit
+        run: go vet ./...
+      - working-directory: cube-kit
+        run: go test -race ./checkpoint ./remote_entity ./nest ./nestwal ./replication

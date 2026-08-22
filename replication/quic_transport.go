@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	quic "github.com/quic-go/quic-go"
 	core "github.com/tjbdwanghaibo/cube-core/replication"
@@ -223,6 +224,7 @@ func (transport *QUICTransport) SendReliable(ctx context.Context, session core.S
 		if err := stream.SetWriteDeadline(deadline); err != nil {
 			return err
 		}
+		defer stream.SetWriteDeadline(time.Time{})
 	}
 	defer interruptWriteOnCancel(ctx, stream)()
 	header := make([]byte, 4)
@@ -294,6 +296,7 @@ func (transport *QUICTransport) ReceiveReliable(ctx context.Context, session cor
 		if err := stream.SetReadDeadline(deadline); err != nil {
 			return nil, err
 		}
+		defer stream.SetReadDeadline(time.Time{})
 	}
 	defer interruptReadOnCancel(ctx, stream)()
 	header := make([]byte, 4)

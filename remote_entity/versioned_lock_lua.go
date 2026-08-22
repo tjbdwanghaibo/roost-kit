@@ -1,17 +1,19 @@
 package remote_entity
 
-// versionedTryLockLua: HSETNX owner → HGET version → PEXPIRE; returns {1, version} or {0, 0}
+// versionedTryLockLua acquires the lease and allocates a fence from a separate
+// non-expiring counter. The counter must never share the lock hash TTL.
 const versionedTryLockLua = `
 local ok = redis.call("HSETNX", KEYS[1], "owner", ARGV[1])
 if ok == 1 then
+    local fence = redis.call("INCR", KEYS[2])
     local ver = redis.call("HGET", KEYS[1], "version")
     redis.call("PEXPIRE", KEYS[1], ARGV[2])
     if ver == false then
-        return {1, 0}
+        return {1, 0, fence}
     end
-    return {1, tonumber(ver)}
+    return {1, tonumber(ver), fence}
 end
-return {0, 0}
+return {0, 0, 0}
 `
 
 // versionedUnlockLua: verify owner → HSET version → HDEL owner → PEXPIRE; returns 1 or 0
@@ -46,7 +48,7 @@ return newTTL
 
 // versionedRefreshLua: verify owner → PEXPIRE to TTL; returns 1 or 0
 const versionedRefreshLua = `
-if redis.call("HGET", KEYS[1]) == ARGV[1] then
+if redis.call("HGET", KEYS[1], "owner") == ARGV[1] then
     return redis.call("PEXPIRE", KEYS[1], ARGV[2])
 end
 return 0
