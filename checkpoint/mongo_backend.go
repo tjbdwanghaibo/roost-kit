@@ -20,9 +20,10 @@ const nestTransactionCollection = "_nest_transactions"
 var ErrAtomicTransactionIdentity = errors.New("checkpoint mongo: transaction identity conflict")
 
 type MongoBackendConfig struct {
-	DefaultDatabase     string
-	ServerID            int32
-	MaxConcurrentGroups int
+	DefaultDatabase       string
+	ServerID              int32
+	MaxConcurrentGroups   int
+	TransactionReceiptTTL time.Duration
 }
 
 // MongoBackend persists checkpoint snapshots with version-based CAS. The hot
@@ -45,7 +46,24 @@ func NewMongoBackend(client fmongo.IMongo, cfg MongoBackendConfig) (*MongoBacken
 	if cfg.MaxConcurrentGroups <= 0 {
 		cfg.MaxConcurrentGroups = 8
 	}
+	if cfg.TransactionReceiptTTL <= 0 {
+		cfg.TransactionReceiptTTL = 30 * 24 * time.Hour
+	}
 	return &MongoBackend{client: client, cfg: cfg}, nil
+}
+
+// EnsureInfrastructure installs lifecycle indexes before traffic is accepted.
+func (b *MongoBackend) EnsureInfrastructure(ctx context.Context) error {
+	if b == nil || b.client == nil {
+		return corecheckpoint.ErrCheckpointBackendRequired
+	}
+	ttlSeconds := int64(b.cfg.TransactionReceiptTTL / time.Second)
+	if ttlSeconds <= 0 || ttlSeconds > int64(^uint32(0)>>1) {
+		return fmt.Errorf("checkpoint mongo: invalid transaction receipt ttl %s", b.cfg.TransactionReceiptTTL)
+	}
+	return b.client.Database(b.cfg.DefaultDatabase).Collection(nestTransactionCollection).EnsureIndexes(ctx, []fmongo.IndexModel{{
+		Keys: bson.D{{Key: "created_at", Value: 1}}, Name: "ttl_created_at", TTL: int32(ttlSeconds),
+	}})
 }
 
 type saveGroupKey struct {
@@ -284,7 +302,14 @@ func (b *MongoBackend) saveOne(ctx context.Context, coll fmongo.ICollection, op 
 	var after bson.M
 	err = coll.FindOneAndUpdate(ctx, filter, update, &after, fmongo.FindOneAndUpdateOption{Upsert: true, ReturnAfter: true})
 	if errors.Is(err, fmongo.ErrDuplicateKey) {
-		return corecheckpoint.SaveResult{VersionConflict: true}, nil
+		stale, classifyErr := storedVersionAtLeast(ctx, coll, op.ID, op.Version)
+		if classifyErr == nil && stale {
+			return corecheckpoint.SaveResult{VersionConflict: true}, nil
+		}
+		if classifyErr != nil {
+			return corecheckpoint.SaveResult{}, errors.Join(err, fmt.Errorf("classify duplicate: %w", classifyErr))
+		}
+		return corecheckpoint.SaveResult{}, err
 	}
 	if err != nil {
 		return corecheckpoint.SaveResult{}, err
@@ -345,6 +370,8 @@ func replacementDocument(op corecheckpoint.SaveOp, raw []byte) (bson.M, error) {
 	}
 	doc["_id"] = op.ID
 	doc["_version"] = op.Version
+	delete(doc, "_deleted")
+	delete(doc, "_deleted_at")
 	if op.Fence > 0 {
 		doc["_fence"], doc["_owner_sid"], doc["_shared"] = op.Fence, op.OwnerSid, op.Shared
 	}
@@ -363,16 +390,18 @@ func patchUpdate(op corecheckpoint.SaveOp) (bson.M, error) {
 		set[path] = value
 	}
 	update := bson.M{"$set": set}
+	// A strictly newer save is the only supported explicit re-creation path.
+	// Clear tombstone metadata even for a patch update.
+	unset := bson.M{"_deleted": "", "_deleted_at": ""}
 	if len(op.Patch.Unset) > 0 {
-		unset := bson.M{}
 		for _, path := range op.Patch.Unset {
 			if !validPatchPath(path) {
 				return nil, fmt.Errorf("checkpoint mongo: invalid unset path %q", path)
 			}
 			unset[path] = ""
 		}
-		update["$unset"] = unset
 	}
+	update["$unset"] = unset
 	return update, nil
 }
 
@@ -412,10 +441,11 @@ func (b *MongoBackend) StreamLoad(ctx context.Context, op corecheckpoint.LoadOp,
 		return fmt.Errorf("checkpoint mongo: invalid load request")
 	}
 	coll := b.collection(b.databaseName(op.Db), op.DbScope == corecheckpoint.DatabaseScopeServer, op.Collection)
+	filter := activeDocumentFilter(op.Filter)
 	stream, ok := coll.(fmongo.IStreamingCollection)
 	if !ok {
 		var raw []bson.Raw
-		if err := coll.Find(ctx, op.Filter, &raw, fmongo.FindOption{BatchSize: int32(op.BatchSize)}); err != nil {
+		if err := coll.Find(ctx, filter, &raw, fmongo.FindOption{BatchSize: int32(op.BatchSize)}); err != nil {
 			return err
 		}
 		for _, item := range raw {
@@ -425,7 +455,7 @@ func (b *MongoBackend) StreamLoad(ctx context.Context, op corecheckpoint.LoadOp,
 		}
 		return nil
 	}
-	return stream.StreamFind(ctx, op.Filter, func(raw []byte) error {
+	return stream.StreamFind(ctx, filter, func(raw []byte) error {
 		return consumeRawDoc(bson.Raw(raw), consume)
 	}, fmongo.FindOption{BatchSize: int32(op.BatchSize)})
 }
@@ -439,6 +469,7 @@ func consumeRawDoc(raw bson.Raw, consume func(corecheckpoint.RawDoc) error) erro
 		MarkerEpoch   uint64  `bson:"_marker_epoch"`
 		LockFence     uint64  `bson:"_lock_fence"`
 		RouteEpoch    uint64  `bson:"_route_epoch"`
+		Deleted       bool    `bson:"_deleted"`
 	}
 	if err := bson.Unmarshal(raw, &meta); err != nil {
 		return err
@@ -453,24 +484,75 @@ func consumeRawDoc(raw bson.Raw, consume func(corecheckpoint.RawDoc) error) erro
 	return consume(corecheckpoint.RawDoc{
 		ID: meta.ID, Version: meta.Version, SchemaVersion: meta.Schema,
 		MarkerEpoch: meta.MarkerEpoch, LockFence: meta.LockFence, RouteEpoch: meta.RouteEpoch,
-		DataEnvelope: enveloped, Data: append([]byte(nil), raw...),
+		DataEnvelope: enveloped, Deleted: meta.Deleted, Data: append([]byte(nil), raw...),
 	})
 }
 
 func (b *MongoBackend) BulkRemove(ctx context.Context, op corecheckpoint.RemoveOp) error {
-	if op.Collection == "" || len(op.IDs) == 0 {
+	if op.Collection == "" || len(op.Items) == 0 {
 		return nil
 	}
-	filter := bson.M{"_id": bson.M{"$in": append([]int64(nil), op.IDs...)}}
-	if op.Fence > 0 {
-		filter["$or"] = bson.A{
-			bson.M{"_fence": bson.M{"$lt": op.Fence}},
-			bson.M{"_fence": op.Fence, "_owner_sid": op.OwnerSid},
-			bson.M{"_fence": bson.M{"$exists": false}},
+	coll := b.collection(b.databaseName(op.Db), op.DbScope == corecheckpoint.DatabaseScopeServer, op.Collection)
+	deletedAt := time.Now().UTC()
+	for i := range op.Items {
+		item := op.Items[i]
+		if item.ID == 0 || item.Version == 0 {
+			return fmt.Errorf("checkpoint mongo: invalid delete identity at %d", i)
+		}
+		set := bson.M{"_version": item.Version, "_deleted": true, "_deleted_at": deletedAt}
+		if item.Fence > 0 {
+			set["_fence"], set["_owner_sid"], set["_shared"] = item.Fence, item.OwnerSid, item.Shared
+		}
+		var after bson.M
+		err := coll.FindOneAndUpdate(ctx, removeFilter(item), bson.M{"$set": set, "$setOnInsert": bson.M{"_id": item.ID}}, &after, fmongo.FindOneAndUpdateOption{Upsert: true, ReturnAfter: true})
+		if errors.Is(err, fmongo.ErrDuplicateKey) {
+			stale, classifyErr := storedVersionAtLeast(ctx, coll, item.ID, item.Version)
+			if classifyErr == nil && stale {
+				// A newer save/tombstone already owns this identity.
+				continue
+			}
+			if classifyErr != nil {
+				return errors.Join(err, fmt.Errorf("checkpoint mongo: classify tombstone duplicate %s/%d: %w", op.Collection, item.ID, classifyErr))
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("checkpoint mongo: tombstone %s/%d: %w", op.Collection, item.ID, err)
 		}
 	}
-	_, err := b.collection(b.databaseName(op.Db), op.DbScope == corecheckpoint.DatabaseScopeServer, op.Collection).DeleteMany(ctx, filter)
-	return err
+	return nil
+}
+
+func storedVersionAtLeast(ctx context.Context, coll fmongo.ICollection, id int64, version uint64) (bool, error) {
+	var current struct {
+		Version uint64 `bson:"_version"`
+	}
+	if err := coll.FindOne(ctx, bson.M{"_id": id}, &current); err != nil {
+		return false, err
+	}
+	return current.Version >= version, nil
+}
+
+func removeFilter(item corecheckpoint.RemoveItem) bson.M {
+	clauses := bson.A{bson.M{"$or": bson.A{
+		bson.M{"_version": bson.M{"$lt": item.Version}},
+		bson.M{"_version": bson.M{"$exists": false}},
+	}}}
+	if item.Fence > 0 {
+		clauses = append(clauses, bson.M{"$or": bson.A{
+			bson.M{"_fence": bson.M{"$lt": item.Fence}},
+			bson.M{"_fence": item.Fence, "_owner_sid": item.OwnerSid},
+			bson.M{"_fence": bson.M{"$exists": false}},
+		}})
+	}
+	return bson.M{"_id": item.ID, "$and": clauses}
+}
+
+func activeDocumentFilter(filter map[string]any) bson.M {
+	active := bson.M{"_deleted": bson.M{"$ne": true}}
+	if len(filter) == 0 {
+		return active
+	}
+	return bson.M{"$and": bson.A{bson.M(filter), active}}
 }
 
 func (b *MongoBackend) databaseName(name string) string {

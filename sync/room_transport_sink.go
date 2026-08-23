@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	stdsync "sync"
+	"sync/atomic"
 
 	"github.com/tjbdwanghaibo/cube-core/entity"
 	coreentitysync "github.com/tjbdwanghaibo/cube-core/entitysync"
@@ -54,17 +55,36 @@ type RoomTransportSinkConfig struct {
 	ComponentTypeID        uint16
 	ComponentSchemaVersion uint16
 	Archetype              uint16
+	SlowConsumerPolicy     SlowConsumerPolicy
+	OnSlowConsumer         func(RoomSlowConsumer)
 }
+
+type RoomSlowConsumer struct {
+	RoomID     int64
+	Subscriber coreentitysync.SubscriberRef
+	Session    core.SessionID
+	Err        error
+}
+
+type SlowConsumerPolicy uint8
+
+const (
+	SlowConsumerEvict SlowConsumerPolicy = iota + 1
+	SlowConsumerFailBatch
+)
 
 // RoomTransportSink encodes receiver-specific room frames onto the common
 // replication wire format. Snapshot/leave frames use the reliable ordered
 // lane; state-only deltas use fragmented latest-only datagrams.
 type RoomTransportSink struct {
-	mu        stdsync.Mutex
-	transport kit.AtomicBatchTransport
-	sessions  RoomSessionResolver
-	config    RoomTransportSinkConfig
-	rooms     map[roomSessionKey]*roomObjectRefs
+	mu                    stdsync.Mutex
+	transport             kit.AtomicBatchTransport
+	sessions              RoomSessionResolver
+	config                RoomTransportSinkConfig
+	rooms                 map[roomSessionKey]*roomObjectRefs
+	evicted               map[roomSessionKey]coreentitysync.SubscriberRef
+	onEvicted             func(RoomSlowConsumer)
+	slowConsumerEvictions atomic.Uint64
 }
 
 type roomSessionKey struct {
@@ -106,10 +126,26 @@ func NewRoomTransportSink(config RoomTransportSinkConfig) (*RoomTransportSink, e
 	if config.Archetype == 0 {
 		config.Archetype = DefaultRoomArchetype
 	}
+	if config.SlowConsumerPolicy == 0 {
+		config.SlowConsumerPolicy = SlowConsumerEvict
+	}
 	return &RoomTransportSink{
 		transport: config.Transport, sessions: config.Sessions, config: config,
-		rooms: make(map[roomSessionKey]*roomObjectRefs),
+		rooms:   make(map[roomSessionKey]*roomObjectRefs),
+		evicted: make(map[roomSessionKey]coreentitysync.SubscriberRef),
 	}, nil
+}
+
+// SetRoomSlowConsumerHandler installs the framework lifecycle hook used to
+// remove room subscriptions after transport eviction. It is normally wired by
+// NewRoomReplication; applications may still use OnSlowConsumer for logging.
+func (s *RoomTransportSink) SetRoomSlowConsumerHandler(handler func(RoomSlowConsumer)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onEvicted = handler
+	s.mu.Unlock()
 }
 
 func (s *RoomTransportSink) AdmitRoomFrames(ctx context.Context, frames []RoomFrame) error {
@@ -130,7 +166,9 @@ func (s *RoomTransportSink) AdmitRoomFrames(ctx context.Context, frames []RoomFr
 	defer s.mu.Unlock()
 	plans := make(map[roomSessionKey]*roomObjectRefs)
 	seenRoutes := make(map[roomSessionKey]struct{}, len(frames))
+	routeSubscribers := make(map[roomSessionKey]coreentitysync.SubscriberRef, len(frames))
 	outbound := make([]kit.OutboundFrame, 0, len(frames))
+	componentCache := make(map[roomComponentCacheKey][]byte)
 	for _, frame := range frames {
 		if frame.RoomID <= 0 || frame.Frame == 0 || frame.SessionSequence == 0 || frame.Subscriber.Normalize().Empty() || len(frame.Entries) == 0 {
 			return ErrRoomWireFrame
@@ -144,16 +182,20 @@ func (s *RoomTransportSink) AdmitRoomFrames(ctx context.Context, frames []RoomFr
 		}
 		roomID := uint64(frame.RoomID)
 		key := roomSessionKey{roomID: roomID, session: session}
+		if _, evicted := s.evicted[key]; evicted {
+			continue
+		}
 		if _, exists := seenRoutes[key]; exists {
 			return fmt.Errorf("%w: duplicate room/session route", ErrRoomWireFrame)
 		}
 		seenRoutes[key] = struct{}{}
+		routeSubscribers[key] = frame.Subscriber.Normalize()
 		state := plans[key]
 		if state == nil {
 			state = cloneRoomObjectRefs(s.rooms[key])
 			plans[key] = state
 		}
-		encoded, reliable, delta, err := s.encodeFrame(frame, state)
+		encoded, reliable, delta, err := s.encodeFrame(frame, state, componentCache)
 		if err != nil {
 			return err
 		}
@@ -169,7 +211,7 @@ func (s *RoomTransportSink) AdmitRoomFrames(ctx context.Context, frames []RoomFr
 		}
 		outbound = append(outbound, item)
 	}
-	if err := s.transport.AdmitBatch(ctx, outbound); err != nil {
+	if err := s.admitWithSlowConsumerPolicy(ctx, outbound, plans, routeSubscribers); err != nil {
 		return err
 	}
 	for key, state := range plans {
@@ -178,7 +220,70 @@ func (s *RoomTransportSink) AdmitRoomFrames(ctx context.Context, frames []RoomFr
 	return nil
 }
 
-func (s *RoomTransportSink) encodeFrame(frame RoomFrame, state *roomObjectRefs) ([]byte, bool, core.DeltaFrame, error) {
+func (s *RoomTransportSink) admitWithSlowConsumerPolicy(ctx context.Context, outbound []kit.OutboundFrame, plans map[roomSessionKey]*roomObjectRefs, routeSubscribers map[roomSessionKey]coreentitysync.SubscriberRef) error {
+	for len(outbound) > 0 {
+		err := s.transport.AdmitBatch(ctx, outbound)
+		if err == nil {
+			return nil
+		}
+		var admission kit.AdmissionError
+		if s.config.SlowConsumerPolicy != SlowConsumerEvict || !errors.As(err, &admission) || !errors.Is(err, kit.ErrReliableBackpressure) || admission.Session == 0 {
+			return err
+		}
+		filtered := outbound[:0]
+		for _, item := range outbound {
+			if item.Session != admission.Session {
+				filtered = append(filtered, item)
+			}
+		}
+		outbound = filtered
+		for key := range plans {
+			if key.session == admission.Session {
+				s.evicted[key] = routeSubscribers[key]
+				delete(plans, key)
+			}
+		}
+		for key := range s.rooms {
+			if key.session == admission.Session {
+				if _, exists := s.evicted[key]; !exists {
+					s.evicted[key] = coreentitysync.SubscriberRef{}
+				}
+				delete(s.rooms, key)
+			}
+		}
+		if remover, ok := s.transport.(interface{ RemoveSession(core.SessionID) bool }); ok {
+			remover.RemoveSession(admission.Session)
+		}
+		s.slowConsumerEvictions.Add(1)
+		callbacks := []func(RoomSlowConsumer){s.onEvicted, s.config.OnSlowConsumer}
+		for _, callback := range callbacks {
+			if callback == nil {
+				continue
+			}
+			for key, subscriber := range routeSubscribers {
+				if key.session != admission.Session {
+					continue
+				}
+				event := RoomSlowConsumer{RoomID: int64(key.roomID), Subscriber: subscriber, Session: admission.Session, Err: err}
+				go func(event RoomSlowConsumer) { defer func() { _ = recover() }(); callback(event) }(event)
+			}
+		}
+	}
+	return nil
+}
+
+type roomComponentCacheKey struct {
+	subjectID   int64
+	version     uint64
+	baseVersion uint64
+	mask        uint64
+	reason      uint32
+	profile     entity.SyncProfile
+	namespace   string
+	full        bool
+}
+
+func (s *RoomTransportSink) encodeFrame(frame RoomFrame, state *roomObjectRefs, componentCache map[roomComponentCacheKey][]byte) ([]byte, bool, core.DeltaFrame, error) {
 	epoch, tick, baseTick := roomWireClock(frame.Frame)
 	delta := core.DeltaFrame{
 		SnapshotMeta: core.SnapshotMeta{
@@ -191,17 +296,17 @@ func (s *RoomTransportSink) encodeFrame(frame RoomFrame, state *roomObjectRefs) 
 	if len(frame.Entries) > s.config.Limits.MaxObjects {
 		return nil, false, core.DeltaFrame{}, core.ErrObjectLimit
 	}
-	seen := make(map[int64]struct{}, len(frame.Entries))
 	reliable := false
-	for _, entry := range frame.Entries {
+	for entryIndex, entry := range frame.Entries {
 		update := entry.Update
 		if update.SubjectID == 0 {
 			return nil, false, core.DeltaFrame{}, ErrRoomSubjectInvalid
 		}
-		if _, exists := seen[update.SubjectID]; exists {
-			return nil, false, core.DeltaFrame{}, fmt.Errorf("%w: duplicate subject %d", ErrRoomWireFrame, update.SubjectID)
+		for i := 0; i < entryIndex; i++ {
+			if frame.Entries[i].Update.SubjectID == update.SubjectID {
+				return nil, false, core.DeltaFrame{}, fmt.Errorf("%w: duplicate subject %d", ErrRoomWireFrame, update.SubjectID)
+			}
 		}
-		seen[update.SubjectID] = struct{}{}
 		ref, exists := state.objects[update.SubjectID]
 		object := core.ObjectDelta{Ref: ref}
 		switch entry.Kind {
@@ -232,9 +337,15 @@ func (s *RoomTransportSink) encodeFrame(frame RoomFrame, state *roomObjectRefs) 
 			return nil, false, core.DeltaFrame{}, ErrRoomWireFrame
 		}
 		if object.Operation != core.ObjectRemove {
-			payload, err := EncodeRoomSubjectUpdate(update, s.config.Limits.MaxComponentBytes)
-			if err != nil {
-				return nil, false, core.DeltaFrame{}, err
+			cacheKey := roomComponentCacheKey{subjectID: update.SubjectID, version: update.Version, baseVersion: update.BaseVersion, mask: update.Mask, reason: update.Reason, profile: update.Profile.Normalize(), namespace: update.Namespace, full: update.Full}
+			payload := componentCache[cacheKey]
+			if payload == nil {
+				var err error
+				payload, err = EncodeRoomSubjectUpdate(update, s.config.Limits.MaxComponentBytes)
+				if err != nil {
+					return nil, false, core.DeltaFrame{}, err
+				}
+				componentCache[cacheKey] = payload
 			}
 			object.Components = []core.ComponentDelta{{
 				Operation: core.ComponentSet, TypeID: s.config.ComponentTypeID,
@@ -273,7 +384,67 @@ func (s *RoomTransportSink) ResetRoom(roomID int64) {
 			delete(s.rooms, key)
 		}
 	}
+	for key := range s.evicted {
+		if key.roomID == uint64(roomID) {
+			delete(s.evicted, key)
+		}
+	}
 	s.mu.Unlock()
+}
+
+func (s *RoomTransportSink) ReleaseRoomSubscriber(ctx context.Context, roomID int64, subscriber coreentitysync.SubscriberRef) {
+	if s == nil || roomID <= 0 || subscriber.Normalize().Empty() {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	session, err := s.sessions.ResolveRoomSession(ctx, subscriber.Normalize())
+	if err != nil || session == 0 {
+		return
+	}
+	s.mu.Lock()
+	delete(s.rooms, roomSessionKey{roomID: uint64(roomID), session: session})
+	delete(s.evicted, roomSessionKey{roomID: uint64(roomID), session: session})
+	s.mu.Unlock()
+}
+
+// ReleaseSession must be called by the connection lifecycle when a session is
+// disconnected. It removes state for every room before a numeric ID can be
+// reused by a new connection.
+func (s *RoomTransportSink) ReleaseSession(session core.SessionID) {
+	if s == nil || session == 0 {
+		return
+	}
+	s.mu.Lock()
+	for key := range s.rooms {
+		if key.session == session {
+			delete(s.rooms, key)
+		}
+	}
+	for key := range s.evicted {
+		if key.session == session {
+			delete(s.evicted, key)
+		}
+	}
+	s.mu.Unlock()
+}
+
+type RoomTransportSinkStats struct {
+	RoomSessions          int
+	SlowConsumerEvictions uint64
+	EvictedRoomSessions   int
+}
+
+func (s *RoomTransportSink) Stats() RoomTransportSinkStats {
+	if s == nil {
+		return RoomTransportSinkStats{}
+	}
+	s.mu.Lock()
+	count := len(s.rooms)
+	evicted := len(s.evicted)
+	s.mu.Unlock()
+	return RoomTransportSinkStats{RoomSessions: count, SlowConsumerEvictions: s.slowConsumerEvictions.Load(), EvictedRoomSessions: evicted}
 }
 
 func (s *RoomTransportSink) Decode(data []byte) (uint64, uint64, core.DeltaFrame, error) {
@@ -474,3 +645,5 @@ func (state *roomObjectRefs) release(subjectID int64) {
 
 var _ ReliableRoomFrameSink = (*RoomTransportSink)(nil)
 var _ RoomSubjectLifecycle = (*RoomTransportSink)(nil)
+var _ RoomSubscriberLifecycle = (*RoomTransportSink)(nil)
+var _ RoomLifecycle = (*RoomTransportSink)(nil)

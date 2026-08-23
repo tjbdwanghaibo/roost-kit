@@ -240,7 +240,22 @@ func (m *RemoteEntityMod) checkHealth(context.Context) health.Result {
 	if err := m.mgr.fatalError(); err != nil {
 		return health.Result{Status: health.StatusFail, Message: "fatal release failure", Err: err}
 	}
-	return health.Result{Status: health.StatusOK, Message: fmt.Sprintf("wrappers=%d capacity=%d", m.mgr.wrapperCount(), m.cfg.WrapperCapacity)}
+	m.mgr.remote.localInterestMu.Lock()
+	localInterests := len(m.mgr.remote.localInterests)
+	m.mgr.remote.localInterestMu.Unlock()
+	m.mgr.remote.txMu.Lock()
+	transactions := len(m.mgr.remote.txs)
+	activeTransactions := 0
+	for _, tracker := range m.mgr.remote.txs {
+		if !tracker.closed {
+			activeTransactions++
+		}
+	}
+	m.mgr.remote.txMu.Unlock()
+	if (m.cfg.SnapshotInterestKeys > 0 && localInterests >= m.cfg.SnapshotInterestKeys) || (m.cfg.TransactionTrackLimit > 0 && activeTransactions >= m.cfg.TransactionTrackLimit) {
+		return health.Result{Status: health.StatusFail, Message: fmt.Sprintf("capacity exhausted wrappers=%d local_interests=%d transactions=%d active_transactions=%d", m.mgr.wrapperCount(), localInterests, transactions, activeTransactions)}
+	}
+	return health.Result{Status: health.StatusOK, Message: fmt.Sprintf("wrappers=%d capacity=%d local_interests=%d transactions=%d active_transactions=%d", m.mgr.wrapperCount(), m.cfg.WrapperCapacity, localInterests, transactions, activeTransactions)}
 }
 
 func (m *RemoteEntityMod) Start() error {

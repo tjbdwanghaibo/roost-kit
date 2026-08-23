@@ -1,6 +1,8 @@
 package remote_entity
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +36,61 @@ func TestRemoteInterestRegistryIsScopedAndExpires(t *testing.T) {
 	registry.release(key, 1001)
 	if registry.interested(key) {
 		t.Fatal("released interest was retained")
+	}
+}
+
+func TestLocalInterestCapacityPrunesExpiredAndCoalescesConcurrentRenewal(t *testing.T) {
+	const kind entity.EntityKind = 131
+	entity.MustRegisterEntityKindDefs(entity.EntityKindDef{Kind: kind, Category: 1, RemotePolicy: entity.RemotePolicyManaged})
+	firstID, err := entity.BuildEntityID(1910, kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := entity.BuildEntityID(1911, kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.SnapshotInterestKeys = 1
+	cfg.SnapshotInterestTTL = time.Minute
+	mgr := newRemoteEntityManager(newMockVersionedLockFactory(), cfg, 1000)
+	first := entity.RemoteSnapshotKey{EntityID: firstID, Kind: kind, Scope: 1}
+	second := entity.RemoteSnapshotKey{EntityID: secondID, Kind: kind, Scope: 1}
+	if err := mgr.RenewRemoteSnapshotInterest(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	mgr.remote.localInterestMu.Lock()
+	mgr.remote.localInterests[first] = time.Now().Add(-time.Second).UnixNano()
+	mgr.remote.localInterestMu.Unlock()
+	if err := mgr.RenewRemoteSnapshotInterest(context.Background(), second); err != nil {
+		t.Fatalf("expired interest did not release capacity: %v", err)
+	}
+
+	if err := mgr.ReleaseRemoteSnapshotInterest(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	const workers = 64
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- mgr.RenewRemoteSnapshotInterest(context.Background(), second)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent renewal failed: %v", err)
+		}
+	}
+	mgr.remote.localInterestMu.Lock()
+	count := len(mgr.remote.localInterests)
+	mgr.remote.localInterestMu.Unlock()
+	if count != 1 {
+		t.Fatalf("local interest count = %d, want 1", count)
 	}
 }
 

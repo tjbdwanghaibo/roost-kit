@@ -509,7 +509,7 @@ func TestMemoryCommitPublishFailureQueriesStatusAndReconciles(t *testing.T) {
 func TestRemoteTrackingAndFlushWaitersAreBounded(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.TransactionTrackLimit = 1
-	cfg.TransactionTrackTTL = time.Millisecond
+	cfg.TransactionTrackTTL = time.Hour
 	cfg.SnapshotMaxWaiters = 1
 	mgr := newRemoteEntityManager(newMockVersionedLockFactory(), cfg, 1000)
 	t.Cleanup(func() {
@@ -526,9 +526,8 @@ func TestRemoteTrackingAndFlushWaitersAreBounded(t *testing.T) {
 		t.Fatalf("transaction capacity error = %v", err)
 	}
 	mgr.completeRemoteTransaction(first, entity.RemoteCommitStatus{TransactionID: first, State: entity.RemoteCommitCommitted})
-	time.Sleep(2 * time.Millisecond)
 	if err := mgr.trackRemoteTransaction(second); err != nil {
-		t.Fatalf("expired transaction was not pruned: %v", err)
+		t.Fatalf("completed transaction cache did not yield capacity: %v", err)
 	}
 
 	waitCtx, cancelWait := context.WithCancel(context.Background())

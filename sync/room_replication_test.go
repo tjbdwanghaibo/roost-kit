@@ -187,6 +187,37 @@ func TestRoomReplicationUnregisterRequiresNoSubscribers(t *testing.T) {
 	}
 }
 
+func TestRoomReplicationEnforcesRoomLimitsAndReleasesSequenceState(t *testing.T) {
+	recorder := &recordingRoomFrameSink{}
+	room, err := NewRoomReplication(14, recorder, RoomReplicationConfig{MaxSubjects: 1, MaxSubscribers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := room.RegisterSubject(testRoomState(501, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := room.RegisterSubject(testRoomState(502, nil)); !errors.Is(err, ErrRoomSubjectLimit) {
+		t.Fatalf("subject limit error = %v", err)
+	}
+	first := coreentitysync.SubscriberRef{Kind: coreentitysync.SubscriberKindPlayer, ID: 1}
+	second := coreentitysync.SubscriberRef{Kind: coreentitysync.SubscriberKindPlayer, ID: 2}
+	if _, err := room.Subscribe(context.Background(), first, 501, entity.SyncProfile{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := room.Subscribe(context.Background(), second, 501, entity.SyncProfile{}); !errors.Is(err, ErrRoomSubscriberLimit) {
+		t.Fatalf("subscriber limit error = %v", err)
+	}
+	if stats := room.Stats(); stats.ActiveSubjects != 1 || stats.ActiveSubscribers != 1 || stats.SessionSequences != 1 {
+		t.Fatalf("active stats = %+v", stats)
+	}
+	if err := room.Unsubscribe(context.Background(), first, 501); err != nil {
+		t.Fatal(err)
+	}
+	if stats := room.Stats(); stats.ActiveSubscribers != 0 || stats.SessionSequences != 0 {
+		t.Fatalf("subscriber lifecycle leaked state: %+v", stats)
+	}
+}
+
 func TestRoomEnvelopeSinkContainsDownstreamPanic(t *testing.T) {
 	recorder := &recordingRoomFrameSink{panic: true}
 	sink := NewRoomEnvelopeSink(recorder)

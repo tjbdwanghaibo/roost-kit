@@ -24,6 +24,22 @@ type SendError struct {
 	Err     error
 }
 
+// AdmissionError identifies the session that made an otherwise atomic batch
+// impossible to admit. Higher layers can evict that slow/failed session and
+// retry the remaining independent recipients.
+type AdmissionError struct {
+	Session core.SessionID
+	Err     error
+}
+
+func (e AdmissionError) Error() string {
+	if e.Err == nil {
+		return "replication transport: batch admission failed"
+	}
+	return fmt.Sprintf("replication transport: session %d admission: %v", e.Session, e.Err)
+}
+func (e AdmissionError) Unwrap() error { return e.Err }
+
 func (sendError SendError) Error() string {
 	if sendError.Err == nil {
 		return "replication transport: unknown send error"
@@ -299,7 +315,7 @@ func (transport *AsyncTransport) AdmitBatch(ctx context.Context, frames []Outbou
 	}()
 	for _, id := range ids {
 		if err := queuesByID[id].admissionErrorLocked(); err != nil {
-			return err
+			return AdmissionError{Session: id, Err: err}
 		}
 	}
 	reliableAdds := make(map[core.SessionID]int)
@@ -311,7 +327,7 @@ func (transport *AsyncTransport) AdmitBatch(ctx context.Context, frames []Outbou
 	for id, additions := range reliableAdds {
 		if len(queuesByID[id].reliable)+additions > transport.config.ReliableQueueSize {
 			transport.stats.reliableBackpressure.Add(1)
-			return ErrReliableBackpressure
+			return AdmissionError{Session: id, Err: ErrReliableBackpressure}
 		}
 	}
 	for _, item := range prepared {

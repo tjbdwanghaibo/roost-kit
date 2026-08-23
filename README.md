@@ -155,6 +155,18 @@ etcd:
 
 配置键由各 Mod 的 `Init` 阶段读取。修改 NATS 可靠投递、etcd 注册重试、Mongo 连接池或 remote entity 同步策略时，请先阅读对应包源码与测试，避免在业务包中复制连接逻辑。
 
+Checkpoint Mod 的 Redis WAL 默认执行强制 AOF admission，不能关闭：
+
+```yaml
+checkpoint:
+  wal:
+    durable_timeout: 5s
+    aof_timeout: 3s
+    aof_replicas: 1
+```
+
+Redis 必须为 7.2+ 并开启 AOF。Kit 会在启动阶段用同一物理连接执行探针写入和 `WAITAOF`，local fsync 固定要求 1，`aof_replicas` 决定还需多少副本确认；任一阈值未满足即启动失败。当前生产接入支持单主或 Sentinel，拒绝无法保证 Lua 与 `WAITAOF` 同连接同分片的 Redis Cluster。
+
 ### 依赖关系与启停规则
 
 - 需要 Redis 的可靠 NATS bus，必须同时注册 `redis.NewRedisMod()` 与 `nats.NewNatsMod(...)`。

@@ -13,15 +13,29 @@ import (
 )
 
 type recordingAtomicTransport struct {
-	err     error
-	batches [][]kit.OutboundFrame
+	err         error
+	slowSession core.SessionID
+	removed     []core.SessionID
+	batches     [][]kit.OutboundFrame
 }
 
 func (transport *recordingAtomicTransport) AdmitBatch(_ context.Context, frames []kit.OutboundFrame) error {
 	copyOfFrames := make([]kit.OutboundFrame, len(frames))
 	copy(copyOfFrames, frames)
 	transport.batches = append(transport.batches, copyOfFrames)
+	if transport.slowSession != 0 {
+		for _, frame := range frames {
+			if frame.Session == transport.slowSession {
+				return kit.AdmissionError{Session: transport.slowSession, Err: kit.ErrReliableBackpressure}
+			}
+		}
+	}
 	return transport.err
+}
+
+func (transport *recordingAtomicTransport) RemoveSession(session core.SessionID) bool {
+	transport.removed = append(transport.removed, session)
+	return true
 }
 
 func TestRoomTransportSinkRoutesLifecycleAndState(t *testing.T) {
@@ -176,6 +190,54 @@ func TestRoomTransportSinkBaselinesAreSessionScoped(t *testing.T) {
 	}
 	if err := sink.AdmitRoomFrames(context.Background(), []RoomFrame{delta}); !errors.Is(err, ErrRoomSubjectBaseline) {
 		t.Fatalf("session without snapshot inherited another session baseline: %v", err)
+	}
+}
+
+func TestRoomTransportSinkEvictsSlowSubscriberWithoutBlockingRoom(t *testing.T) {
+	transport := &recordingAtomicTransport{}
+	sink, err := NewRoomTransportSink(RoomTransportSinkConfig{
+		Transport: transport,
+		Sessions: RoomSessionResolverFunc(func(_ context.Context, subscriber coreentitysync.SubscriberRef) (core.SessionID, error) {
+			return core.SessionID(subscriber.ID), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	room, err := NewRoomReplication(15, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := testRoomState(601, nil)
+	if err := room.RegisterSubject(state); err != nil {
+		t.Fatal(err)
+	}
+	for id := int64(1); id <= 2; id++ {
+		if _, err := room.Subscribe(context.Background(), coreentitysync.SubscriberRef{ID: id}, 601, entity.SyncProfile{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	transport.slowSession = 2
+	state.MarkDirty(1)
+	if err := room.FlushSubject(context.Background(), 601); err != nil {
+		t.Fatalf("healthy recipient was blocked by slow subscriber: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for room.Stats().ActiveSubscribers != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if stats := room.Stats(); stats.ActiveSubscribers != 1 {
+		t.Fatalf("slow subscriber was not removed: %+v", stats)
+	}
+	if stats := sink.Stats(); stats.SlowConsumerEvictions != 1 || stats.EvictedRoomSessions != 0 {
+		t.Fatalf("sink lifecycle stats = %+v", stats)
+	}
+	if len(transport.removed) != 1 || transport.removed[0] != 2 {
+		t.Fatalf("removed sessions = %+v", transport.removed)
+	}
+	last := transport.batches[len(transport.batches)-1]
+	if len(last) != 1 || last[0].Session != 1 {
+		t.Fatalf("retry batch did not isolate healthy session: %+v", last)
 	}
 }
 

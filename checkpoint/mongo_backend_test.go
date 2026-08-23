@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	corecheckpoint "github.com/tjbdwanghaibo/cube-core/checkpoint"
 	fmongo "github.com/tjbdwanghaibo/cube-core/mongo"
@@ -30,14 +31,30 @@ type checkpointCollectionFake struct {
 	matched    int64
 	bulkCalls  int
 	upsertErrs map[int64]error
+	versions   map[int64]uint64
 	raw        [][]byte
+	lastFilter any
+	lastUpdate any
+	findFilter any
+	indexes    []fmongo.IndexModel
 }
 
 func (c *checkpointCollectionFake) InsertOne(context.Context, any) (string, error) { panic("unused") }
 func (c *checkpointCollectionFake) InsertMany(context.Context, []any) ([]string, error) {
 	panic("unused")
 }
-func (c *checkpointCollectionFake) FindOne(context.Context, any, any) error { panic("unused") }
+func (c *checkpointCollectionFake) FindOne(_ context.Context, filter any, result any) error {
+	id := filter.(bson.M)["_id"].(int64)
+	version, ok := c.versions[id]
+	if !ok {
+		return fmongo.ErrNotFound
+	}
+	raw, err := bson.Marshal(bson.M{"_id": id, "_version": version})
+	if err != nil {
+		return err
+	}
+	return bson.Unmarshal(raw, result)
+}
 func (c *checkpointCollectionFake) Find(context.Context, any, any, ...fmongo.FindOption) error {
 	panic("unused")
 }
@@ -52,7 +69,9 @@ func (c *checkpointCollectionFake) ReplaceOne(context.Context, any, any) (*fmong
 }
 func (c *checkpointCollectionFake) DeleteOne(context.Context, any) (int64, error)  { panic("unused") }
 func (c *checkpointCollectionFake) DeleteMany(context.Context, any) (int64, error) { return 0, nil }
-func (c *checkpointCollectionFake) FindOneAndUpdate(_ context.Context, filter any, _ any, _ any, _ ...fmongo.FindOneAndUpdateOption) error {
+func (c *checkpointCollectionFake) FindOneAndUpdate(_ context.Context, filter any, update any, _ any, _ ...fmongo.FindOneAndUpdateOption) error {
+	c.lastFilter = filter
+	c.lastUpdate = update
 	id := filter.(bson.M)["_id"].(int64)
 	return c.upsertErrs[id]
 }
@@ -68,10 +87,13 @@ func (c *checkpointCollectionFake) BulkWrite(_ context.Context, models []fmongo.
 	c.bulkCalls++
 	return &fmongo.BulkWriteResult{MatchedCount: c.matched}, nil
 }
-func (c *checkpointCollectionFake) EnsureIndexes(context.Context, []fmongo.IndexModel) error {
+
+func (c *checkpointCollectionFake) EnsureIndexes(_ context.Context, indexes []fmongo.IndexModel) error {
+	c.indexes = append([]fmongo.IndexModel(nil), indexes...)
 	return nil
 }
-func (c *checkpointCollectionFake) StreamFind(_ context.Context, _ any, consume func([]byte) error, _ ...fmongo.FindOption) error {
+func (c *checkpointCollectionFake) StreamFind(_ context.Context, filter any, consume func([]byte) error, _ ...fmongo.FindOption) error {
+	c.findFilter = filter
 	for _, raw := range c.raw {
 		if err := consume(raw); err != nil {
 			return err
@@ -90,7 +112,7 @@ func checkpointBSON(t *testing.T, id int64) []byte {
 }
 
 func TestMongoBackendBulkSaveFastPathAndExactFallback(t *testing.T) {
-	collection := &checkpointCollectionFake{matched: 2, upsertErrs: map[int64]error{}}
+	collection := &checkpointCollectionFake{matched: 2, upsertErrs: map[int64]error{}, versions: map[int64]uint64{}}
 	backend, err := NewMongoBackend(&checkpointMongoFake{db: &checkpointDatabaseFake{coll: collection}}, MongoBackendConfig{DefaultDatabase: "game", ServerID: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +128,7 @@ func TestMongoBackendBulkSaveFastPathAndExactFallback(t *testing.T) {
 
 	collection.matched = 0
 	collection.upsertErrs[2] = fmongo.ErrDuplicateKey
+	collection.versions[2] = 1
 	results, err = backend.BulkSave(context.Background(), ops)
 	if err != nil || !results[0].OK || !results[1].VersionConflict {
 		t.Fatalf("fallback results=%+v err=%v", results, err)
@@ -136,5 +159,54 @@ func TestMongoBackendRejectsUnsafePatchPath(t *testing.T) {
 	op := corecheckpoint.SaveOp{ID: 1, Version: 1, Mode: corecheckpoint.SaveModePatch, Patch: corecheckpoint.PersistPatch{Set: map[string]any{"profile.$bad": 1}}}
 	if _, err := patchUpdate(op); err == nil {
 		t.Fatal("unsafe patch path was accepted")
+	}
+}
+
+func TestMongoBackendTombstonePreventsDelayedSaveResurrection(t *testing.T) {
+	collection := &checkpointCollectionFake{upsertErrs: map[int64]error{}, versions: map[int64]uint64{}}
+	backend, err := NewMongoBackend(&checkpointMongoFake{db: &checkpointDatabaseFake{coll: collection}}, MongoBackendConfig{DefaultDatabase: "game"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.BulkRemove(context.Background(), corecheckpoint.RemoveOp{Collection: "players", Items: []corecheckpoint.RemoveItem{{ID: 7, Version: 9}}}); err != nil {
+		t.Fatal(err)
+	}
+	update := collection.lastUpdate.(bson.M)
+	set := update["$set"].(bson.M)
+	if set["_version"] != uint64(9) || set["_deleted"] != true {
+		t.Fatalf("tombstone update = %+v", update)
+	}
+
+	// Simulate the persisted tombstone colliding with an older save's upsert.
+	collection.upsertErrs[7] = fmongo.ErrDuplicateKey
+	collection.versions[7] = 9
+	results, err := backend.BulkSave(context.Background(), []corecheckpoint.SaveOp{{
+		Collection: "players", ID: 7, Version: 8, Data: checkpointBSON(t, 7),
+	}})
+	if err != nil || len(results) != 1 || !results[0].VersionConflict || results[0].OK {
+		t.Fatalf("delayed save results=%+v err=%v", results, err)
+	}
+}
+
+func TestMongoBackendInfrastructureAndLoadsExcludeTombstones(t *testing.T) {
+	collection := &checkpointCollectionFake{upsertErrs: map[int64]error{}, versions: map[int64]uint64{}}
+	backend, err := NewMongoBackend(&checkpointMongoFake{db: &checkpointDatabaseFake{coll: collection}}, MongoBackendConfig{
+		DefaultDatabase: "game", TransactionReceiptTTL: 48 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.EnsureInfrastructure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(collection.indexes) != 1 || collection.indexes[0].TTL != int32((48*time.Hour)/time.Second) {
+		t.Fatalf("receipt indexes = %+v", collection.indexes)
+	}
+	if err := backend.StreamLoad(context.Background(), corecheckpoint.LoadOp{Collection: "players", Filter: map[string]any{"zone": 3}}, func(corecheckpoint.RawDoc) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	filter, ok := collection.findFilter.(bson.M)
+	if !ok || filter["$and"] == nil {
+		t.Fatalf("load filter does not exclude tombstones: %#v", collection.findFilter)
 	}
 }

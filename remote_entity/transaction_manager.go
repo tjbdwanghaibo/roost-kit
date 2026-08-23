@@ -26,9 +26,13 @@ type remoteVersionWaiter struct {
 }
 
 type remoteState struct {
-	cache          *entity.RemoteSnapshotCache
-	interests      *remoteInterestRegistry
-	localInterests sync.Map // RemoteSnapshotKey -> *atomic.Int64 expiration
+	cache                 *entity.RemoteSnapshotCache
+	interests             *remoteInterestRegistry
+	localInterestMu       sync.Mutex
+	localInterestLocks    [64]sync.Mutex
+	localInterests        map[entity.RemoteSnapshotKey]int64
+	localInterestOps      atomic.Uint64
+	localInterestCapacity int
 
 	txMu sync.Mutex
 	txs  map[entity.RemoteTransactionID]*remoteTransactionTracker
@@ -68,15 +72,17 @@ func newRemoteState(mgr *remoteEntityManager, cfg *Config, snapshotL2 ...cache.S
 		capacity = 4096
 	}
 	state := &remoteState{
-		txs:         make(map[entity.RemoteTransactionID]*remoteTransactionTracker),
-		txCapacity:  cfg.TransactionTrackLimit,
-		txTTL:       cfg.TransactionTrackTTL,
-		versions:    make(map[int64]uint64),
-		maxVersions: cfg.SnapshotCacheEntries,
-		waiters:     make(map[int64][]remoteVersionWaiter),
-		maxWaiters:  cfg.SnapshotMaxWaiters,
-		interests:   newRemoteInterestRegistry(cfg.SnapshotInterestKeys, cfg.SnapshotInterestSubs),
-		finalizeCtx: finalizeCtx, finalizeCancel: finalizeCancel,
+		txs:                   make(map[entity.RemoteTransactionID]*remoteTransactionTracker),
+		txCapacity:            cfg.TransactionTrackLimit,
+		txTTL:                 cfg.TransactionTrackTTL,
+		versions:              make(map[int64]uint64),
+		maxVersions:           cfg.SnapshotCacheEntries,
+		waiters:               make(map[int64][]remoteVersionWaiter),
+		maxWaiters:            cfg.SnapshotMaxWaiters,
+		interests:             newRemoteInterestRegistry(cfg.SnapshotInterestKeys, cfg.SnapshotInterestSubs),
+		localInterests:        make(map[entity.RemoteSnapshotKey]int64),
+		localInterestCapacity: cfg.SnapshotInterestKeys,
+		finalizeCtx:           finalizeCtx, finalizeCancel: finalizeCancel,
 		finalizeQueue: make(chan deferredRemoteClose, capacity),
 		finalizeSlots: make(chan struct{}, capacity), finalizeDone: make(chan struct{}),
 	}
@@ -488,30 +494,40 @@ func (m *remoteEntityManager) RenewRemoteSnapshotInterest(ctx context.Context, k
 		return entity.ErrRemoteRejected
 	}
 	ttl := m.cfg.SnapshotInterestTTL
-	interest := entity.RemoteSnapshotInterest{ConsumerSID: m.localSid, Key: key, ExpiresAt: time.Now().Add(ttl).UnixNano()}
-	expires := &atomic.Int64{}
-	actual, loaded := m.remote.localInterests.LoadOrStore(key, expires)
-	expires = actual.(*atomic.Int64)
 	now := time.Now().UnixNano()
-	for {
-		current := expires.Load()
-		if loaded && current-now > (ttl/2).Nanoseconds() {
-			return nil
-		}
-		if expires.CompareAndSwap(current, interest.ExpiresAt) {
-			break
-		}
-		loaded = true
+	interest := entity.RemoteSnapshotInterest{ConsumerSID: m.localSid, Key: key, ExpiresAt: now + ttl.Nanoseconds()}
+	stripe := &m.remote.localInterestLocks[uint64(key.EntityID)%uint64(len(m.remote.localInterestLocks))]
+	stripe.Lock()
+	defer stripe.Unlock()
+	m.remote.localInterestMu.Lock()
+	current, loaded := m.remote.localInterests[key]
+	if loaded && current-now > (ttl/2).Nanoseconds() {
+		m.remote.localInterestMu.Unlock()
+		return nil
 	}
+	if !loaded && m.remote.localInterestCapacity > 0 && len(m.remote.localInterests) >= m.remote.localInterestCapacity {
+		m.pruneLocalInterestsLocked(now)
+		if len(m.remote.localInterests) >= m.remote.localInterestCapacity {
+			m.remote.localInterestMu.Unlock()
+			return entity.ErrRemoteOverloaded
+		}
+	}
+	m.remote.localInterests[key] = interest.ExpiresAt
+	m.remote.localInterestMu.Unlock()
 	if err := m.remote.interests.renew(interest); err != nil {
-		m.remote.localInterests.Delete(key)
+		m.rollbackLocalInterest(key, interest.ExpiresAt)
 		return err
 	}
 	if publisher, ok := m.syncer.(remoteInterestPublisher); ok {
 		if err := publisher.PublishRemoteInterest(ctx, interest, false); err != nil {
-			m.remote.localInterests.Delete(key)
+			m.rollbackLocalInterest(key, interest.ExpiresAt)
 			return err
 		}
+	}
+	if m.remote.localInterestOps.Add(1)&1023 == 0 {
+		m.remote.localInterestMu.Lock()
+		m.pruneLocalInterestsLocked(now)
+		m.remote.localInterestMu.Unlock()
 	}
 	return nil
 }
@@ -521,7 +537,12 @@ func (m *remoteEntityManager) ReleaseRemoteSnapshotInterest(ctx context.Context,
 		return entity.ErrRemoteRejected
 	}
 	interest := entity.RemoteSnapshotInterest{ConsumerSID: m.localSid, Key: key, ExpiresAt: time.Now().UnixNano()}
-	m.remote.localInterests.Delete(key)
+	stripe := &m.remote.localInterestLocks[uint64(key.EntityID)%uint64(len(m.remote.localInterestLocks))]
+	stripe.Lock()
+	defer stripe.Unlock()
+	m.remote.localInterestMu.Lock()
+	delete(m.remote.localInterests, key)
+	m.remote.localInterestMu.Unlock()
 	m.remote.interests.release(key, m.localSid)
 	if publisher, ok := m.syncer.(remoteInterestPublisher); ok {
 		return publisher.PublishRemoteInterest(ctx, interest, true)
@@ -611,12 +632,29 @@ func (m *remoteEntityManager) trackRemoteTransaction(id entity.RemoteTransaction
 		if m.remote.txCapacity > 0 && len(m.remote.txs) >= m.remote.txCapacity {
 			m.pruneRemoteTransactionsLocked(time.Now().UnixNano())
 			if len(m.remote.txs) >= m.remote.txCapacity {
+				m.evictOldestClosedRemoteTransactionLocked()
+			}
+			if len(m.remote.txs) >= m.remote.txCapacity {
 				return entity.ErrRemoteOverloaded
 			}
 		}
 		m.remote.txs[id] = &remoteTransactionTracker{done: make(chan struct{}), status: entity.RemoteCommitStatus{TransactionID: id, State: entity.RemoteCommitAdmitted}}
 	}
 	return nil
+}
+
+func (m *remoteEntityManager) evictOldestClosedRemoteTransactionLocked() {
+	var oldestID entity.RemoteTransactionID
+	oldestAt := int64(^uint64(0) >> 1)
+	found := false
+	for id, tracker := range m.remote.txs {
+		if tracker.closed && tracker.closedAt > 0 && tracker.closedAt < oldestAt {
+			oldestID, oldestAt, found = id, tracker.closedAt, true
+		}
+	}
+	if found {
+		delete(m.remote.txs, oldestID)
+	}
 }
 
 func (m *remoteEntityManager) pruneRemoteTransactionsLocked(now int64) {
@@ -638,6 +676,17 @@ func (m *remoteEntityManager) completeRemoteTransaction(id entity.RemoteTransact
 	m.remote.txMu.Lock()
 	tracker := m.remote.txs[id]
 	if tracker == nil {
+		if m.remote.txCapacity > 0 && len(m.remote.txs) >= m.remote.txCapacity {
+			m.pruneRemoteTransactionsLocked(time.Now().UnixNano())
+			if len(m.remote.txs) >= m.remote.txCapacity {
+				m.evictOldestClosedRemoteTransactionLocked()
+			}
+			if len(m.remote.txs) >= m.remote.txCapacity {
+				m.remote.txMu.Unlock()
+				obs.IncCounter("remote_entity_transaction_tracker_drop_total", nil, 1)
+				return
+			}
+		}
 		tracker = &remoteTransactionTracker{done: make(chan struct{})}
 		m.remote.txs[id] = tracker
 	}
@@ -649,6 +698,27 @@ func (m *remoteEntityManager) completeRemoteTransaction(id entity.RemoteTransact
 		close(tracker.done)
 	}
 	m.remote.txMu.Unlock()
+}
+
+func (m *remoteEntityManager) rollbackLocalInterest(key entity.RemoteSnapshotKey, expiresAt int64) {
+	if m == nil || m.remote == nil {
+		return
+	}
+	m.remote.localInterestMu.Lock()
+	if m.remote.localInterests[key] == expiresAt {
+		delete(m.remote.localInterests, key)
+		m.remote.interests.release(key, m.localSid)
+	}
+	m.remote.localInterestMu.Unlock()
+}
+
+func (m *remoteEntityManager) pruneLocalInterestsLocked(now int64) {
+	for key, expiresAt := range m.remote.localInterests {
+		if expiresAt <= now {
+			delete(m.remote.localInterests, key)
+			m.remote.interests.release(key, m.localSid)
+		}
+	}
 }
 
 func (m *remoteEntityManager) waitRemoteTransaction(ctx context.Context, id entity.RemoteTransactionID) (entity.RemoteCommitStatus, error) {

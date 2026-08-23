@@ -23,6 +23,7 @@ type Mod struct {
 	backend    *MongoBackend
 	checkpoint *corecheckpoint.Checkpoint
 	wal        *corecheckpoint.RedisSnapshotWAL
+	redis      fredis.IRedis
 	access     *entity.ManagerAccess
 	repository *EntityRepository
 
@@ -71,6 +72,7 @@ type modConfig struct {
 	submitTimeout       time.Duration
 	loadConcurrency     int
 	maxConcurrentGroups int
+	receiptTTL          time.Duration
 	warnFillRatio       float64
 	retryInterval       time.Duration
 	pendingCapacity     int
@@ -111,10 +113,11 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 		submitTimeout:       durationOr(cfg.GetDuration("checkpoint.submit_timeout"), 50*time.Millisecond),
 		loadConcurrency:     positiveOr(cfg.GetInt("checkpoint.load_concurrency"), 4),
 		maxConcurrentGroups: positiveOr(cfg.GetInt("checkpoint.mongo_max_concurrent_groups"), 8),
+		receiptTTL:          durationOr(cfg.GetDuration("checkpoint.transaction_receipt_ttl"), 30*24*time.Hour),
 		warnFillRatio:       cfg.GetFloat64("checkpoint.health_warn_fill_ratio"),
 		retryInterval:       durationOr(cfg.GetDuration("checkpoint.admission_retry_interval"), 100*time.Millisecond),
 		pendingCapacity:     positiveOr(cfg.GetInt("checkpoint.admission_pending_capacity"), 10000),
-		walDurableTimeout:   durationOr(cfg.GetDuration("checkpoint.wal.durable_timeout"), 50*time.Millisecond),
+		walDurableTimeout:   durationOr(cfg.GetDuration("checkpoint.wal.durable_timeout"), 5*time.Second),
 		walConfig: corecheckpoint.RedisSnapshotWALConfig{
 			Prefix:          valueOr(cfg.GetString("checkpoint.wal.prefix"), "roost:checkpoint:wal"),
 			Shards:          positiveOr(cfg.GetInt("checkpoint.wal.shards"), 16),
@@ -122,6 +125,10 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 			QueueCap:        positiveOr(cfg.GetInt("checkpoint.wal.queue_capacity"), 4096),
 			TTL:             cfg.GetDuration("checkpoint.wal.ttl"),
 			ReplayBatchSize: positiveOr(cfg.GetInt("checkpoint.wal.replay_batch_size"), 200),
+			RequireAOF:      true,
+			AOFLocal:        1,
+			AOFReplicas:     nonNegative(cfg.GetInt("checkpoint.wal.aof_replicas")),
+			AOFTimeout:      durationOr(cfg.GetDuration("checkpoint.wal.aof_timeout"), 3*time.Second),
 		},
 	}
 	if m.cfg.warnFillRatio <= 0 || m.cfg.warnFillRatio >= 1 {
@@ -129,6 +136,9 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 	}
 	if m.cfg.retryMaxBack < m.cfg.retryBackoff {
 		return fmt.Errorf("checkpoint mod: retry_max_backoff must be >= retry_backoff")
+	}
+	if m.cfg.walDurableTimeout <= m.cfg.walConfig.AOFTimeout {
+		return fmt.Errorf("checkpoint mod: wal durable_timeout must be greater than aof_timeout")
 	}
 	return nil
 }
@@ -151,6 +161,7 @@ func (m *Mod) Provide(registry *app.Registry) error {
 	}
 	backend, err := NewMongoBackend(mongoClient, MongoBackendConfig{
 		DefaultDatabase: m.cfg.database, ServerID: m.cfg.sid, MaxConcurrentGroups: m.cfg.maxConcurrentGroups,
+		TransactionReceiptTTL: m.cfg.receiptTTL,
 	})
 	if err != nil {
 		return err
@@ -169,6 +180,7 @@ func (m *Mod) Provide(registry *app.Registry) error {
 		m.unregisterLoader = unregister
 	}
 	m.wal = corecheckpoint.NewRedisSnapshotWAL(redisClient, m.cfg.walConfig)
+	m.redis = redisClient
 	m.checkpoint = corecheckpoint.New(backend,
 		corecheckpoint.WithJournalCap(m.cfg.journalCap),
 		corecheckpoint.WithFlushWorkers(m.cfg.flushWorkers),
@@ -200,6 +212,25 @@ func (m *Mod) Provide(registry *app.Registry) error {
 	return nil
 }
 
+func validateRedisWALDurability(parent context.Context, client fredis.IRedis, cfg corecheckpoint.RedisSnapshotWALConfig, deadline time.Duration) error {
+	durable, ok := client.(fredis.DurableEvaler)
+	if !ok {
+		return errors.New("redis client does not support same-connection WAITAOF")
+	}
+	ctx, cancel := context.WithTimeout(parent, deadline)
+	defer cancel()
+	key := fmt.Sprintf("%s:{aof-probe}:%d:%d", cfg.Prefix, time.Now().UnixNano(), cfg.AOFReplicas)
+	const probeScript = `return redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])`
+	_, local, replicas, err := durable.EvalDurable(ctx, probeScript, []string{key}, cfg.AOFLocal, cfg.AOFReplicas, cfg.AOFTimeout, "1", 1000)
+	if err != nil {
+		return err
+	}
+	if local < int64(cfg.AOFLocal) || replicas < int64(cfg.AOFReplicas) {
+		return fmt.Errorf("AOF threshold not met: local=%d/%d replicas=%d/%d", local, cfg.AOFLocal, replicas, cfg.AOFReplicas)
+	}
+	return nil
+}
+
 func (m *Mod) Backend() *MongoBackend {
 	if m == nil {
 		return nil
@@ -218,7 +249,15 @@ func (m *Mod) Start() error {
 	if m == nil || m.checkpoint == nil {
 		return fmt.Errorf("checkpoint mod: not provided")
 	}
-	if err := m.checkpoint.Start(context.Background()); err != nil {
+	startupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := validateRedisWALDurability(startupCtx, m.redis, m.cfg.walConfig, m.cfg.walDurableTimeout); err != nil {
+		return fmt.Errorf("checkpoint mod: redis WAL durability validation failed: %w", err)
+	}
+	if err := m.backend.EnsureInfrastructure(startupCtx); err != nil {
+		return fmt.Errorf("checkpoint mod: ensure mongo infrastructure: %w", err)
+	}
+	if err := m.checkpoint.Start(startupCtx); err != nil {
 		return err
 	}
 	retryCtx, cancel := context.WithCancel(context.Background())
@@ -503,6 +542,13 @@ func positiveOr(value, fallback int) int {
 		return value
 	}
 	return fallback
+}
+
+func nonNegative(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func durationOr(value, fallback time.Duration) time.Duration {
