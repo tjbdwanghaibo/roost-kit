@@ -297,7 +297,13 @@ func (m *Mod) Start() error {
 	return nil
 }
 
-func (m *Mod) Stop() { _ = m.StopWithContext(context.Background()) }
+func (m *Mod) Stop() {
+	// Bound the shutdown flush: if the durability watermark can no longer
+	// advance (fenced WAL), an unbounded flush would hang shutdown forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = m.StopWithContext(ctx)
+}
 
 func (m *Mod) StopWithContext(ctx context.Context) error {
 	if m == nil {
