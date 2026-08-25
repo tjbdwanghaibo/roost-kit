@@ -35,7 +35,6 @@ type Mod struct {
 
 	retryMu         sync.Mutex
 	pendingSaves    map[retrySaveKey]corecheckpoint.SaveItem
-	pendingDeletes  map[retrySaveKey]corecheckpoint.SaveItem
 	retryWake       chan struct{}
 	retryCancel     context.CancelFunc
 	retryWG         sync.WaitGroup
@@ -196,7 +195,6 @@ func (m *Mod) Provide(registry *app.Registry) error {
 		corecheckpoint.WithSnapshotWALDurableTimeout(m.cfg.walDurableTimeout),
 	)
 	m.pendingSaves = make(map[retrySaveKey]corecheckpoint.SaveItem)
-	m.pendingDeletes = make(map[retrySaveKey]corecheckpoint.SaveItem)
 	m.retryWake = make(chan struct{}, 1)
 	// Register the owning capability rather than the inner Checkpoint. Flush on
 	// Mod also drains admission retries, so callers cannot accidentally report
@@ -273,7 +271,7 @@ func (m *Mod) Start() error {
 		_ = m.checkpoint.Stop(context.Background())
 		return err
 	}
-	m.unregisterRemove, err = m.access.RegisterOnEntityRemoveFromDB(m.onEntityRemove)
+	m.unregisterRemove, err = m.access.RegisterDeleteAdmitter(m.admitEntityDelete)
 	if err != nil {
 		m.unregisterRelease()
 		m.unregisterRelease = nil
@@ -357,23 +355,37 @@ func (m *Mod) onEntityRelease(ent entity.IThreadSafeEntity) {
 	}
 }
 
-func (m *Mod) onEntityRemove(ent entity.IThreadSafeEntity) {
-	if ent == nil || !ent.AutoPersist() || entity.IsEntityKindRemoteManaged(ent.GetEntityKind()) {
-		return
+func (m *Mod) admitEntityDelete(ctx context.Context, ent entity.IThreadSafeEntity) error {
+	if ent == nil || !ent.AutoPersist() {
+		return nil
+	}
+	if entity.IsEntityKindRemoteManaged(ent.GetEntityKind()) {
+		return fmt.Errorf("checkpoint: remote-managed entity %d must be deleted through a remote transaction", ent.ID())
 	}
 	remover, ok := ent.(corecheckpoint.EntityRemoveSnapshotter)
 	if !ok {
 		m.removeErrors.Add(1)
-		return
+		err := fmt.Errorf("checkpoint: entity %d does not provide a versioned delete snapshot", ent.ID())
+		m.fenceAdmission(err)
+		return err
 	}
-	if items := remover.RemoveSnapshot(); len(items) > 0 {
-		if !m.checkpoint.SubmitRemoveItems(items) {
-			m.removeErrors.Add(1)
-			m.enqueueDeleteRetry(items)
-		} else {
-			m.clearDeleteRetry(items)
-		}
+	items := remover.RemoveSnapshot()
+	if len(items) == 0 {
+		m.removeErrors.Add(1)
+		err := fmt.Errorf("checkpoint: entity %d produced an empty delete snapshot", ent.ID())
+		m.fenceAdmission(err)
+		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !m.checkpoint.SubmitRemoveItems(items) {
+		m.removeErrors.Add(1)
+		err := fmt.Errorf("checkpoint: durable delete admission is indeterminate for entity %d", ent.ID())
+		m.fenceAdmission(err)
+		return err
+	}
+	return nil
 }
 
 func (m *Mod) checkHealth(context.Context) health.Result {
@@ -423,24 +435,6 @@ func (m *Mod) enqueueSaveRetry(items []corecheckpoint.SaveItem) {
 	m.signalRetry()
 }
 
-func (m *Mod) enqueueDeleteRetry(items []corecheckpoint.SaveItem) {
-	m.retryMu.Lock()
-	overloaded := false
-	for _, item := range items {
-		key := retryKey(item)
-		if _, exists := m.pendingDeletes[key]; !exists && m.pendingRetryCountLocked() >= m.cfg.pendingCapacity {
-			overloaded = true
-			continue
-		}
-		m.pendingDeletes[key] = item
-	}
-	m.retryMu.Unlock()
-	if overloaded {
-		m.fenceAdmission(fmt.Errorf("checkpoint: delete admission retry capacity exceeded: capacity=%d", m.cfg.pendingCapacity))
-	}
-	m.signalRetry()
-}
-
 func (m *Mod) clearSaveRetry(items []corecheckpoint.SaveItem) {
 	m.retryMu.Lock()
 	for _, item := range items {
@@ -452,23 +446,15 @@ func (m *Mod) clearSaveRetry(items []corecheckpoint.SaveItem) {
 	m.retryMu.Unlock()
 }
 
-func (m *Mod) clearDeleteRetry(items []corecheckpoint.SaveItem) {
-	m.retryMu.Lock()
-	for _, item := range items {
-		delete(m.pendingDeletes, retryKey(item))
-	}
-	m.retryMu.Unlock()
-}
-
 func (m *Mod) pendingCount() int {
 	m.retryMu.Lock()
-	count := len(m.pendingSaves) + len(m.pendingDeletes)
+	count := len(m.pendingSaves)
 	m.retryMu.Unlock()
 	return count
 }
 
 func (m *Mod) pendingRetryCountLocked() int {
-	return len(m.pendingSaves) + len(m.pendingDeletes)
+	return len(m.pendingSaves)
 }
 
 func (m *Mod) fenceAdmission(err error) {
@@ -508,12 +494,8 @@ func (m *Mod) retryAdmission(ctx context.Context) error {
 	}
 	m.retryMu.Lock()
 	saves := make(map[retrySaveKey]corecheckpoint.SaveItem, len(m.pendingSaves))
-	deletes := make(map[retrySaveKey]corecheckpoint.SaveItem, len(m.pendingDeletes))
 	for key, item := range m.pendingSaves {
 		saves[key] = item
-	}
-	for key, item := range m.pendingDeletes {
-		deletes[key] = item
 	}
 	m.retryMu.Unlock()
 	for key, item := range saves {
@@ -524,14 +506,6 @@ func (m *Mod) retryAdmission(ctx context.Context) error {
 		if current, ok := m.pendingSaves[key]; ok && current.Version <= item.Version {
 			delete(m.pendingSaves, key)
 		}
-		m.retryMu.Unlock()
-	}
-	for key, item := range deletes {
-		if !m.checkpoint.SubmitRemoveItems([]corecheckpoint.SaveItem{item}) {
-			continue
-		}
-		m.retryMu.Lock()
-		delete(m.pendingDeletes, key)
 		m.retryMu.Unlock()
 	}
 	return nil

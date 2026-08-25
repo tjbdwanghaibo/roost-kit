@@ -26,6 +26,8 @@ var (
 	ErrRoomSubjectRetiring       = errors.New("sync: room subject is retiring")
 	ErrRoomSubjectLimit          = errors.New("sync: room subject limit exceeded")
 	ErrRoomSubscriberLimit       = errors.New("sync: room subscriber limit exceeded")
+	ErrRoomGlobalSubjectLimit    = errors.New("sync: global room subject limit exceeded")
+	ErrRoomGlobalSubscriberLimit = errors.New("sync: global room subscriber limit exceeded")
 )
 
 const DefaultRoomReplicationInterval = 50 * time.Millisecond
@@ -362,6 +364,7 @@ type RoomReplication struct {
 	coordinator  *coreentitysync.SubscriptionCoordinator
 
 	mu             stdsync.RWMutex
+	lifecycleMu    stdsync.RWMutex
 	subjects       map[int64]*entity.SubjectSyncState
 	subscribers    map[coreentitysync.SubscriberRef]int
 	maxSubjects    int
@@ -376,13 +379,20 @@ type RoomReplication struct {
 	dirty    map[int64]struct{}
 	retiring map[int64]struct{}
 
-	flushOps      [64]stdsync.Mutex
-	flushFailures atomic.Uint64
+	flushOps               [64]stdsync.Mutex
+	flushFailures          atomic.Uint64
+	unregisterSlowConsumer func()
+	budget                 *roomResourceBudget
+	onActivity             func()
+	closeMu                stdsync.Mutex
+	closed                 bool
 }
 
 type RoomReplicationConfig struct {
 	MaxSubjects    int
 	MaxSubscribers int
+	budget         *roomResourceBudget
+	onActivity     func()
 }
 
 func NewRoomReplication(roomID int64, downstream ReliableRoomFrameSink, configs ...RoomReplicationConfig) (*RoomReplication, error) {
@@ -395,6 +405,8 @@ func NewRoomReplication(roomID int64, downstream ReliableRoomFrameSink, configs 
 	envelopeSink := NewRoomEnvelopeSink(downstream)
 	config := RoomReplicationConfig{MaxSubjects: 100, MaxSubscribers: 100}
 	if len(configs) > 0 {
+		config.budget = configs[0].budget
+		config.onActivity = configs[0].onActivity
 		if configs[0].MaxSubjects > 0 {
 			config.MaxSubjects = configs[0].MaxSubjects
 		}
@@ -410,19 +422,27 @@ func NewRoomReplication(roomID int64, downstream ReliableRoomFrameSink, configs 
 		maxSubjects: config.MaxSubjects, maxSubscribers: config.MaxSubscribers,
 		dirty:    make(map[int64]struct{}),
 		retiring: make(map[int64]struct{}),
+		budget:   config.budget, onActivity: config.onActivity,
 	}
-	if lifecycle, ok := downstream.(interface{ SetRoomSlowConsumerHandler(func(RoomSlowConsumer)) }); ok {
-		lifecycle.SetRoomSlowConsumerHandler(replication.handleSlowConsumer)
+	if lifecycle, ok := downstream.(interface {
+		RegisterRoomSlowConsumerHandler(int64, func(context.Context, RoomSlowConsumer)) (func(), error)
+	}); ok {
+		unregister, err := lifecycle.RegisterRoomSlowConsumerHandler(roomID, replication.handleSlowConsumer)
+		if err != nil {
+			return nil, err
+		}
+		replication.unregisterSlowConsumer = unregister
 	}
 	return replication, nil
 }
 
-func (r *RoomReplication) handleSlowConsumer(event RoomSlowConsumer) {
+func (r *RoomReplication) handleSlowConsumer(ctx context.Context, event RoomSlowConsumer) {
 	if r == nil || event.RoomID != r.roomID || event.Subscriber.Normalize().Empty() {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	subscriber := event.Subscriber.Normalize()
 	r.mu.RLock()
 	subjectIDs := make([]int64, 0, len(r.subjects))
@@ -441,6 +461,48 @@ func (r *RoomReplication) handleSlowConsumer(event RoomSlowConsumer) {
 	}
 }
 
+// Close stops the room, releases transport baselines and callbacks, and drops
+// all entity references. A closed room is intentionally not restartable.
+func (r *RoomReplication) Close(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	r.closeMu.Lock()
+	defer r.closeMu.Unlock()
+	if r.closed {
+		return nil
+	}
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	err := r.stop(ctx)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if r.unregisterSlowConsumer != nil {
+		r.unregisterSlowConsumer()
+		r.unregisterSlowConsumer = nil
+	}
+	r.envelopeSink.ResetRoom(r.roomID)
+	r.coordinator.Close()
+	r.mu.Lock()
+	if r.budget != nil {
+		r.budget.releaseSubjects(len(r.subjects))
+		r.budget.releaseSubscribers(len(r.subscribers))
+	}
+	for _, state := range r.subjects {
+		state.SetDirtyNotifier(nil)
+	}
+	clear(r.subjects)
+	clear(r.subscribers)
+	r.closed = true
+	r.mu.Unlock()
+	r.dirtyMu.Lock()
+	clear(r.dirty)
+	clear(r.retiring)
+	r.dirtyMu.Unlock()
+	return err
+}
+
 func (r *RoomReplication) RoomID() int64 {
 	if r == nil {
 		return 0
@@ -455,6 +517,11 @@ func (r *RoomReplication) SetDownstream(downstream ReliableRoomFrameSink) error 
 	if downstream == nil {
 		return ErrRoomFrameSinkRequired
 	}
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	if r.isStopped() {
+		return ErrRoomReplicationStopped
+	}
 	r.envelopeSink.SetDownstream(downstream)
 	return nil
 }
@@ -463,6 +530,8 @@ func (r *RoomReplication) RegisterSubject(state *entity.SubjectSyncState) error 
 	if r == nil || state == nil || !state.Enabled() || state.SubjectID() == 0 {
 		return ErrRoomSubjectInvalid
 	}
+	r.lifecycleMu.RLock()
+	defer r.lifecycleMu.RUnlock()
 	subjectID := state.SubjectID()
 	r.mu.Lock()
 	if r.stopped {
@@ -480,13 +549,21 @@ func (r *RoomReplication) RegisterSubject(state *entity.SubjectSyncState) error 
 		r.mu.Unlock()
 		return ErrRoomSubjectLimit
 	}
+	if r.budget != nil && !r.budget.reserveSubject() {
+		r.mu.Unlock()
+		return ErrRoomGlobalSubjectLimit
+	}
 	if err := r.envelopeSink.RegisterSubject(r.roomID, subjectID); err != nil {
+		if r.budget != nil {
+			r.budget.releaseSubject()
+		}
 		r.mu.Unlock()
 		return err
 	}
 	r.subjects[subjectID] = state
 	r.mu.Unlock()
 	state.SetDirtyNotifier(r.markDirty)
+	r.touchActivity()
 	return nil
 }
 
@@ -494,9 +571,14 @@ func (r *RoomReplication) UnregisterSubject(subjectID int64) error {
 	if r == nil || subjectID == 0 {
 		return ErrRoomSubjectInvalid
 	}
+	r.lifecycleMu.RLock()
+	defer r.lifecycleMu.RUnlock()
 	op := r.subjectOp(subjectID)
 	op.Lock()
 	defer op.Unlock()
+	if r.isStopped() {
+		return ErrRoomReplicationStopped
+	}
 	return r.unregisterSubject(subjectID)
 }
 
@@ -517,6 +599,9 @@ func (r *RoomReplication) unregisterSubject(subjectID int64) error {
 	}
 	r.subjects[subjectID].SetDirtyNotifier(nil)
 	delete(r.subjects, subjectID)
+	if r.budget != nil {
+		r.budget.releaseSubject()
+	}
 	r.clearDirty(subjectID)
 	r.clearRetiring(subjectID)
 	return nil
@@ -526,9 +611,14 @@ func (r *RoomReplication) Subscribe(ctx context.Context, subscriber coreentitysy
 	if r == nil || subjectID == 0 {
 		return coreentitysync.Subscription{}, ErrRoomSubjectInvalid
 	}
+	r.lifecycleMu.RLock()
+	defer r.lifecycleMu.RUnlock()
 	op := r.subjectOp(subjectID)
 	op.Lock()
 	defer op.Unlock()
+	if r.isStopped() {
+		return coreentitysync.Subscription{}, ErrRoomReplicationStopped
+	}
 	if r.isRetiring(subjectID) {
 		return coreentitysync.Subscription{}, ErrRoomSubjectRetiring
 	}
@@ -537,12 +627,16 @@ func (r *RoomReplication) Subscribe(ctx context.Context, subscriber coreentitysy
 		return coreentitysync.Subscription{}, err
 	}
 	subscriber = subscriber.Normalize()
-	already := containsRoomSubscriber(r.coordinator.Subscribers(subjectID), subscriber)
+	_, already := r.coordinator.Get(subscriber, subjectID)
 	if !already {
 		r.mu.Lock()
 		if r.subscribers[subscriber] == 0 && len(r.subscribers) >= r.maxSubscribers {
 			r.mu.Unlock()
 			return coreentitysync.Subscription{}, ErrRoomSubscriberLimit
+		}
+		if r.subscribers[subscriber] == 0 && r.budget != nil && !r.budget.reserveSubscriber() {
+			r.mu.Unlock()
+			return coreentitysync.Subscription{}, ErrRoomGlobalSubscriberLimit
 		}
 		r.subscribers[subscriber]++
 		r.mu.Unlock()
@@ -550,6 +644,8 @@ func (r *RoomReplication) Subscribe(ctx context.Context, subscriber coreentitysy
 	subscription, err := r.coordinator.Subscribe(ctx, subscriber, state, profile)
 	if err != nil && !already {
 		r.releaseSubscriber(ctx, subscriber)
+	} else if err == nil {
+		r.touchActivity()
 	}
 	return subscription, err
 }
@@ -558,6 +654,14 @@ func (r *RoomReplication) Subscribe(ctx context.Context, subscriber coreentitysy
 // admits leave frames for current subscribers, and unregisters the subject.
 // Failures remain queued and are retried by the room worker.
 func (r *RoomReplication) RetireSubject(ctx context.Context, subjectID int64) error {
+	if r == nil {
+		return ErrRoomReplicationStopped
+	}
+	r.lifecycleMu.RLock()
+	defer r.lifecycleMu.RUnlock()
+	if r.isStopped() {
+		return ErrRoomReplicationStopped
+	}
 	if _, err := r.subject(subjectID); err != nil {
 		return err
 	}
@@ -576,9 +680,14 @@ func (r *RoomReplication) Unsubscribe(ctx context.Context, subscriber coreentity
 	if r == nil || subjectID == 0 {
 		return ErrRoomSubjectInvalid
 	}
+	r.lifecycleMu.RLock()
+	defer r.lifecycleMu.RUnlock()
 	op := r.subjectOp(subjectID)
 	op.Lock()
 	defer op.Unlock()
+	if r.isStopped() {
+		return ErrRoomReplicationStopped
+	}
 	if _, err := r.subject(subjectID); err != nil {
 		return err
 	}
@@ -604,6 +713,9 @@ func (r *RoomReplication) releaseSubscriber(ctx context.Context, subscriber core
 	released := count == 1
 	r.mu.Unlock()
 	if released {
+		if r.budget != nil {
+			r.budget.releaseSubscriber()
+		}
 		r.envelopeSink.ReleaseSubscriber(ctx, r.roomID, subscriber)
 	}
 }
@@ -618,12 +730,24 @@ func containsRoomSubscriber(items []coreentitysync.Subscription, target coreenti
 }
 
 func (r *RoomReplication) FlushSubject(ctx context.Context, subjectID int64) error {
+	if r == nil {
+		return ErrRoomReplicationStopped
+	}
+	r.lifecycleMu.RLock()
+	defer r.lifecycleMu.RUnlock()
+	if r.isStopped() {
+		return ErrRoomReplicationStopped
+	}
 	state, err := r.subject(subjectID)
 	if err != nil {
 		return err
 	}
 	r.clearDirty(subjectID)
-	return r.flushState(ctx, state)
+	err = r.flushState(ctx, state)
+	if err == nil {
+		r.touchActivity()
+	}
+	return err
 }
 
 // Start enables coalesced asynchronous flushes. The default interval is 50ms
@@ -633,6 +757,8 @@ func (r *RoomReplication) Start(ctx context.Context, interval time.Duration) err
 	if r == nil {
 		return ErrRoomIDInvalid
 	}
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
 	if interval <= 0 {
 		interval = DefaultRoomReplicationInterval
 	}
@@ -664,6 +790,15 @@ func (r *RoomReplication) Stop(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	return r.stop(ctx)
+}
+
+func (r *RoomReplication) stop(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -688,7 +823,7 @@ func (r *RoomReplication) Stop(ctx context.Context) error {
 	doneCh := r.doneCh
 	r.mu.Unlock()
 	if !started {
-		err := r.FlushDirty(ctx)
+		err := r.flushDirty(ctx)
 		r.detachNotifiers()
 		return err
 	}
@@ -709,29 +844,25 @@ func (r *RoomReplication) FlushDirty(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
+	r.lifecycleMu.RLock()
+	defer r.lifecycleMu.RUnlock()
+	if r.isStopped() {
+		return ErrRoomReplicationStopped
+	}
+	return r.flushDirty(ctx)
+}
+
+func (r *RoomReplication) flushDirty(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	ids := r.takeDirty()
 	var flushErrors []error
-	for _, subjectID := range ids {
-		if r.isRetiring(subjectID) {
-			continue
-		}
-		state, err := r.subject(subjectID)
-		if errors.Is(err, ErrRoomSubjectNotRegistered) {
-			continue
-		}
-		if err == nil {
-			err = r.flushState(ctx, state)
-		}
-		if err != nil {
-			r.flushFailures.Add(1)
-			flushErrors = append(flushErrors, fmt.Errorf("subject %d: %w", subjectID, err))
-		}
-		if state != nil && state.PendingDirty() {
-			r.markDirty(state)
-		}
+	if err := r.flushStateBatch(ctx, ids); err != nil {
+		flushErrors = append(flushErrors, err)
 	}
 	for _, subjectID := range r.retirementIDs() {
 		if err := r.retryRetirement(ctx, subjectID); err != nil {
@@ -740,6 +871,81 @@ func (r *RoomReplication) FlushDirty(ctx context.Context) error {
 		}
 	}
 	return errors.Join(flushErrors...)
+}
+
+// flushStateBatch prepares all dirty room subjects under stable subject
+// stripes, then admits them through the coordinator as one global room frame.
+func (r *RoomReplication) flushStateBatch(ctx context.Context, subjectIDs []int64) error {
+	if len(subjectIDs) == 0 {
+		return nil
+	}
+	stripeSet := make(map[int]struct{}, len(subjectIDs))
+	for _, subjectID := range subjectIDs {
+		if !r.isRetiring(subjectID) {
+			stripeSet[int(uint64(subjectID)%uint64(len(r.flushOps)))] = struct{}{}
+		}
+	}
+	stripes := make([]int, 0, len(stripeSet))
+	for stripe := range stripeSet {
+		stripes = append(stripes, stripe)
+	}
+	sort.Ints(stripes)
+	for _, stripe := range stripes {
+		r.flushOps[stripe].Lock()
+	}
+	defer func() {
+		for i := len(stripes) - 1; i >= 0; i-- {
+			r.flushOps[stripes[i]].Unlock()
+		}
+	}()
+
+	prepared := make([]*entity.PreparedSubjectSync, 0, len(subjectIDs))
+	states := make([]*entity.SubjectSyncState, 0, len(subjectIDs))
+	var prepareErrors []error
+	for _, subjectID := range subjectIDs {
+		if r.isRetiring(subjectID) {
+			continue
+		}
+		state, err := r.subject(subjectID)
+		if errors.Is(err, ErrRoomSubjectNotRegistered) {
+			continue
+		}
+		if err != nil {
+			prepareErrors = append(prepareErrors, fmt.Errorf("subject %d: %w", subjectID, err))
+			continue
+		}
+		item, err := state.Prepare(r.coordinator.Profiles(subjectID))
+		if errors.Is(err, entity.ErrSubjectSyncNotDirty) {
+			continue
+		}
+		if err != nil {
+			prepareErrors = append(prepareErrors, fmt.Errorf("subject %d: %w", subjectID, err))
+			if state.PendingDirty() {
+				r.markDirty(state)
+			}
+			continue
+		}
+		prepared = append(prepared, item)
+		states = append(states, state)
+	}
+	if len(prepareErrors) > 0 {
+		r.flushFailures.Add(uint64(len(prepareErrors)))
+	}
+	if len(prepared) > 0 {
+		if err := r.coordinator.DistributeBatch(ctx, prepared); err != nil {
+			r.flushFailures.Add(uint64(len(prepared)))
+			prepareErrors = append(prepareErrors, fmt.Errorf("global frame (%d subjects): %w", len(prepared), err))
+		}
+	}
+	for _, state := range states {
+		if state.PendingDirty() {
+			r.markDirty(state)
+		}
+	}
+	if len(prepared) > 0 && len(prepareErrors) == 0 {
+		r.touchActivity()
+	}
+	return errors.Join(prepareErrors...)
 }
 
 func (r *RoomReplication) Subscribers(subjectID int64) []coreentitysync.Subscription {
@@ -836,6 +1042,23 @@ func (r *RoomReplication) markDirty(state *entity.SubjectSyncState) {
 	r.dirtyMu.Lock()
 	r.dirty[state.SubjectID()] = struct{}{}
 	r.dirtyMu.Unlock()
+	r.touchActivity()
+}
+
+func (r *RoomReplication) touchActivity() {
+	if r != nil && r.onActivity != nil {
+		r.onActivity()
+	}
+}
+
+func (r *RoomReplication) isStopped() bool {
+	if r == nil {
+		return true
+	}
+	r.mu.RLock()
+	stopped := r.stopped
+	r.mu.RUnlock()
+	return stopped
 }
 
 func (r *RoomReplication) retryRetirement(ctx context.Context, subjectID int64) error {
@@ -896,6 +1119,9 @@ func (r *RoomReplication) detachNotifiers() {
 	for _, state := range r.subjects {
 		states = append(states, state)
 	}
+	if r.budget != nil {
+		r.budget.releaseSubscribers(len(r.subscribers))
+	}
 	clear(r.subscribers)
 	r.mu.Unlock()
 	for _, state := range states {
@@ -927,7 +1153,7 @@ func (r *RoomReplication) run(ctx context.Context, interval time.Duration, stopC
 	defer func() {
 		ticker.Stop()
 		flushCtx, cancel := context.WithTimeout(context.Background(), interval)
-		err := r.FlushDirty(flushCtx)
+		err := r.flushDirty(flushCtx)
 		cancel()
 		r.mu.Lock()
 		r.lastError = err
@@ -941,7 +1167,7 @@ func (r *RoomReplication) run(ctx context.Context, interval time.Duration, stopC
 		select {
 		case <-ticker.C:
 			flushCtx, cancel := context.WithTimeout(context.Background(), interval)
-			err := r.FlushDirty(flushCtx)
+			err := r.flushDirty(flushCtx)
 			cancel()
 			r.mu.Lock()
 			r.lastError = err

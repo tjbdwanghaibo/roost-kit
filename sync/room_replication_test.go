@@ -122,6 +122,45 @@ func TestRoomReplicationSharesProfilePayloadAndFrames(t *testing.T) {
 	}
 }
 
+func TestRoomReplicationFlushDirtyBuildsOneGlobalFrame(t *testing.T) {
+	recorder := &recordingRoomFrameSink{}
+	room, err := NewRoomReplication(78, recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := testRoomState(111, nil)
+	second := testRoomState(222, nil)
+	if err := room.RegisterSubject(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := room.RegisterSubject(second); err != nil {
+		t.Fatal(err)
+	}
+	subscriber := coreentitysync.SubscriberRef{Kind: coreentitysync.SubscriberKindPlayer, ID: 1}
+	if _, err := room.Subscribe(context.Background(), subscriber, 111, entity.SyncProfile{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := room.Subscribe(context.Background(), subscriber, 222, entity.SyncProfile{}); err != nil {
+		t.Fatal(err)
+	}
+	recorder.reset()
+	first.MarkDirty(1)
+	second.MarkDirty(2)
+	if err := room.FlushDirty(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	frames := recorder.lastBatch()
+	if len(frames) != 1 || len(frames[0].Entries) != 2 {
+		t.Fatalf("global room frame = %+v", frames)
+	}
+	if frames[0].Entries[0].Update.SubjectID != 111 || frames[0].Entries[1].Update.SubjectID != 222 {
+		t.Fatalf("global room frame order = %+v", frames[0].Entries)
+	}
+	if first.Version() != 1 || second.Version() != 1 || first.PendingDirty() || second.PendingDirty() {
+		t.Fatalf("global frame did not commit every subject")
+	}
+}
+
 func TestRoomReplicationAdmissionRollbackHasNoSequenceGap(t *testing.T) {
 	recorder := &recordingRoomFrameSink{}
 	room, err := NewRoomReplication(8, recorder)

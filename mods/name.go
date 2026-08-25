@@ -35,5 +35,6 @@ const (
 	ModStatsLog                app.ModName = "stats_log"
 	ModConfigData              app.ModName = "config_data"
 	ModNest                    app.ModName = "nest"
+	ModSaga                    app.ModName = "saga"
 	ModEntityRuntime           app.ModName = "entity.runtime"
 )

@@ -19,6 +19,30 @@ type recordingAtomicTransport struct {
 	batches     [][]kit.OutboundFrame
 }
 
+type parallelRoomTransport struct {
+	firstEntered  chan struct{}
+	secondEntered chan struct{}
+	releaseFirst  chan struct{}
+}
+
+type discardAtomicTransport struct{}
+
+func (discardAtomicTransport) AdmitBatch(context.Context, []kit.OutboundFrame) error { return nil }
+
+func (transport *parallelRoomTransport) AdmitBatch(_ context.Context, frames []kit.OutboundFrame) error {
+	if len(frames) != 1 {
+		return errors.New("unexpected batch")
+	}
+	switch frames[0].Session {
+	case 1:
+		close(transport.firstEntered)
+		<-transport.releaseFirst
+	case 2:
+		close(transport.secondEntered)
+	}
+	return nil
+}
+
 func (transport *recordingAtomicTransport) AdmitBatch(_ context.Context, frames []kit.OutboundFrame) error {
 	copyOfFrames := make([]kit.OutboundFrame, len(frames))
 	copy(copyOfFrames, frames)
@@ -238,6 +262,213 @@ func TestRoomTransportSinkEvictsSlowSubscriberWithoutBlockingRoom(t *testing.T) 
 	last := transport.batches[len(transport.batches)-1]
 	if len(last) != 1 || last[0].Session != 1 {
 		t.Fatalf("retry batch did not isolate healthy session: %+v", last)
+	}
+}
+
+func TestRoomTransportSinkKeepsIndependentLifecycleHandlersForSharedRooms(t *testing.T) {
+	transport := &recordingAtomicTransport{}
+	sink, err := NewRoomTransportSink(RoomTransportSinkConfig{
+		Transport: transport,
+		Sessions: RoomSessionResolverFunc(func(_ context.Context, subscriber coreentitysync.SubscriberRef) (core.SessionID, error) {
+			return core.SessionID(subscriber.ID), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sink.Close(context.Background()) }()
+	first, err := NewRoomReplication(21, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewRoomReplication(22, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstState := testRoomState(701, nil)
+	secondState := testRoomState(702, nil)
+	if err := first.RegisterSubject(firstState); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.RegisterSubject(secondState); err != nil {
+		t.Fatal(err)
+	}
+	subscriber := coreentitysync.SubscriberRef{ID: 9}
+	if _, err := first.Subscribe(context.Background(), subscriber, 701, entity.SyncProfile{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Subscribe(context.Background(), subscriber, 702, entity.SyncProfile{}); err != nil {
+		t.Fatal(err)
+	}
+	transport.slowSession = 9
+	firstState.MarkDirty(1)
+	if err := first.FlushSubject(context.Background(), 701); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for (first.Stats().ActiveSubscribers != 0 || second.Stats().ActiveSubscribers != 0) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if first.Stats().ActiveSubscribers != 0 || second.Stats().ActiveSubscribers != 0 {
+		t.Fatalf("shared sink did not notify every room: first=%+v second=%+v", first.Stats(), second.Stats())
+	}
+}
+
+func TestRoomTransportSinkDoesNotSerializeIndependentRooms(t *testing.T) {
+	transport := &parallelRoomTransport{firstEntered: make(chan struct{}), secondEntered: make(chan struct{}), releaseFirst: make(chan struct{})}
+	sink, err := NewRoomTransportSink(RoomTransportSinkConfig{
+		Transport: transport,
+		Sessions: RoomSessionResolverFunc(func(_ context.Context, subscriber coreentitysync.SubscriberRef) (core.SessionID, error) {
+			return core.SessionID(subscriber.ID), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sink.Close(context.Background()) }()
+	frame := func(roomID, subscriberID, subjectID int64) RoomFrame {
+		return RoomFrame{
+			RoomID: roomID, Frame: 1, Subscriber: coreentitysync.SubscriberRef{ID: subscriberID}, SessionSequence: 1,
+			Entries: []RoomFrameEntry{{Kind: coreentitysync.EnvelopeSnapshot, Update: testRoomUpdate(subjectID, 1, 0, true, []byte("state"))}},
+		}
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- sink.AdmitRoomFrames(context.Background(), []RoomFrame{frame(31, 1, 801)}) }()
+	select {
+	case <-transport.firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first room did not reach transport")
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- sink.AdmitRoomFrames(context.Background(), []RoomFrame{frame(32, 2, 802)}) }()
+	select {
+	case <-transport.secondEntered:
+	case <-time.After(200 * time.Millisecond):
+		close(transport.releaseFirst)
+		t.Fatal("independent room was serialized behind a blocked room")
+	}
+	close(transport.releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRoomTransportSinkBoundsApplicationCallbacks(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	sink, err := NewRoomTransportSink(RoomTransportSinkConfig{
+		Transport:       &recordingAtomicTransport{},
+		Sessions:        RoomSessionResolverFunc(func(context.Context, coreentitysync.SubscriberRef) (core.SessionID, error) { return 1, nil }),
+		CallbackWorkers: 1, CallbackQueueCapacity: 1,
+		OnSlowConsumer: func(context.Context, RoomSlowConsumer) {
+			select {
+			case <-started:
+			default:
+				close(started)
+			}
+			<-release
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := RoomSlowConsumer{RoomID: 1, Subscriber: coreentitysync.SubscriberRef{ID: 1}, Session: 1, Err: kit.ErrReliableBackpressure}
+	sink.dispatchSlowConsumers([]RoomSlowConsumer{event})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("callback worker did not start")
+	}
+	sink.dispatchSlowConsumers([]RoomSlowConsumer{event, event})
+	if stats := sink.Stats(); stats.CallbackPending != 1 || stats.CallbackCoalesced != 1 {
+		t.Fatalf("callback mailbox did not coalesce duplicate lifecycle work: %+v", stats)
+	}
+	close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := sink.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func BenchmarkRoomTransportSinkAdmit100Subscribers(b *testing.B) {
+	sink, err := NewRoomTransportSink(RoomTransportSinkConfig{
+		Transport: discardAtomicTransport{},
+		Sessions: RoomSessionResolverFunc(func(_ context.Context, subscriber coreentitysync.SubscriberRef) (core.SessionID, error) {
+			return core.SessionID(subscriber.ID), nil
+		}),
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = sink.Close(context.Background()) }()
+	frames := make([]RoomFrame, 100)
+	for i := range frames {
+		frames[i] = RoomFrame{
+			RoomID: 1, Frame: 1, Subscriber: coreentitysync.SubscriberRef{ID: int64(i + 1)}, SessionSequence: 1,
+			Entries: []RoomFrameEntry{{Kind: coreentitysync.EnvelopeSnapshot, Update: testRoomUpdate(1, 1, 0, true, []byte("snapshot"))}},
+		}
+	}
+	if err := sink.AdmitRoomFrames(context.Background(), frames); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		version := uint64(iteration + 2)
+		for i := range frames {
+			frames[i].Frame = version
+			frames[i].SessionSequence = version
+			frames[i].Entries[0] = RoomFrameEntry{Kind: coreentitysync.EnvelopeDelta, Update: testRoomUpdate(1, version, version-1, false, []byte("delta"))}
+		}
+		if err := sink.AdmitRoomFrames(context.Background(), frames); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRoomReplicationGlobalFrame100x100(b *testing.B) {
+	sink, err := NewRoomTransportSink(RoomTransportSinkConfig{
+		Transport: discardAtomicTransport{},
+		Sessions: RoomSessionResolverFunc(func(_ context.Context, subscriber coreentitysync.SubscriberRef) (core.SessionID, error) {
+			return core.SessionID(subscriber.ID), nil
+		}),
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() { _ = sink.Close(context.Background()) }()
+	room, err := NewRoomReplication(1, sink)
+	if err != nil {
+		b.Fatal(err)
+	}
+	states := make([]*entity.SubjectSyncState, 100)
+	for i := range states {
+		states[i] = testRoomState(int64(i+1), nil)
+		if err := room.RegisterSubject(states[i]); err != nil {
+			b.Fatal(err)
+		}
+	}
+	for subscriberID := int64(1); subscriberID <= 100; subscriberID++ {
+		subscriber := coreentitysync.SubscriberRef{ID: subscriberID}
+		for subjectID := int64(1); subjectID <= 100; subjectID++ {
+			if _, err := room.Subscribe(context.Background(), subscriber, subjectID, entity.SyncProfile{}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, state := range states {
+			state.MarkDirty(1)
+		}
+		if err := room.FlushDirty(context.Background()); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

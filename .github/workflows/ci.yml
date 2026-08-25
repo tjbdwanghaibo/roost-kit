@@ -36,7 +36,9 @@ jobs:
       - if: runner.os == 'Linux'
         run: go vet ./...
       - if: runner.os == 'Linux'
-        run: go test -race ./checkpoint ./remote_entity ./nest ./nestwal ./replication ./etcd ./mongo ./nats
+        run: go test -race ./checkpoint ./remote_entity ./nest ./nestwal ./replication ./sync ./etcd ./mongo ./nats ./saga
+      - if: runner.os == 'Linux'
+        run: go test -run '^$' -bench 'Benchmark(RoomReplicationFlush100Subscribers|RoomTransportSinkAdmit100Subscribers|RoomReplicationGlobalFrame100x100)$' -benchtime=1s ./sync
 
   local-core-source:
     runs-on: ubuntu-latest
@@ -65,4 +67,4 @@ jobs:
       - working-directory: cube-kit
         run: go vet ./...
       - working-directory: cube-kit
-        run: go test -race ./checkpoint ./remote_entity ./nest ./nestwal ./replication
+        run: go test -race ./checkpoint ./remote_entity ./nest ./nestwal ./replication ./sync ./saga

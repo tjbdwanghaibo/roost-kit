@@ -61,8 +61,45 @@ Stop:    停止后台任务并关闭连接
 | `sync` | NATS/JetStream 数据同步 transport；房间 Subject 订阅、20Hz 合帧和可靠 retiring |
 | `spatial` | 通用整数网格坐标、并发 Terrain、ID-only AOI BlockIndex 与 A* 寻路 |
 | `remote_entity` | 跨服务 entity 原子事务、不可变快照、outbox 与版本锁 |
+| `saga` | 跨事务域 Saga 的 Mongo 状态/outbox、lease fencing、JetStream transport 与幂等步骤 inbox |
 | `configdata` | 配置加载、快照发布和热更辅助 |
 | `statslog` | 周期性运行时统计日志 |
+
+### Saga
+
+`saga.NewMod(definitions...)` 提供 `*core/saga.Engine`。Saga 状态、outbox 和
+completion receipt 使用 MongoDB 事务保持一致；worker 通过带索引的
+`next_run_at`/`next_attempt_at` 批量领取任务，并用 lease token 防止过期实例提交。
+
+业务 Nest handler 内使用 `core/saga.EmitStart`，不要直接调用 `StartSaga`。启动意图
+会和本次 Entity mutation 写入同一个 Nest WAL record；Saga Mod 的共享 durable
+consumer 从 `ROOST_EFFECTS` 消费 `roost.effect.saga.start` 并幂等创建 Saga。
+`StartSaga` 只用于 durable consumer、管理和恢复路径。同一 business key 如果 payload
+或 deadline 不同会返回 `ErrIdentityConflict`，不会误判为重复成功。
+
+步骤服务使用 `saga.NewMongoCommandInbox` 和 `saga.SubscribeStep`。handler 收到的
+context 已绑定 MongoDB transaction；handler 的数据库修改和本次 `CommandID` receipt 会一起
+提交。结果发布失败时 JetStream 会重新投递，inbox 不会再次执行业务修改，只会
+重放已经保存的 completion。新的 Saga attempt 使用新的 `CommandID`，因此允许重新执行
+handler；handler 必须使用稳定的 `IdempotencyKey` 查询或继续同一笔业务操作。
+handler 只能通过该 context 修改 MongoDB；Mongo transaction callback 可能重试，网络调用或
+其他不可逆副作用必须先写入同事务 outbox，不能直接在 handler 内执行。
+步骤成功或终止后会写入 operation tombstone，并原子删除该 operation 仍在 outbox
+中的旧 attempt；已经并发发布的旧 attempt/result 也只会被确认，不会进入 DLQ。
+
+```go
+mod := saga.NewMod(alliancerally.Definition())
+
+inbox, _ := saga.NewMongoCommandInbox(mongoClient, "game", "")
+sub, err := saga.SubscribeStep(ctx, jetStream, mod.Transport(), inbox,
+    saga.StepConsumerConfig{
+        Stream: "ROOST_SAGA", Durable: "world-create-march",
+        Topic: "alliance_rally.create_march",
+    }, handleCreateMarch)
+```
+
+生产环境至少监控 `Engine.Stats()` 中的 store/worker failure、conflict、publish failure 和 manual required，
+并为 `ManualRequired` 提供查询、修复后 `Resume` 的管理入口。
 
 ### Nest 与玩家接入装配
 
@@ -285,7 +322,7 @@ if err := manager.RegisterSession(corereplication.SessionInfo{ID: sessionID, Own
 - Entity 只保存 dirty、内容版本和 Packer，不保存 Observer。
 - 同一 Profile 的冻结 Payload 在全部 Subscriber 之间共享。
 - Room Frame 与每个 Subscriber 的 Session Sequence 独立推进；下游拒绝整批时二者都不跳号。
-- `RoomTransportSink` 将 Snapshot/Leave 放入可靠 lane、将 Delta 分片放入 latest-only datagram lane；object ref 与 baseline 按 `(room, session)` 隔离，避免不同 LOD 客户端互相污染。
+- `RoomTransportSink` 将 Snapshot/Leave 放入可靠 lane、将 Delta 分片放入 latest-only datagram lane；object ref 与 baseline 按 `(room, session)` 隔离，共享 sink 使用分片房间锁，不会因一个房间的 admission 阻塞所有房间。
 - `Start(ctx, 0)` 默认按 50ms（20Hz）合并 dirty；`FlushSubject`/`FlushDirty` 可主动刷新。
 - `RetireSubject` 在可靠 Leave 全部接纳前保留 Subject，并由 worker 自动重试。
 - `ReliableRoomFrameSink` 必须满足 all-or-none admission；不可将会部分入队、但只返回单个成功标志的发送循环直接作为下游。
@@ -301,11 +338,31 @@ if err := room.RegisterSubject(subjectState); err != nil {
 if err := room.Start(ctx, 50*time.Millisecond); err != nil {
     return err
 }
-defer room.Stop(shutdownCtx)
+defer room.Close(shutdownCtx)
 
 _, err = room.Subscribe(ctx, subscriber, subjectState.SubjectID(), entity.SyncProfile{
     Key: "near", LOD: 1, SchemaVersion: 3,
 })
+```
+
+开房间服务应使用 `RoomManager`，而不是在业务层维护无上限的 map。Manager 对房间数、全局 subject/subscriber 和空闲生命周期做统一 admission：
+
+```go
+rooms, err := sync.NewRoomManager(sync.RoomManagerConfig{
+    Downstream: frameSink,
+    MaxRooms: 2000,
+    MaxTotalSubjects: 200000,
+    MaxTotalSubscribers: 100000,
+    MaxSubjectsPerRoom: 100,
+    MaxSubscribersPerRoom: 100,
+    ReplicationInterval: 50 * time.Millisecond,
+    IdleTTL: 5 * time.Minute,
+})
+if err != nil { return err }
+if err := rooms.Start(ctx); err != nil { return err }
+defer rooms.Close(shutdownCtx)
+
+room, err := rooms.GetOrCreate(roomID)
 ```
 
 生产网络桥使用 `sync.NewRoomTransportSink`，其下游必须实现
@@ -313,8 +370,9 @@ _, err = room.Subscribe(ctx, subscriber, subjectState.SubjectID(), entity.SyncPr
 session 都有容量时才提交 Room sequence/dirty；Session resolver 必须绑定到已认证且
 已完成 `BindSession` 的连接。客户端用 `DecodeRoomWireFrame` 和
 `DecodeRoomSubjectUpdate` 解码，并在 gap/checksum/baseline 错误时请求可靠 full resync。
+每个 20Hz tick 会把该房间全部 dirty subject 通过一次批量 admission 合并为接收者级全局帧；不要在业务层逐 entity 循环调用主动 flush，只有确实要求立即可见的单个 subject 才调用 `FlushSubject`。
 
-生产监控至少包含 `AdmittedFrames`、`AdmittedEntries`、`FailedBatches`、`FlushFailures`、`PendingSubjects`、`PendingRetirements` 和 `LastError`。`PendingRetirements` 持续增长通常表示可靠下游不可用或客户端路由异常，应影响 readiness，而不是静默丢弃 Leave；停服最后一次 flush 失败会由 `Stop` 返回。
+生产监控至少包含 `AdmittedFrames`、`AdmittedEntries`、`FailedBatches`、`FlushFailures`、`PendingSubjects`、`PendingRetirements`、`CallbackPending`、`CallbackCoalesced`、`CallbackPanics`、房间/subject/subscriber 使用率和 `LastError`。`PendingRetirements` 或 `CallbackPending` 持续增长应影响 readiness；慢客户端生命周期事件使用合并邮箱，不会因通知通道满而丢失。停服最后一次 flush 失败会由 `Close` 返回，共享 `RoomTransportSink` 在应用停止时也必须调用 `Close(ctx)`。
 
 ### Nest transaction WAL 与 outbox
 

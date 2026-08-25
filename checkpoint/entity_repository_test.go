@@ -51,6 +51,9 @@ func (*repositoryTestEntity) Touch() bool                                    { r
 func (*repositoryTestEntity) UnTouch()                                       {}
 func (*repositoryTestEntity) ClearBase()                                     {}
 func (*repositoryTestEntity) IsClear() bool                                  { return false }
+func (e *repositoryTestEntity) RemoveSnapshot() []corecheckpoint.SaveItem {
+	return []corecheckpoint.SaveItem{{Db: "game", Collection: "repository_entities", ID: e.ID(), Version: 1, Deleted: true}}
+}
 
 var registerRepositoryEntity sync.Once
 
