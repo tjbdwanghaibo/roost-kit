@@ -79,19 +79,21 @@ func TestRoomManagerExpiresOnlyEmptyIdleRooms(t *testing.T) {
 	if _, err := manager.Create(10); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
+	// Get counts as room activity and would keep the room alive, so expiry is
+	// observed through Stats only.
+	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := manager.Get(10); !ok {
+		stats := manager.Stats()
+		if stats.ActiveRooms == 0 && stats.IdleExpired == 1 {
 			break
 		}
-		// Get is intentionally activity, so stop touching after the first probe.
-		time.Sleep(25 * time.Millisecond)
 		if time.Now().After(deadline) {
-			t.Fatal("idle room was not expired")
+			t.Fatalf("idle room was not expired: stats=%+v", stats)
 		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if stats := manager.Stats(); stats.ActiveRooms != 0 || stats.IdleExpired != 1 {
-		t.Fatalf("idle manager stats = %+v", stats)
+	if _, ok := manager.Get(10); ok {
+		t.Fatal("expired room must not be retrievable")
 	}
 }
 

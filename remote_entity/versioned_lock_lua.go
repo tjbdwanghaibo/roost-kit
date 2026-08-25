@@ -16,16 +16,26 @@ end
 return {0, 0, 0}
 `
 
-// versionedUnlockLua: verify owner → HSET version → HDEL owner → PEXPIRE; returns 1 or 0
+// versionedUnlockLua: verify owner → HSET version → HDEL owner → PEXPIRE.
+// Returns 1 on unlock, 2 when a previous attempt already landed (idempotent
+// retry), 0 when the lock is genuinely not owned.
+//
+// The idempotent branch relies on the interface contract that unlock versions
+// are unique and monotonic per key: observing version == ARGV[2] proves this
+// caller's earlier unlock reached the server even though its response was
+// lost, so an at-least-once retry must report success, not NotOwned.
 const versionedUnlockLua = `
 local cur = redis.call("HGET", KEYS[1], "owner")
-if cur ~= ARGV[1] then
-    return 0
+if cur == ARGV[1] then
+    redis.call("HSET", KEYS[1], "version", ARGV[2])
+    redis.call("HDEL", KEYS[1], "owner")
+    redis.call("PEXPIRE", KEYS[1], ARGV[3])
+    return 1
 end
-redis.call("HSET", KEYS[1], "version", ARGV[2])
-redis.call("HDEL", KEYS[1], "owner")
-redis.call("PEXPIRE", KEYS[1], ARGV[3])
-return 1
+if redis.call("HGET", KEYS[1], "version") == ARGV[2] then
+    return 2
+end
+return 0
 `
 
 // versionedTouchLua: verify owner → add duration to remaining PTTL (capped at max); returns newTTL or -1

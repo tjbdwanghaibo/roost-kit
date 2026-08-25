@@ -220,6 +220,8 @@ func (l *versionedLock) UnlockWithRetry(ctx context.Context, newVersion int64, v
 				l.mu.Unlock()
 				return ErrVersionedLockNotOwned
 			} else {
+				// 1 = unlocked now; 2 = a previous attempt whose response was
+				// lost already landed. Both mean the unlock succeeded.
 				l.mu.Lock()
 				l.acquired = false
 				l.version = newVersion

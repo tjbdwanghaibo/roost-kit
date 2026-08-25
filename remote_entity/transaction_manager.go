@@ -152,7 +152,23 @@ func (m *remoteEntityManager) runRemoteFinalizers(state *remoteState, workers in
 	}
 	state.finalizeWG.Wait()
 	state.retryWG.Wait()
-	close(state.finalizeDone)
+	// Retry goroutines send without holding a lock, so one may race the
+	// workers' final drain and land an item after they exited. All senders
+	// are done here (retryWG), so one last drain guarantees every deferred
+	// close releases its entries and slot before finalizeDone is published.
+	for {
+		select {
+		case item := <-state.finalizeQueue:
+			if quarantineErr := m.quarantineEntries(item.entries, state.finalizeCtx.Err()); quarantineErr != nil {
+				obs.IncCounter("remote_entity.quarantine_error_total", nil, 1)
+			}
+			m.releaseRemoteEntriesObserved(context.Background(), item.entries)
+			m.releaseRemoteFinalizeSlot()
+		default:
+			close(state.finalizeDone)
+			return
+		}
+	}
 }
 
 func (m *remoteEntityManager) runRemoteFinalizerWorker(state *remoteState) {
@@ -233,14 +249,23 @@ func (m *remoteEntityManager) processDeferredRemoteClose(state *remoteState, ite
 		case <-timer.C:
 		}
 		state.retryMu.Lock()
-		if state.stopping {
-			state.retryMu.Unlock()
+		stopping := state.stopping
+		state.retryMu.Unlock()
+		if stopping {
 			m.releaseRemoteEntriesObserved(context.Background(), item.entries)
 			m.releaseRemoteFinalizeSlot()
 			return
 		}
-		state.finalizeQueue <- item
-		state.retryMu.Unlock()
+		// Send outside the lock: holding retryMu across a bounded-queue send
+		// stalls Stop behind a full queue. The Done branch and the final
+		// drain in runRemoteFinalizers together guarantee the item is always
+		// consumed or released, whichever side wins the race.
+		select {
+		case state.finalizeQueue <- item:
+		case <-state.finalizeCtx.Done():
+			m.releaseRemoteEntriesObserved(context.Background(), item.entries)
+			m.releaseRemoteFinalizeSlot()
+		}
 	}()
 }
 

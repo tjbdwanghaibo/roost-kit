@@ -212,6 +212,15 @@ Redis 必须为 7.2+ 并开启 AOF。Kit 会在启动阶段用同一物理连接
 - 外部依赖不可用时，应通过 health/ready 暴露故障，而不是在生产环境静默降级。
 - 后台 consumer、watcher、ticker 必须在 Mod 停止时退出；业务停服时先停止接入，再 flush 和关闭依赖。
 
+### 分布式锁选型
+
+| 需求 | 用什么 | 说明 |
+| --- | --- | --- |
+| 可容忍双写 / 操作幂等的互斥（去重、缓存预热、best-effort 单例） | `fredis.IDistLock`（`redis` Mod） | 单实例 SetNX，无栅栏；TTL 内未完成会静默过期 |
+| 上一行 + 长临界区不想手动续期 | `redis.AutoExtendLock` 包装器 | 自动续期 watchdog；丢租约通过 `Err()` 暴露，仍**不带栅栏** |
+| 必须防止旧持有者脏写（实体所有权、存储提交） | `fredis.IVersionedLock`（`remote_entity` Mod） | 单调 fence token + 自动续期 + 幂等 unlock，下游写路径按 fence 做 CAS |
+| 领导权敏感写（选主后的独占任务） | `etcd` 选主 + `Fence()` | `IsLeader` 存在固有 stale 窗口，写路径必须携带 fence token 校验 |
+
 ### etcd 多服本地镜像
 
 `etcd.NewLocalMirror` 将一个 etcd prefix 的 revision 快照和后续 watch 映射为进程内强类型结构。初始化 watch 从快照 `Revision+1` 开始，断线或 compact 后重新获取完整快照，因此不会留下 Get/Watch 间隙。读取结果经过 `Clone`，调用方修改嵌套 map/slice 不会与 watch 更新产生数据竞争。
