@@ -14,6 +14,7 @@ import (
 	"github.com/tjbdwanghaibo/cube-core/entity"
 	"github.com/tjbdwanghaibo/cube-core/health"
 	fmongo "github.com/tjbdwanghaibo/cube-core/mongo"
+	"github.com/tjbdwanghaibo/cube-core/obs"
 	fredis "github.com/tjbdwanghaibo/cube-core/redis"
 	"github.com/tjbdwanghaibo/cube-kit/mods"
 )
@@ -35,11 +36,22 @@ type Mod struct {
 
 	retryMu         sync.Mutex
 	pendingSaves    map[retrySaveKey]corecheckpoint.SaveItem
+	pendingReleases map[int64]entity.IThreadSafeEntity
 	retryWake       chan struct{}
 	retryCancel     context.CancelFunc
 	retryWG         sync.WaitGroup
 	runtimeFailure  *app.RuntimeFailure
 	admissionFenced atomic.Bool
+
+	// durableWatermark, when set, is the pipelined-commit externalization
+	// gate: an entity whose last commit LSN is above the watermark is not
+	// snapshotted yet — checkpoint must never persist state ahead of the
+	// transaction WAL. Deferred entities keep their dirty bits and are
+	// retried by the admission retry loop. Nil means no gating (no pipelined
+	// committer in this deployment). See NEST_PIPELINED_COMMIT.md in
+	// cube-core.
+	durableWatermark atomic.Pointer[func() uint64]
+	gateDeferrals    atomic.Int64
 }
 
 type ModOption func(*Mod)
@@ -195,6 +207,7 @@ func (m *Mod) Provide(registry *app.Registry) error {
 		corecheckpoint.WithSnapshotWALDurableTimeout(m.cfg.walDurableTimeout),
 	)
 	m.pendingSaves = make(map[retrySaveKey]corecheckpoint.SaveItem)
+	m.pendingReleases = make(map[int64]entity.IThreadSafeEntity)
 	m.retryWake = make(chan struct{}, 1)
 	// Register the owning capability rather than the inner Checkpoint. Flush on
 	// Mod also drains admission retries, so callers cannot accidentally report
@@ -337,10 +350,52 @@ func (m *Mod) Flush(ctx context.Context) error {
 	}
 }
 
+// SetDurableWatermark installs the pipelined-commit watermark source
+// (typically nestwal Committer.DurableLSN). Pass nil to remove the gate.
+// Assembly-time configuration; safe to call concurrently with releases.
+func (m *Mod) SetDurableWatermark(watermark func() uint64) {
+	if m == nil {
+		return
+	}
+	if watermark == nil {
+		m.durableWatermark.Store(nil)
+		return
+	}
+	m.durableWatermark.Store(&watermark)
+}
+
+// entityDurable reports whether every pipelined commit that mutated the
+// entity is already durable in the transaction WAL, so its after-image may be
+// persisted without checkpoint getting ahead of the WAL.
+func (m *Mod) entityDurable(ent entity.IThreadSafeEntity) bool {
+	watermark := m.durableWatermark.Load()
+	if watermark == nil {
+		return true
+	}
+	base := ent.Base()
+	if base == nil {
+		return true
+	}
+	return base.LastCommitLSN() <= (*watermark)()
+}
+
 func (m *Mod) onEntityRelease(ent entity.IThreadSafeEntity) {
 	if ent == nil || !ent.AutoPersist() || entity.IsEntityKindRemoteManaged(ent.GetEntityKind()) {
 		return
 	}
+	if !m.entityDurable(ent) {
+		// Defer before taking the snapshot so the dirty bits stay intact; the
+		// retry loop snapshots once the WAL watermark catches up (bounded by
+		// the group-commit latency).
+		m.gateDeferrals.Add(1)
+		obs.IncCounter("checkpoint_release_gate_deferred_total", nil, 1)
+		m.enqueueReleaseRetry(ent)
+		return
+	}
+	m.snapshotAndSubmit(ent)
+}
+
+func (m *Mod) snapshotAndSubmit(ent entity.IThreadSafeEntity) {
 	snapshotter, ok := ent.(corecheckpoint.EntitySnapshotter)
 	if !ok {
 		return
@@ -435,6 +490,20 @@ func (m *Mod) enqueueSaveRetry(items []corecheckpoint.SaveItem) {
 	m.signalRetry()
 }
 
+func (m *Mod) enqueueReleaseRetry(ent entity.IThreadSafeEntity) {
+	m.retryMu.Lock()
+	_, exists := m.pendingReleases[ent.ID()]
+	overloaded := !exists && m.pendingRetryCountLocked() >= m.cfg.pendingCapacity
+	if !overloaded {
+		m.pendingReleases[ent.ID()] = ent
+	}
+	m.retryMu.Unlock()
+	if overloaded {
+		m.fenceAdmission(fmt.Errorf("checkpoint: admission retry capacity exceeded: capacity=%d", m.cfg.pendingCapacity))
+	}
+	m.signalRetry()
+}
+
 func (m *Mod) clearSaveRetry(items []corecheckpoint.SaveItem) {
 	m.retryMu.Lock()
 	for _, item := range items {
@@ -448,13 +517,13 @@ func (m *Mod) clearSaveRetry(items []corecheckpoint.SaveItem) {
 
 func (m *Mod) pendingCount() int {
 	m.retryMu.Lock()
-	count := len(m.pendingSaves)
+	count := len(m.pendingSaves) + len(m.pendingReleases)
 	m.retryMu.Unlock()
 	return count
 }
 
 func (m *Mod) pendingRetryCountLocked() int {
-	return len(m.pendingSaves)
+	return len(m.pendingSaves) + len(m.pendingReleases)
 }
 
 func (m *Mod) fenceAdmission(err error) {
@@ -493,11 +562,26 @@ func (m *Mod) retryAdmission(ctx context.Context) error {
 		return err
 	}
 	m.retryMu.Lock()
+	releases := make([]entity.IThreadSafeEntity, 0, len(m.pendingReleases))
+	for _, ent := range m.pendingReleases {
+		releases = append(releases, ent)
+	}
 	saves := make(map[retrySaveKey]corecheckpoint.SaveItem, len(m.pendingSaves))
 	for key, item := range m.pendingSaves {
 		saves[key] = item
 	}
 	m.retryMu.Unlock()
+	for _, ent := range releases {
+		if !m.entityDurable(ent) {
+			continue
+		}
+		m.retryMu.Lock()
+		delete(m.pendingReleases, ent.ID())
+		m.retryMu.Unlock()
+		// Snapshot after removal: a release racing in re-enqueues the entity,
+		// and version-CAS in the backend absorbs any duplicate snapshot.
+		m.snapshotAndSubmit(ent)
+	}
 	for key, item := range saves {
 		if !m.checkpoint.Submit([]corecheckpoint.SaveItem{item}) {
 			continue
