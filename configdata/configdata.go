@@ -63,6 +63,11 @@ func (m *Mod) Provide(r *app.Registry) error {
 		},
 		Rollback: func(_ context.Context, event fconfigdata.ReloadEvent, _ error) {
 			m.metrics.IncCounter("configdata.reload.total", obs.Labels{"result": "rollback", "reason": event.Reason}, 1)
+			// The gauge was set to New.Version in AfterApply (or the apply
+			// was aborted before ours ran); the store is back on Old — the
+			// gauge must not keep advertising a rolled-back generation.
+			// Old is never nil here: nil-Old reloads skip rollback callbacks.
+			m.metrics.SetGauge("configdata.version", nil, int64(event.Old.Version))
 		},
 	}))
 	return r.Register(mods.ModConfigData, m.store)
