@@ -5,6 +5,14 @@
 ## [Unreleased]
 
 ### Added
+- **`robot/` 机器人框架的 kit 侧**（配合 cube-core 新增的 `robot` 框架）：
+  - `RegisterKCPDialer`/`RegisterQUICDialer` 经 core `transport.RegisterDialer` 挂载 KCP（AES-GCM + FEC，复用 `replication.DialKCP`，KCP 流上直接跑统一包协议）与 QUIC（`replication.DialQUIC` + 单双向 stream 承载，对端关流归一化为 EOF）客户端拨号——runner 配置里 `Transport.Type` 选中即用。
+  - `LockstepBot`：lockstep 客户端半场——基于 core `lockstep.FrameAssembler`（去重 + 严格顺序）应用帧、按帧生成并提交输入、关键帧哈希上报（缺省 `FrameHasher` 输入链 FNV 折叠：确定性模拟下输入同则状态同）、缓冲越界时每 gap 恰好一次追帧请求；出站走业务注入的 `LockstepSink`（提交/上报/追帧的线格式由业务定义）。回归基线：3 bot × 600 帧 × 各自独立 30% 丢包，冗余 + 追帧后全帧应用、`DesyncDetector` 全程零误报（16 次追帧、30 次裁决）。
+- **发布顺序**：本包依赖 cube-core 未发布的 `robot/*` 与 `lockstep.FrameAssembler`，go.mod 暂以 `replace ../roost-core` 指向本地——**须先发 cube-core，再把本仓 go.mod 升到对应版本并删除 replace 后发布**。
+
+## [1.8.0] - 2026-08
+
+### Added
 - `redis`：客户端实现 `fredis.ListTrimmer`/`ListRemover`（LTRIM/LREM）——core `failurelog` 的 trim/delete 回退由此走就地操作，消除 DEL+RPUSH 两步间崩溃丢整表的窗口。（go.mod 已升级到 cube-core v1.7.1，临时 replace 已删除。）
 
 ### Fixed（lockstep v1.7.1 发布后复审，9 缺陷 + 6 权衡全部实施，均带回归测试）
@@ -20,17 +28,25 @@
 - go.mod：`cube-core` 升至 v1.8.0（lockstep 复审修复 + configdata 自查修复 + ListTrimmer/ListRemover）。
 - README 按全量能力审计重写扩充：组件总览逐包补齐（taskflow 独立成行、sync/syncstream 拆分、replication 补 AsyncTransport/三 transport 矩阵/CompositeTransport、remote_entity 补 Mod 装配与所有权状态机）；新增 §3.2 配置命名空间与跨键不变量、§3.3 capability 常量→注册者→实际类型对照表、§3.4 停机语义表；§4 新增 replication/sync 四角色/syncstream/remote_entity/saga（`SaveWithOutbox` 描述修正为 `Apply`）/基础设施细节/并发定位一览各节；修正装配顺序描述（仅 6 个 Mod 声明 DependsOn，nats(reliable)→redis 与 nest→remote_entity 是未声明的顺序依赖）与版本号引用。
 
+## [1.7.1] - 2026-08
+
 ### Fixed（v1.7.0 发布后独立复审的 8 项发现，均带回归测试）
 - `spatial`：MaxVisible 从每房间独立执行收口为 **cluster 级全局 top-N**（缝边 observer 的预算曾被相交房间数放大）；`AddRoom` 回填既有 observer 的边界镜像（静止 observer 对后加房间曾有永久可见性盲区）；拒绝 id 0（曾半跟踪导致可见性对不同 observer 分裂）；`LeaveRadius` 加上界 + 订阅盒算术全饱和（极值曾回绕致 observer 全盲）；observer 全量评估改最近优先 admission（曾产生瞬态 Enter+Leave 对）；补 gofmt。
 - `ai`：guard 谓词在装配期限定为无状态形态（condition/sequence/selector/inverter，action 作谓词曾每次检查都发起动作）；nil-root 策略丢弃动作完成事件（曾无界堆积）；`Cooldown.Reset` 保留计时的语义与 `ParseTree` 结果单策略专属（禁共享）写入文档。
 
-### Added
+### Added（v1.8.0）
 - `lockstep` 包：帧同步（输入帧）房间层，依赖 cube-core v1.7.0 的 `lockstep` 包（go.mod 已升级到正式版本）。`Room` 把 Sequencer/帧历史/冗余编码/裁决器绑定到传输：`Tick` 切帧并经 datagram 通道冗余广播（丢包靠后继报文冗余修复，不重传）；`StartCatchup` 重连追帧经可靠通道（KCP/QUIC 皆可，`ReliableSender` 接口互换）按 tick 限速分页，追上后自动切回实时；`ReportHash` 关键帧哈希多数派裁决，`OnDesync` 仅在裁决出现或离群集扩大时回调；掉线座位保留（缺席即空输入），重连 = `Attach` 换 session + 追帧。指标：`lockstep.frame.total`、`input.late.total`、`catchup.frames.total`、`desync.total`（非零即事故），见 cube-core OBSERVABILITY.md。
+
+### Added（v1.7.1）
 - `nestwal`：durability 管线指标——`nestwal.batch.total`/`append.total`（合批放大率）、`bytes.total`、`fsync.duration`、`pending.tickets`、`disk.bytes`、`reject.total{reason}`。面板与告警基线见 cube-core 的 OBSERVABILITY.md。
+
+## [1.7.0] - 2026-08
+
+### Added
 - `spatial`：增量兴趣管理。`InterestManager`（九宫格订阅、双半径滞回、距离带 LOD、MaxVisible 风暴闸门、确定性 Flush）与 `InterestCluster`（共享坐标平面多房间无缝：边界 observer 镜像、净变化 Flush、跨界迁移 make-before-break 零闪断；单锁并发安全）。`BlockIndex` 新增 `QueryBlockIndex`。跨进程 handover 不在此层（见包注释）。
 - `ai`：行为树二期。节点库（Parallel/Repeat/UntilSuccess/Succeeder/Condition/Guard/Cooldown/TimeLimit/RandomSelector，计时读注入 tick 时钟、随机用注入掷点）；`BehaviorStrategy`（树 → cube-core Strategy 桥，动作完成事件缓冲进下一 tick）；`TaskflowAction` 叶子（发起并等待 taskflow 动作，含打断收尾钩子）；`ParseTree`/`Registry`（严格 JSON 树装配，fail-fast + JSON path 诊断，schema `cube.ai/v1`）。
 
-## [Unreleased]（已提交，待发 v1.6.2）
+## [1.6.3] - 2026-08
 
 ### Fixed
 - `redis/AutoExtendLock`：单次瞬时 Extend 错误不再永久停摆（TTL 预算内重试）；每次续期带独立超时，Redis 挂死不再拖死续期协程。

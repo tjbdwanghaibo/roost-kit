@@ -1,10 +1,10 @@
 package sync
 
 import (
-	"github.com/tjbdwanghaibo/cube-core/nats"
-	fsync "github.com/tjbdwanghaibo/cube-core/sync"
 	"encoding/json"
 	"fmt"
+	"github.com/tjbdwanghaibo/cube-core/nats"
+	fsync "github.com/tjbdwanghaibo/cube-core/sync"
 	"log/slog"
 )
 

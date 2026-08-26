@@ -2,13 +2,13 @@ package sync
 
 import (
 	"context"
+	"fmt"
 	"github.com/tjbdwanghaibo/cube-core/app"
 	fctx "github.com/tjbdwanghaibo/cube-core/ctx"
 	"github.com/tjbdwanghaibo/cube-core/health"
 	fnats "github.com/tjbdwanghaibo/cube-core/nats"
 	fsync "github.com/tjbdwanghaibo/cube-core/sync"
 	"github.com/tjbdwanghaibo/cube-kit/mods"
-	"fmt"
 	"log/slog"
 	"strings"
 

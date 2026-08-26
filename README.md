@@ -32,6 +32,7 @@
 | `ai/` | 行为树：节点库（组合/装饰/确定性 tick 计时/注入式随机）、`BehaviorStrategy`（树 → cube-core Strategy 桥）、`TaskflowAction`（树驱动 taskflow 动作的标准叶子）、`ParseTree`（严格 JSON 树装配，fail-fast + path 诊断）。**non-goals：无编辑器格式/utility/GOAP/跨 agent 调度** | 无 | 怪物/NPC 决策层，配表驱动行为 |
 | `taskflow/` | cube-core taskflow 契约的执行器：`ActionRunner`（按 ActionGroup 分槽的"当前 + 队列"执行、组冻结、重入检测一等错误、钩子全 panic-safe）、`MissionRunner`（单任务 + `CanReplaceBy` 仲裁替换）、`PlanMission`（配表式步骤机）、可封存的实例级 `Registry`。**刻意无锁：所有调用须由实体锁串行化** | 无 | 实体内的动作/任务状态机（AI 与玩法的执行层） |
 | `lock/` | 进程内锁管理器（per-id 可重入互斥，同 id 同实例）——与 `redis.IDistLock`/`IVersionedLock` 是进程内 vs 跨进程的不同层，不参与"分布式锁二选一" | 无 | 进程内互斥 |
+| `robot/` | core `robot` 机器人框架的 kit 侧：KCP/QUIC 客户端拨号（`RegisterKCPDialer`/`RegisterQUICDialer`，经 core `transport.RegisterDialer` 挂载，复用 `replication.DialKCP/DialQUIC`）；`LockstepBot`（帧装配 + 输入提交 + 关键帧哈希上报 + 每 gap 一次追帧请求，出站经业务注入的 `LockstepSink`）——desync 回归测试与 lockstep 压测的客户端半场 | 无（网络栈复用 `replication`） | 模拟客户端逻辑、压测（尤其 lockstep 房间） |
 | `ops/` | 运维 HTTP：`/healthz`（存活，恒 200）、`/readyz`（ready 位 + 依赖健康，503 语义）、`/metrics`（Prometheus 文本，**不鉴权**）、`/admin/*`（token 双通道鉴权，关闭时 404 隐藏）。**默认关闭（`ops.enabled`），默认只监听 127.0.0.1** | HTTP | 探针、指标抓取与运维命令 |
 | `configdata/` | 配置快照热更：首次 Load 失败即启动失败；reload 带 rollback 语义并打 `configdata.reload.total{result}` 指标。依赖 cube-core `configdata.DefaultRegistry()` 全局注册表（业务表类型须先注册） | 本地文件 | 配置表热更 |
 | `statslog/` | 周期统计 JSONL（每行一个 `StatsRecord`，每次 flush 都 fsync）：runtime + 自动富化 nest/entity 统计（装了对应 Mod 才有）、业务 provider 扩展点（panic 被捕获成记录）、窗口增量 + 累计双报。**默认关闭（`stats_log.enabled`）；entity 统计是 O(N) 全量扫描，interval 勿设太小** | 本地文件 | 周期运行时统计 |
