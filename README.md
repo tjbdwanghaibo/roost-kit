@@ -26,8 +26,8 @@
 | `sync/`、`syncstream/` | 房间/AOI 状态同步：20Hz 合帧、可靠 retire、分片、压缩 | NATS/JetStream 或 `replication` transport | 实时房间同步 |
 | `replication/` | 帧复制网络层：QUIC/KCP/UDP transport，UDP 为 per-session AEAD 加密 + 防重放 | 无（自带网络协议栈） | 实时帧下发（客户端连接） |
 | `gateway/` | 接入层中间件：限流、超时、panic 隔离 | 无 | 玩家接入链路 |
-| `spatial/` | 整数网格地形、四方向 A* 寻路、ID-only AOI 块索引（`QueryRadius`）。**non-goals：无 Z 轴/navmesh/内建兴趣管理**（见包注释） | 无 | 房间级 2D 场景的寻路与 AOI |
-| `ai/`、`taskflow/` | 泛型行为树 + 策略控制器；任务编排 Runner | 无 | NPC/玩法逻辑 |
+| `spatial/` | 整数网格地形、四方向 A*、ID-only 块索引，以及**增量兴趣管理**：`InterestManager`（进出滞回、距离带 LOD、可见上限）与 `InterestCluster`（共享坐标平面上的多房间无缝拼接：边界镜像、跨界迁移零闪断）。**non-goals：无 Z 轴/navmesh；跨进程 handover 不在此层**（见包注释） | 无 | 场景服的寻路、AOI 与可见性增量（下游接 entitysync 订阅） |
+| `ai/` | 行为树：节点库（组合/装饰/确定性 tick 计时/注入式随机）、`BehaviorStrategy`（树 → cube-core Strategy 桥）、`TaskflowAction`（树驱动 taskflow 动作的标准叶子）、`ParseTree`（严格 JSON 树装配，fail-fast + path 诊断）。**non-goals：无编辑器格式/utility/GOAP/跨 agent 调度** | 无 | 怪物/NPC 决策层，配表驱动行为 |
 | `lock/`、`ops/`、`configdata/`、`statslog/` | 进程内锁管理器；运维 HTTP（health/ready/metrics）；配置快照热更；周期统计日志 | —/HTTP/本地文件 | 通用运行时设施 |
 | `mods/` | 全部 capability 名称常量（`mods.ModRedis`、`mods.ModNestWAL`…） | 无 | 业务从 Registry 取依赖时使用 |
 
@@ -364,7 +364,9 @@ ack 检查点推进（nestwal/checkpoint.go）
 
 - **saga Mongo store**（`saga/mongo_store.go`）：任务领取用 `FindOneAndUpdate` 带 `version` + `lease_until <= now` 的 CAS，`$inc lease_token` 使过期实例的后续提交被 owner+token 过滤；`SaveWithOutbox` 在**一个 Mongo 事务**里同落 saga 状态、outbox 命令与 completion 收据，重复完成通过收据 digest 幂等判定。
 - **replication AEAD UDP**（`replication/udp_crypto.go`、`udp_transport.go`）：AES-GCM per-session；`SendSalt`/`ReceiveSalt` 每个方向独立且构造时强制不相等（同 key 双向复用同一 nonce 空间会灾难性破坏 GCM）；nonce = salt(4B) + 单调 sequence(8B)，序列号耗尽即拒发；接收端 64 包位图防重放窗口；**地址迁移只在 AEAD 验证通过之后**（`Open` 成功且 `isCurrentRoute`）才生效，未认证的包改不了路由。
-- **spatial / ai / gateway 的定位声明**（各包 package doc）：三者都是**轻量构件而非中间件服务**，选型前先读它们的 non-goals——`spatial` 是均匀网格 + 四方向 A* + ID-only 块索引（`QueryRadius` 先块粗筛再精确过滤，附块版本号供增量同步），**无 Z 轴、无 navmesh、无内建兴趣管理**；`ai` 是行为树骨架（组合/装饰节点 + 黑板 + tick 控制器），**无节点库、无编辑器格式、无规划器**；`gateway` 只是中间件集合（限流/鉴权守卫），**不是网关服务器**。房间级 2D 玩法够用；MMO 级空间服务/AI 中间件需要自建或另选。
+- **spatial 的增量兴趣管理**（`spatial/interest.go`、`interest_cluster.go`）：`InterestManager` 在 BlockIndex 之上做九宫格订阅——observer 订阅其离开半径覆盖的块，实体移动只重评估受影响邻域；进出用**双半径滞回**（EnterRadius < LeaveRadius，边界震荡零事件）；距离带直接映射 entitysync 的 SyncProfile LOD；MaxVisible 是防广播风暴闸门（近似 top-N 语义）。`InterestCluster` 把多房间拼成一个共享坐标平面：贴边 observer 被**镜像**进邻房（接缝无视野盲区），Flush 输出**净变化**（每 (observer,subject) 维护房间→距离带表，对外只发与上次发射状态的差异）——因此跨界迁移是 make-before-break 且**下游订阅零闪断**。并发定位：Manager 非并发安全（场景私有）、Cluster 单锁并发安全（多房间 handler 并行 tick）；基准 4 房 × 1000 subjects 全移动 + 100 observers ≈ 0.34ms/tick。
+- **ai 的树到执行流闭环**（`ai/behavior_strategy.go`、`nodes.go`、`wire.go`）：`BehaviorStrategy` 把行为树装进 Controller（完成的树自动 Reset、动作完成事件缓冲到下一 tick 的上下文）；`TaskflowAction` 叶子发起 taskflow 动作并等待 `OnActionEnd`，被高优先级分支打断时经 `OnInterrupt` 收尾——"树决策、taskflow 执行"成为标准写法。计时节点（cooldown/time_limit）只读注入的 tick 时钟、随机节点只用注入掷点——权威侧决策可复现。`ParseTree` 严格装配 JSON 树（未知字段/节点/元数违规当场拒绝，诊断带 `$.root.children[0]` 式 path），复合节点内建、condition/action 叶子经 `Registry` 注册；配合 `Controller.SetStrategy` 的事务性替换，坏 JSON 永远不会顶掉在跑的策略。
+- **gateway 的定位声明**（包 doc）：中间件集合（限流/鉴权守卫），**不是网关服务器**。
 
 ---
 
