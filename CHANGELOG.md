@@ -12,6 +12,10 @@
 ### Added
 - CI 增加 `release-hygiene` 门禁（module 路径可解析 + tag 与 major 匹配）。
 
+### Changed
+- 锁双轨契约边界正式化：`redis.IDistLock` 包注释与 README 写明"无栅栏、仅限可容忍双执行的场景"，正确性互斥指向 `remote_entity` versionedLock / `etcd.IFencedElection`（含二选一判据表）。
+- `spatial`/`ai`/`gateway` 各自的包注释补 non-goals 定位声明（无 Z 轴/navmesh/兴趣管理；行为树骨架而非 AI 中间件；中间件集合而非网关服务器）。
+
 ## [1.6.1] - 2026-08
 
 - 对接 cube-core v1.6.x `DurabilityPipelined`：nestwal Enqueue ticket、durable watermark 先于唤醒发布、从 ack fence 起扫描重放、`NestOptions` 配置接线（`nest.pipelined.allowlist/async`）与 checkpoint 外化闸门（`SetDurableWatermark`）。

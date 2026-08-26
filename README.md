@@ -26,7 +26,7 @@
 | `sync/`、`syncstream/` | 房间/AOI 状态同步：20Hz 合帧、可靠 retire、分片、压缩 | NATS/JetStream 或 `replication` transport | 实时房间同步 |
 | `replication/` | 帧复制网络层：QUIC/KCP/UDP transport，UDP 为 per-session AEAD 加密 + 防重放 | 无（自带网络协议栈） | 实时帧下发（客户端连接） |
 | `gateway/` | 接入层中间件：限流、超时、panic 隔离 | 无 | 玩家接入链路 |
-| `spatial/` | 整数网格地形、四方向 A* 寻路、ID-only AOI 块索引（`QueryRadius`） | 无 | 场景服寻路与 AOI |
+| `spatial/` | 整数网格地形、四方向 A* 寻路、ID-only AOI 块索引（`QueryRadius`）。**non-goals：无 Z 轴/navmesh/内建兴趣管理**（见包注释） | 无 | 房间级 2D 场景的寻路与 AOI |
 | `ai/`、`taskflow/` | 泛型行为树 + 策略控制器；任务编排 Runner | 无 | NPC/玩法逻辑 |
 | `lock/`、`ops/`、`configdata/`、`statslog/` | 进程内锁管理器；运维 HTTP（health/ready/metrics）；配置快照热更；周期统计日志 | —/HTTP/本地文件 | 通用运行时设施 |
 | `mods/` | 全部 capability 名称常量（`mods.ModRedis`、`mods.ModNestWAL`…） | 无 | 业务从 Registry 取依赖时使用 |
@@ -345,6 +345,15 @@ ack 检查点推进（nestwal/checkpoint.go）
 
 ### 分布式锁与选主
 
+**先做二选一**（两套锁并存是刻意的分层，不是重复实现）：
+
+| 需求 | 用哪个 | 原因 |
+| --- | --- | --- |
+| 可容忍偶发双执行的互斥（缓存预热、可去重任务、优化性串行化） | `redis.IDistLock`（可套 `AutoExtendLock`） | 轻量；但**无栅栏**——TTL 过期后旧持有者不自知，存在双执行窗口 |
+| 正确性互斥（实体所有权、存储必须能拒绝旧持有者的写） | `remote_entity` 的 `versionedLock` / `etcd.IFencedElection` | fence 计数器独立于 TTL 永不回退，下游按 fence 单调性 CAS 拒旧 |
+
+判据一句话：**如果"锁过期后旧持有者又写了一笔"会造成数据损坏，就必须用带 fence 的那套**；`redis/lock.go` 的包注释里写有同样的契约边界。
+
 - **`AutoExtendLock` 的 TTL 预算重试**（`redis/lock.go` `watch`）：每次续期调用都被限时（`extendCtx` 超时 = 续期间隔），防止挂死的 Redis 冻结 watchdog 而租约静默过期。续期遇到**瞬时错误**（网络/超时）不立即判丢——上一次成功续期可能仍覆盖着租约——只有 `time.Since(lastRenewed) >= ttl`（租约可证明已过期）才置 `Err()`；而服务器明确答复“不再持有”则立即停止续期。注意它**不带栅栏**：需要防旧持有者脏写时用 `IVersionedLock`。
 - **`versionedLock` 的 fence 与 TTL 分离**（`remote_entity/versioned_lock_lua.go`）：fence 来自独立的 `key:fence` 计数器（`INCR`），**永不过期、不共享锁 hash 的 TTL**——若 fence 随锁一起过期，计数器归零后新持有者会拿到更小的 fence，栅栏失效。锁本体是带 TTL 的 hash（owner/version），下游写路径按 fence 单调性做 CAS 拒绝旧持有者。
 - **幂等 unlock**（`versioned_lock_lua.go` `versionedUnlockLua`）：unlock 的应答可能丢失，重试时若发现 `version == 本次要写的新版本`，证明先前那次 unlock 已生效，返回 2（成功）而非 NotOwned——依赖“unlock 版本按 key 单调唯一”的接口契约。
@@ -355,7 +364,7 @@ ack 检查点推进（nestwal/checkpoint.go）
 
 - **saga Mongo store**（`saga/mongo_store.go`）：任务领取用 `FindOneAndUpdate` 带 `version` + `lease_until <= now` 的 CAS，`$inc lease_token` 使过期实例的后续提交被 owner+token 过滤；`SaveWithOutbox` 在**一个 Mongo 事务**里同落 saga 状态、outbox 命令与 completion 收据，重复完成通过收据 digest 幂等判定。
 - **replication AEAD UDP**（`replication/udp_crypto.go`、`udp_transport.go`）：AES-GCM per-session；`SendSalt`/`ReceiveSalt` 每个方向独立且构造时强制不相等（同 key 双向复用同一 nonce 空间会灾难性破坏 GCM）；nonce = salt(4B) + 单调 sequence(8B)，序列号耗尽即拒发；接收端 64 包位图防重放窗口；**地址迁移只在 AEAD 验证通过之后**（`Open` 成功且 `isCurrentRoute`）才生效，未认证的包改不了路由。
-- **spatial**（`spatial/terrain.go`、`pathfind.go`、`block_index.go`）：`GridTerrain` 并发安全网格阻挡；`FindPath` 四方向 A*（曼哈顿启发，含起终点）；`BlockIndex` 是 ID-only 的分块 AOI 索引，`QueryRadius` 先按块粗筛再精确过滤，附带块版本号供增量同步。
+- **spatial / ai / gateway 的定位声明**（各包 package doc）：三者都是**轻量构件而非中间件服务**，选型前先读它们的 non-goals——`spatial` 是均匀网格 + 四方向 A* + ID-only 块索引（`QueryRadius` 先块粗筛再精确过滤，附块版本号供增量同步），**无 Z 轴、无 navmesh、无内建兴趣管理**；`ai` 是行为树骨架（组合/装饰节点 + 黑板 + tick 控制器），**无节点库、无编辑器格式、无规划器**；`gateway` 只是中间件集合（限流/鉴权守卫），**不是网关服务器**。房间级 2D 玩法够用；MMO 级空间服务/AI 中间件需要自建或另选。
 
 ---
 
