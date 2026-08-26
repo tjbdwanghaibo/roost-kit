@@ -1,421 +1,406 @@
 # cube-kit
 
-[English](#english) | [中文](#cube-kit-中文说明)
-
-`cube-kit` 为 Cube 服务提供可组合的基础设施 Mod：Redis、MongoDB、NATS/JetStream、etcd、运维 HTTP、分布式锁、配置热更、实体远程访问和统计日志等。它依赖 `cube-core` 的应用生命周期和 capability 抽象。
-
-## cube-kit 中文说明
-
-### 仓库关系
+`cube-kit`（仓库目录名 `roost-kit`，Go 模块 `github.com/tjbdwanghaibo/cube-kit`）是 roost 框架的**中间件组件层**：它把 Redis、MongoDB、NATS/JetStream、etcd、本地磁盘 WAL 等具体基础设施实现为 `cube-core` 定义的稳定接口与 `app.Mod` 生命周期组件，业务服务只需按需装配。
 
 ```text
-业务服务 (cube 或自定义服务)
-  -> cube-kit: 具体基础设施 Mod
-  -> cube-core: Mod 生命周期、Registry 和稳定接口
+业务服务（游戏服 / world 服 / 自定义服务）
+  └─> cube-kit   具体基础设施 Mod（本仓库）
+        └─> cube-core   Mod 生命周期、app.Registry、稳定接口与 Nest 执行引擎
 ```
 
-一个 Mod 负责读取配置、构造客户端、注册 capability、接入健康检查并在停服时释放资源。业务代码应通过 `app.Registry` 取得 core 中定义的接口，而不应依赖 Mod 的私有实现。
+---
 
-### 安装
+## 1. 组件总览
 
-发布版本可用后：
+| 组件 | 解决什么问题 | 外部设施 | 何时用 |
+| --- | --- | --- | --- |
+| `nestwal/` | Nest 事务的段式 commit WAL：group commit、崩溃恢复、顺序 replay、transactional outbox；是 `DurabilityStrict/Pipelined` 的 `TransactionCommitter` 实现 | 本地磁盘 + NATS JetStream（effect 投递）+ MongoDB（经 checkpoint backend 落库） | 任何要求"成功回包 = 已持久化"的 Nest 服务 |
+| `checkpoint/` | 实体快照异步落库：journal、批量 flush、版本 CAS、admission 重试，以及 pipelined durable watermark 外化闸门 | MongoDB + Redis（7.2+，强制 AOF 快照 WAL） | 使用 Nest 实体自动持久化的服务 |
+| `nest/` | 装配一个实例级 core Nest 引擎，注册 `nest.Client` capability | 无（依赖 `nestwal` Mod） | 所有 Nest 服务 |
+| `redis/` | Redis 客户端、pipeline、pub/sub、分布式锁（`SetNX`）与 `AutoExtendLock` 自动续期包装 | Redis | 缓存、去重、可容忍双写的互斥 |
+| `mongo/` | MongoDB 客户端、collection、session/事务封装 | MongoDB | 一切持久化 |
+| `nats/` | NATS 连接、RPC、JetStream、可靠 Bus | NATS/JetStream | 服务间消息 |
+| `etcd/` | 服务注册/发现、`IFencedElection` 选主（CreateRevision 栅栏）、prefix 本地镜像 | etcd | 多实例部署的发现与选主 |
+| `remote_entity/` | 跨服务实体的原子事务、不可变快照分发、`IVersionedLock`（栅栏 + 版本）| Redis + NATS（sync）+ MongoDB | 跨服实体所有权与远程提交 |
+| `saga/` | 跨事务域长事务：Mongo 状态机 + outbox + lease fencing + 幂等步骤 inbox | MongoDB + NATS JetStream | 跨服务多步业务流程 |
+| `sync/`、`syncstream/` | 房间/AOI 状态同步：20Hz 合帧、可靠 retire、分片、压缩 | NATS/JetStream 或 `replication` transport | 实时房间同步 |
+| `replication/` | 帧复制网络层：QUIC/KCP/UDP transport，UDP 为 per-session AEAD 加密 + 防重放 | 无（自带网络协议栈） | 实时帧下发（客户端连接） |
+| `gateway/` | 接入层中间件：限流、超时、panic 隔离 | 无 | 玩家接入链路 |
+| `spatial/` | 整数网格地形、四方向 A* 寻路、ID-only AOI 块索引（`QueryRadius`） | 无 | 场景服寻路与 AOI |
+| `ai/`、`taskflow/` | 泛型行为树 + 策略控制器；任务编排 Runner | 无 | NPC/玩法逻辑 |
+| `lock/`、`ops/`、`configdata/`、`statslog/` | 进程内锁管理器；运维 HTTP（health/ready/metrics）；配置快照热更；周期统计日志 | —/HTTP/本地文件 | 通用运行时设施 |
+| `mods/` | 全部 capability 名称常量（`mods.ModRedis`、`mods.ModNestWAL`…） | 无 | 业务从 Registry 取依赖时使用 |
 
-```bash
-go get github.com/tjbdwanghaibo/cube-kit@latest
+---
+
+## 2. 快速启动
+
+### 2.1 独立体验 nestwal：写入 → 崩溃 → 恢复重放
+
+下面的程序不需要任何外部设施，直接演示 WAL 的核心承诺：**Append 返回即持久化；崩溃产生的 torn tail 会在重开时被截断；重放从 ack fence 开始且不重复**。
+
+新建一个空目录，写入 `go.mod`（发布版可直接 `go get`；本地联调时用 `replace` 指向你的 checkout）：
+
+```go
+module nestwal-demo
+
+go 1.25.0
+
+require (
+	github.com/tjbdwanghaibo/cube-core v1.6.2
+	github.com/tjbdwanghaibo/cube-kit v1.6.1
+)
+
+// 本地联调时（路径改成你的实际 checkout 位置）：
+replace github.com/tjbdwanghaibo/cube-kit => /path/to/roost-kit
+
+replace github.com/tjbdwanghaibo/cube-core => /path/to/roost-core
 ```
 
-本地联调三仓库时，在共同父目录创建工作区：
+`main.go`：
 
-```bash
-cd /path/to/workspace
-go work init ./cube ./cube-core ./cube-kit
+```go
+// nestwal 独立演示：写入 → 模拟崩溃（torn tail）→ 恢复重放 → ack 检查点。
+// 运行：go run .
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"time"
+
+	corenest "github.com/tjbdwanghaibo/cube-core/nest"
+	"github.com/tjbdwanghaibo/cube-kit/nestwal"
+)
+
+func record(id byte, entityID int64, payload string) corenest.CommitRecord {
+	var txID corenest.TransactionID
+	txID[15] = id
+	return corenest.CommitRecord{
+		ID:         txID,
+		Handler:    "demo.add_gold",
+		CreatedAt:  time.Now().UnixNano(),
+		Durability: corenest.DurabilityStrict,
+		Mutations: []corenest.EntityMutation{{
+			EntityID: entityID, Resource: "player", Codec: "json",
+			Data: []byte(payload),
+		}},
+		Effects: []corenest.Effect{{
+			ID: fmt.Sprintf("demo-effect-%d", id), Topic: "demo.gold_changed",
+			Payload: []byte(payload),
+		}},
+	}
+}
+
+func main() {
+	dir, err := os.MkdirTemp("", "nestwal-demo-")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	ctx := context.Background()
+
+	opts := nestwal.DefaultOptions(dir)
+	opts.OnFatal = func(err error) { log.Fatalf("WAL fatal, fence the process: %v", err) }
+
+	// ---- 第一次“进程生命周期”：写入三笔事务后模拟断电 ----
+	wal, err := nestwal.Open(opts)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for i := byte(1); i <= 3; i++ {
+		fence, err := wal.Append(ctx, record(i, int64(i), fmt.Sprintf(`{"gold":%d}`, int(i)*100)))
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("append tx#%d -> fence{segment:%d offset:%d}\n", i, fence.Segment, fence.Offset)
+	}
+	if err := wal.Close(ctx); err != nil {
+		log.Fatal(err)
+	}
+	// 模拟崩溃：向活动段尾部追加半个 frame（断电时常见的 torn write）。
+	segment := filepath.Join(dir, "segment-00000000000000000001.wal")
+	f, err := os.OpenFile(segment, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if _, err := f.Write([]byte{0x52, 0x53, 0x57}); err != nil { // 不完整的 magic
+		log.Fatal(err)
+	}
+	_ = f.Close()
+
+	// ---- 第二次“进程生命周期”：重开时自动截断 torn tail，从 ack fence 重放 ----
+	wal, err = nestwal.Open(opts) // Open 内部 scanFramesEnd 截断损坏尾部
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer wal.Close(ctx)
+
+	applied := map[int64]string{}
+	var last corenest.CommitFence
+	replay := func(fence corenest.CommitFence, rec corenest.CommitRecord) error {
+		for _, m := range rec.Mutations {
+			applied[m.EntityID] = string(m.Data) // 幂等落库（演示用内存表）
+		}
+		for _, e := range rec.Effects {
+			fmt.Printf("replay tx=%s publish effect %s\n", rec.ID, e.ID)
+		}
+		last = fence
+		return nil
+	}
+	if err := wal.Replay(ctx, replay); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("recovered entities: %v\n", applied)
+
+	// 落库+发布成功后推进 ack 检查点（双 slot + generation，fsync 持久化）。
+	if err := wal.Ack(ctx, last); err != nil {
+		log.Fatal(err)
+	}
+
+	// 再次 Replay：扫描从 ack fence 开始，已确认前缀不再出现。
+	replayed := 0
+	if err := wal.Replay(ctx, func(corenest.CommitFence, corenest.CommitRecord) error {
+		replayed++
+		return nil
+	}); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("records after ack: %d (expect 0)\n", replayed)
+
+	// ---- Pipelined 提交：Enqueue 拿 ticket，group commit 后水位线先行发布 ----
+	ticket, err := wal.Enqueue(ctx, record(9, 9, `{"gold":900}`))
+	if err != nil {
+		log.Fatal(err)
+	}
+	<-ticket.Done() // 组提交 fsync 完成即被唤醒
+	if err := ticket.Err(); err != nil {
+		log.Fatal(err) // 只可能是 ErrCommitIndeterminate
+	}
+	fmt.Printf("ticket lsn=%d durable, watermark DurableLSN=%d\n", ticket.LSN(), wal.DurableLSN())
+}
 ```
 
-不要把仅用于本机目录结构的 `go.work` 提交到任何一个仓库。
-
-### Mod 生命周期
-
-所有 Mod 实现 `cube-core/app.Mod`：
+预期输出（已实际编译运行验证）：
 
 ```text
-Init:    读取配置并构造对象
-Provide: 注册 capability 到 app.Registry
-Start:   建立连接、注册 health、启动后台任务
-Stop:    停止后台任务并关闭连接
+append tx#1 -> fence{segment:1 offset:206}
+append tx#2 -> fence{segment:1 offset:412}
+append tx#3 -> fence{segment:1 offset:618}
+replay tx=00000000000000000000000000000001 publish effect demo-effect-1
+replay tx=00000000000000000000000000000002 publish effect demo-effect-2
+replay tx=00000000000000000000000000000003 publish effect demo-effect-3
+recovered entities: map[1:{"gold":100} 2:{"gold":200} 3:{"gold":300}]
+records after ack: 0 (expect 0)
+ticket lsn=1 durable, watermark DurableLSN=1
 ```
 
-`Init` 不应启动 goroutine 或访问远端；`Provide` 不应覆盖已有 capability；`Start` 失败必须向上传递；`Stop` 必须能让停服流程收敛。
+> 生产环境不要直接使用裸 `WAL`：应通过 `nestwal.NewMod` / `nestwal.OpenRuntime` 拿到 `Committer`，由它实现 `corenest.TransactionCommitter` 并负责后台重放、落库、outbox 投递与 ack。
 
-### 模块索引
+### 2.2 作为 committer 接入 cube-core Nest（生产装配）
 
-| 目录 | 提供的能力 |
-| --- | --- |
-| `redis` | Redis client、CAS、pipeline、pub/sub、分布式锁辅助 |
-| `mongo` | MongoDB client、database、collection 与 session 支持 |
-| `nats` | NATS client、RPC、JetStream、Bus 与订阅管理 |
-| `etcd` | 服务注册/发现、lease 保活、选主和 watcher |
-| `ops` | 运维 HTTP 入口，承载 health、ready、metrics 与 admin 接入 |
-| `lock` | 基于 core 锁抽象的 Mod 装配 |
-| `nest` | 实例化 Nest Engine 的 App Mod，向启动层提供可注入 `nest.Client` |
-| `gateway` | 玩家接入层的限流、超时和 panic 隔离中间件 |
-| `sync` | NATS/JetStream 数据同步 transport；房间 Subject 订阅、20Hz 合帧和可靠 retiring |
-| `spatial` | 通用整数网格坐标、并发 Terrain、ID-only AOI BlockIndex 与 A* 寻路 |
-| `remote_entity` | 跨服务 entity 原子事务、不可变快照、outbox 与版本锁 |
-| `saga` | 跨事务域 Saga 的 Mongo 状态/outbox、lease fencing、JetStream transport 与幂等步骤 inbox |
-| `configdata` | 配置加载、快照发布和热更辅助 |
-| `statslog` | 周期性运行时统计日志 |
-
-### Saga
-
-`saga.NewMod(definitions...)` 提供 `*core/saga.Engine`。Saga 状态、outbox 和
-completion receipt 使用 MongoDB 事务保持一致；worker 通过带索引的
-`next_run_at`/`next_attempt_at` 批量领取任务，并用 lease token 防止过期实例提交。
-
-业务 Nest handler 内使用 `core/saga.EmitStart`，不要直接调用 `StartSaga`。启动意图
-会和本次 Entity mutation 写入同一个 Nest WAL record；Saga Mod 的共享 durable
-consumer 从 `ROOST_EFFECTS` 消费 `roost.effect.saga.start` 并幂等创建 Saga。
-`StartSaga` 只用于 durable consumer、管理和恢复路径。同一 business key 如果 payload
-或 deadline 不同会返回 `ErrIdentityConflict`，不会误判为重复成功。
-
-步骤服务使用 `saga.NewMongoCommandInbox` 和 `saga.SubscribeStep`。handler 收到的
-context 已绑定 MongoDB transaction；handler 的数据库修改和本次 `CommandID` receipt 会一起
-提交。结果发布失败时 JetStream 会重新投递，inbox 不会再次执行业务修改，只会
-重放已经保存的 completion。新的 Saga attempt 使用新的 `CommandID`，因此允许重新执行
-handler；handler 必须使用稳定的 `IdempotencyKey` 查询或继续同一笔业务操作。
-handler 只能通过该 context 修改 MongoDB；Mongo transaction callback 可能重试，网络调用或
-其他不可逆副作用必须先写入同事务 outbox，不能直接在 handler 内执行。
-步骤成功或终止后会写入 operation tombstone，并原子删除该 operation 仍在 outbox
-中的旧 attempt；已经并发发布的旧 attempt/result 也只会被确认，不会进入 DLQ。
-
-```go
-mod := saga.NewMod(alliancerally.Definition())
-
-inbox, _ := saga.NewMongoCommandInbox(mongoClient, "game", "")
-sub, err := saga.SubscribeStep(ctx, jetStream, mod.Transport(), inbox,
-    saga.StepConsumerConfig{
-        Stream: "ROOST_SAGA", Durable: "world-create-march",
-        Topic: "alliance_rally.create_march",
-    }, handleCreateMarch)
-```
-
-生产环境至少监控 `Engine.Stats()` 中的 store/worker failure、conflict、publish failure 和 manual required，
-并为 `ManualRequired` 提供查询、修复后 `Resume` 的管理入口。
-
-### Nest 与玩家接入装配
-
-`nest.NewMod(getter)` 创建并持有一个 Core Nest Engine；它不会设置旧的
-`nest.Nest` 全局变量。Service 在 `Init` 阶段从 Registry 获取 `nest.Client`，再构造
-codegen 生成的 Sender：
-
-```go
-nestMod := kitnest.NewMod(entityGetter)
-app.Mods(nestMod)
-
-client := app.MustLookup[corenest.Client](registry, mods.ModNest)
-bagSender := bagsender.NewBagSender(client)
-```
-
-可配置项为 `nest.worker_num`、`nest.heartbeat_worker_num`、
-`nest.queue_capacity`、`nest.tick_duration` 和 `nest.request_timeout`。接入端建议组合
-Core `gateway.RequireAuthenticated` 与 Kit `gateway.RateLimit`、`Timeout`、`Recover`。
-| `mods` | 可复用 Mod capability 名称常量 |
-
-### 最小装配
-
-以下示例选择 Redis、MongoDB 和 etcd；只注册服务实际需要的 Mod。`service` 是实现 `app.Service` 的业务入口。
+生产装配走 Mod 体系。下面的骨架已通过编译校验（`app.Service` 与 `entity.Getter/ManagerAccess` 由业务提供）：
 
 ```go
 import (
-    "errors"
-
-    "github.com/tjbdwanghaibo/cube-core/app"
-    redisapi "github.com/tjbdwanghaibo/cube-core/redis"
-    "github.com/tjbdwanghaibo/cube-kit/etcd"
-    "github.com/tjbdwanghaibo/cube-kit/mongo"
-    "github.com/tjbdwanghaibo/cube-kit/mods"
-    "github.com/tjbdwanghaibo/cube-kit/redis"
+	"github.com/tjbdwanghaibo/cube-core/app"
+	"github.com/tjbdwanghaibo/cube-core/bus"
+	corenest "github.com/tjbdwanghaibo/cube-core/nest"
+	kitcheckpoint "github.com/tjbdwanghaibo/cube-kit/checkpoint"
+	kitnest "github.com/tjbdwanghaibo/cube-kit/nest"
+	"github.com/tjbdwanghaibo/cube-kit/mongo"
+	"github.com/tjbdwanghaibo/cube-kit/nats"
+	"github.com/tjbdwanghaibo/cube-kit/nestwal"
+	"github.com/tjbdwanghaibo/cube-kit/ops"
+	"github.com/tjbdwanghaibo/cube-kit/redis"
 )
+
+walMod := nestwal.NewMod(false) // true 时额外接入 remote_entity
 
 application := app.New("game", "v1.0.0").
-    Mods(
-        redis.NewRedisMod(),
-        mongo.NewMongoMod(),
-        etcd.NewEtcdMod(),
-    ).
-    RegisterServer("game", service)
+	Mods(
+		ops.NewOpsMod(), // health/ready/metrics HTTP
+		redis.NewRedisMod(),
+		mongo.NewMongoMod(),
+		nats.NewNatsMod(bus.JSONCodec{}),
+		kitcheckpoint.NewMod(kitcheckpoint.WithEntityAccess(access)),
+		walMod,
+		kitnest.NewMod(getter, func(o *corenest.NestOpts) {
+			// nest Mod 的 Provide 晚于 nestwal Mod 执行（DependsOn 保证），
+			// 此时 NestOptions() 已携带 committer 与 pipelined 灰度配置。
+			for _, opt := range walMod.NestOptions() {
+				opt(o)
+			}
+		}),
+	).
+	RegisterServer("game", service)
 
 if err := application.Execute(); err != nil {
-    panic(err)
+	panic(err)
 }
 ```
 
-业务侧通过 capability key 和 core 接口读取依赖。key 常量集中在 `mods` 包，避免手写字符串散落在业务中：
-
-```go
-import (
-    "errors"
-
-    "github.com/tjbdwanghaibo/cube-core/app"
-    redisapi "github.com/tjbdwanghaibo/cube-core/redis"
-    "github.com/tjbdwanghaibo/cube-kit/mods"
-)
-
-client, ok := app.Lookup[redisapi.IRedis](registry, mods.ModRedis)
-if !ok {
-    return errors.New("redis capability is unavailable")
-}
-```
-
-这里的 `redisapi.IRedis` 表示 `cube-core/redis` 中的接口类型；应用不需要也不应访问 `RedisMod` 的内部字段。
-
-### 基础配置
-
-默认地址适合本机开发，生产环境必须通过服务配置显式指定地址、认证、超时和 namespace。
+对应的最小配置（各键在各 Mod 的 `Init` 中读取）：
 
 ```yaml
+sid: 1
 redis:
   addr: "127.0.0.1:6379"
-  password: ""
-
 mongo:
   uri: "mongodb://127.0.0.1:27017"
-
 nats:
   url: "nats://127.0.0.1:4222"
-  prefix: "cube"
 
-etcd:
-  endpoints: "127.0.0.1:2379"
-  service_prefix: "/cube/services"
-  lease_ttl: 10
-```
-
-配置键由各 Mod 的 `Init` 阶段读取。修改 NATS 可靠投递、etcd 注册重试、Mongo 连接池或 remote entity 同步策略时，请先阅读对应包源码与测试，避免在业务包中复制连接逻辑。
-
-Checkpoint Mod 的 Redis WAL 默认执行强制 AOF admission，不能关闭：
-
-```yaml
-checkpoint:
+nest:
   wal:
-    durable_timeout: 5s
-    aof_timeout: 3s
-    aof_replicas: 1
+    dir: "data/wal/nest/1"     # 缺省为 data/wal/nest/<sid>
+    group_commit_interval: 10ms
+  pipelined:
+    allowlist: ["player.consume", "player.reward"]  # 允许 DurabilityPipelined 的 handler
+    async: false                                    # Phase 2：异步完成
 ```
 
-Redis 必须为 7.2+ 并开启 AOF。Kit 会在启动阶段用同一物理连接执行探针写入和 `WAITAOF`，local fsync 固定要求 1，`aof_replicas` 决定还需多少副本确认；任一阈值未满足即启动失败。当前生产接入支持单主或 Sentinel，拒绝无法保证 Lua 与 `WAITAOF` 同连接同分片的 Redis Cluster。
+handler 侧通过 `HandlerMeta{Durability: corenest.DurabilityStrict}`（或 `DurabilityPipelined`）声明持久化级别；成功回包时事务已在 WAL 中持久化，落库与 effect 投递由 `nestwal.Committer` 的后台重放循环异步完成。
 
-### 依赖关系与启停规则
+---
 
-- 需要 Redis 的可靠 NATS bus，必须同时注册 `redis.NewRedisMod()` 与 `nats.NewNatsMod(...)`。
-- etcd 服务注册依赖有效的 `sid`、`server_type` 和 `etcd.advertise_addr` 等服务运行信息。
-- 使用 `remote_entity` 或 `sync` 前，应先确认 NATS/JetStream 与服务路由已完成装配。
-- 外部依赖不可用时，应通过 health/ready 暴露故障，而不是在生产环境静默降级。
-- 后台 consumer、watcher、ticker 必须在 Mod 停止时退出；业务停服时先停止接入，再 flush 和关闭依赖。
+## 3. 核心概念
 
-### 分布式锁选型
+### 3.1 Mod 装配与配置体系
 
-| 需求 | 用什么 | 说明 |
-| --- | --- | --- |
-| 可容忍双写 / 操作幂等的互斥（去重、缓存预热、best-effort 单例） | `fredis.IDistLock`（`redis` Mod） | 单实例 SetNX，无栅栏；TTL 内未完成会静默过期 |
-| 上一行 + 长临界区不想手动续期 | `redis.AutoExtendLock` 包装器 | 自动续期 watchdog；丢租约通过 `Err()` 暴露，仍**不带栅栏** |
-| 必须防止旧持有者脏写（实体所有权、存储提交） | `fredis.IVersionedLock`（`remote_entity` Mod） | 单调 fence token + 自动续期 + 幂等 unlock，下游写路径按 fence 做 CAS |
-| 领导权敏感写（选主后的独占任务） | `etcd` 选主 + `Fence()` | `IsLeader` 存在固有 stale 窗口，写路径必须携带 fence token 校验 |
+所有组件实现 `cube-core/app.Mod` 四阶段生命周期：
 
-### etcd 多服本地镜像
-
-`etcd.NewLocalMirror` 将一个 etcd prefix 的 revision 快照和后续 watch 映射为进程内强类型结构。初始化 watch 从快照 `Revision+1` 开始，断线或 compact 后重新获取完整快照，因此不会留下 Get/Watch 间隙。读取结果经过 `Clone`，调用方修改嵌套 map/slice 不会与 watch 更新产生数据竞争。
-
-```go
-type SharedRule struct {
-    Enabled bool              `json:"enabled"`
-    Params  map[string]string `json:"params"`
-}
-
-cfg := etcd.JSONLocalMirrorConfig[SharedRule]("/cube/shared-rules/")
-mirror, err := etcd.NewLocalMirror(ctx, etcdClient, cfg)
-if err != nil {
-    return err
-}
-defer mirror.Close()
-
-if err := mirror.WaitForSync(ctx); err != nil {
-    return err
-}
-entry, ok, err := mirror.GetEntry("/cube/shared-rules/battle")
-if err == nil && ok {
-    next := entry.Value
-    next.Enabled = true
-    updated, err := mirror.PublishIfRevision(ctx, entry.Key, entry.ModRevision, next)
-    // updated=false 表示其他服务器已经先更新，应重新读取后再决定是否重试。
-    _, _ = updated, err
-}
+```text
+Init(cfg)   读取 viper 配置、构造参数（不启 goroutine、不访问远端）
+Provide(r)  构造对象并向 app.Registry 注册 capability
+Start()     建连、注册 health、启动后台任务（失败必须向上传递）
+Stop()      停后台任务、flush、关连接（保证停服收敛）
 ```
 
-`Publish/Delete` 是 last-write-wins；需要防止多服覆盖时使用 `PublishIfRevision/DeleteIfRevision`。发布成功后本地值仍以 watch 回流为准，不在调用端提前修改，以确保所有服务器观察到相同的 etcd revision 顺序。`Status().Synced=false` 时已有数据可能陈旧，业务应根据 `LastError` 决定拒绝请求或降级。
+- **依赖声明**：Mod 通过 `DependsOn()` 声明拓扑（如 `nestwal` 依赖 `checkpoint`、`nats.jetstream`、`health`；`nest` 依赖 `nest.wal`），框架按拓扑序执行 Provide/Start。
+- **capability 查询**：业务永远通过 `app.Lookup[接口类型](registry, mods.ModXxx)` 取依赖，只依赖 `cube-core` 接口，不触碰 Mod 私有实现。名称常量集中在 `mods/name.go`。
+- **配置**：每个 Mod 在 `Init` 中读取自己的配置命名空间（`nest.wal.*`、`checkpoint.*`、`nest.pipelined.*`…），零配置时使用可运行的默认值。`nestwal/mod.go` 的 `Init` 是完整样例：所有 `nest.wal.*` 键逐个覆盖 `DefaultOptions`。
 
-需要在值变化时主动更新派生状态时，直接订阅镜像，不需要业务自行消费 watcher channel：
+### 3.2 Durability 管线全景（nest 事务 → 磁盘 → 数据库）
 
-```go
-subscription, err := coreetcd.SubscribeLocalMirror(mirror, ctx, func(ctx context.Context, change coreetcd.LocalMirrorChange[SharedRule]) error {
-    switch change.Type {
-    case coreetcd.LocalMirrorSnapshot:
-        // 首次订阅和断线重同步都会进入这里；应原子替换派生状态。
-        replaceRules(change.Snapshot, change.Revision)
-    case coreetcd.LocalMirrorPut:
-        updateRule(change.Key, change.Entry.Value, change.Revision)
-    case coreetcd.LocalMirrorDelete:
-        removeRule(change.Key, change.Revision)
-    }
-    return nil
-}, coreetcd.LocalMirrorSubscribeOptions{QueueCapacity: 256})
-if err != nil {
-    return err
-}
-defer subscription.Close()
+一笔 Nest 事务从 handler 返回到最终落库经过如下阶段（Strict 与 Pipelined 只在前两步不同）：
+
+```text
+handler 成功返回
+  │  持实体锁
+  ├─ Strict:    Committer.Commit → WAL.Append —— 在锁内等待本批 fsync 完成
+  ├─ Pipelined: Committer.Enqueue → WAL.Enqueue —— 锁内只做“可拒绝检查+拿 LSN+入队”，
+  │             立即解锁；返回 CommitTicket
+  ▼
+group commit（nestwal/wal.go writerLoop）
+  批量聚合（BatchDelay/BatchMaxRecords/BatchMaxBytes）→ 一次 write + fsync
+  ▼
+durable 水位线发布（resolveDurableLocked）
+  DurableLSN 先推进，随后才唤醒 ticket 等待者
+  ▼
+外化闸门（externalization gates）
+  一切“离开进程”的动作 gate 在 durableLSN >= tx.LSN：
+  · 回包 / AfterCommit 副作用（cube-core nest 引擎内）
+  · checkpoint 快照外化（checkpoint/mod.go entityDurable）
+  ▼
+后台重放循环（nestwal/committer.go replayPass）
+  从 ack fence 顺序 Replay → MongoAtomicApplier 落库（幂等）→ EffectPublisher 发 outbox
+  ▼
+ack 检查点推进（nestwal/checkpoint.go）
+  双 slot + generation + fsync；已确认前缀此后不再重放，旧 segment 可回收
 ```
 
-每个订阅按 revision 串行回调，且回调不持有 Mirror 锁；`Entry/Previous/Snapshot` 都是该回调独享的深拷贝。队列满时只关闭慢订阅并令 `subscription.Err()` 返回 `ErrMirrorSubscriberSlow`，Mirror 与其他订阅继续工作。生产服务应监控 `Done()` 与 `Err()` 并按“重新订阅后以首个 Snapshot 覆盖派生状态”的方式恢复。阻塞型回调必须响应传入的 `ctx`；停服有期限时使用 `CloseWithContext`。
+关键点：**WAL 是 commit point**。落库（Mongo）和 effect（JetStream）都是 commit 之后的至少一次投递，靠幂等（版本 CAS、`Effect.ID` 去重、`MongoEffectInbox` 收据）收敛为恰好一次的业务效果。`checkpoint` 的快照落库则永远不允许跑到 WAL 前面——这是 watermark 闸门的职责。
 
-### 开发与验证
+设计文档：`cube-core` 仓库的 `NEST_TRANSACTION_WAL.md` 与 `NEST_PIPELINED_COMMIT.md`（中文，含正确性论证）。
 
-```bash
-go test ./redis ./mongo ./nats ./etcd
-go test ./remote_entity ./sync ./ops ./statslog
-go test ./...
-```
+---
 
-新增 Mod 时，请同时提供：配置读取、`Registry` capability、health、必要的指标、确定的 Stop 行为以及不依赖真实外部服务的测试替身。
+## 4. 关键实现细节
 
-### 实时帧复制 Transport
+每条都给出源文件指引，读代码时可对照。
 
-`replication` 包承接 `cube-core/replication` 之上的通用网络发送策略：
+### nestwal：WAL 与提交
 
-- `AsyncTransport` 为每个 Session 建立独立的 latest-only Datagram Lane 和有界 Reliable Lane。
-- 同一 Frame 的全部应用层分片原子入队，新 Frame 只会整体替换旧 Frame。
-- `QUICTransport` 同时提供 QUIC DATAGRAM 和长度帧 Reliable Stream，是默认生产选择。
-- `KCPTransport` 使用加密 + FEC 的 OOB 通道发送 Snapshot，以 KCP 字节流发送长度帧可靠消息。
-- `UDPTransport` 只提供带 per-session AES-GCM 与防重放窗口的 Datagram；它没有可靠 Lane。
-- `CompositeTransport` 可把受保护 UDP 与已有可靠连接组合为 core Transport。
-- Session 注册和移除由 core Replicator 自动传递，房间业务不需要维护第二份网络队列生命周期。
-- 默认拒绝缺片、重复片、混合 Frame 和 checksum 错误的 Datagram batch；仅在可信上游已完成等价校验时才允许开启 opaque 模式。
-- Session 移除后必须等待 draining 完成才能复用 ID；可靠发送失败会终止该 Session 的两条 Lane，防止后续消息越序。
-- `Close` 支持并发和重复等待，不会为每次超时调用遗留 WaitGroup waiter。
+- **双 CRC frame**（`nestwal/wal.go` `encodeFrame`/`scanFramesFrom`）：20 字节 frame 头含 payload CRC32 和头自身 CRC32。头 CRC 保证长度字段可信（否则一个损坏的 length 会让扫描越界误判），payload CRC 保证内容可信。
+- **torn-tail 截断**（`wal.go` `openActive` → `scanFramesEnd`）：重开时以 `allowTornTail=true` 扫到最后一个完整 frame，`Truncate` 掉尾部残缺字节——断电时最后一笔未 fsync 的写入被安全丢弃，且只可能丢“未向调用方确认”的后缀。
+- **group commit**（`wal.go` `writerLoop`/`collectBatch`/`processBatch`）：单写线程聚批，一次 `write` + 一次 `fsync` 摊薄毫秒级 fsync 成本；`GroupCommitInterval` 定时器兜底刷新异步写。
+- **Enqueue ticket 与唯一拒绝点**（`wal.go` `Enqueue`）：Pipelined 的 `Enqueue` 在实体锁内被调用，因此把**一切可拒绝检查**（编码、大小、容量预约 `reservedBytes`、terminal 状态、队列准入）同步做完；`enqueueMu` 让 LSN 分配与入队原子，保证 LSN 序 = 物理日志序。入队成功后调用方即可解锁——之后唯一可能的失败是 ticket 上的 `ErrCommitIndeterminate`。`processBatch` 对已预约请求**永不拒绝**（调用方已凭准入放弃了回滚权）。
+- **为什么 watermark 必须先于唤醒发布**（`wal.go` `resolveDurableLocked`）：ticket resolve 是一个承诺——“`DurableLSN` 已覆盖你的记录”。外化闸门在 `Done()` 触发后立刻读水位线，若先 `close(done)` 再推水位线，等待者会读到旧水位线而再次阻塞甚至误判未持久化。因此先 `durableLSN.Store(upto)`，再逐个 `close(ticket.done)`。
+- **ack fence 是合法扫描起点**（`wal.go` `Replay`）：ack fence 记录的是某个 frame 的**结束偏移**，天然落在 frame 边界上，所以重放可以跳过已确认的 segment 和 fence 所在 segment 的已确认前缀（`scanFramesFrom(file, segment, ack.Offset, ...)`），不必每轮从头读全量并重新校验 CRC。
+- **ack 检查点：双 slot + generation + 目录 fsync**（`nestwal/checkpoint.go`）：`ack-0.chk`/`ack-1.chk` 按 `generation & 1` 交替写，写入走 tmp 文件 → fsync → rename → `syncDirectory`。加载时取 CRC 合法者中 generation 最大的一个：任何时刻允许一个 slot 是 torn 的，另一个 slot 在替换者持久化前不会被碰。ack 丢失最多导致重复重放（幂等吸收），绝不会跳过记录。
+- **fsync 不确定 ⇒ 熔断而非重试**（`wal.go` `Options.OnFatal` 注释、`setTerminal`；`nestwal/mod.go` `onFatal`）：fsync 报错后，内核可能已经丢弃了 dirty page 却清掉了错误标记，重试的 fsync 会“成功”但数据并没有落盘——写入结果从此不可知。所以任何物理写/fsync 失败都被包装为 `corenest.ErrCommitIndeterminate` 并置 terminal：拒绝一切后续写入、以该错误 resolve 所有 pending ticket，并经 `OnFatal` 熔断进程（Mod 会 `NestMgr.Fence` + `app.RuntimeFailure.Fail`）。重启后由重放从最后一个 ack 恢复出唯一可信的历史。
+- **单写者锁与容量健康**：`writer.lock` 文件锁防止双进程写同一目录（`lock_unix.go`）；`MaxDiskBytes`/`MaxUnackedAge` 超限时 `Healthy()` 报错，接入 health 后表现为实例不健康而不是静默膨胀。
+- **落库与 outbox**（`nestwal/committer.go`、`mongo_atomic_applier.go`、`effect_inbox.go`）：重放循环在事务仍被实体锁持有时让路（`errTransactionHeld`，由 `TransactionReleased` 唤醒）；`MongoAtomicApplier` 把普通 after-image 与 Remote Entity 提交放进**一个 Mongo session 事务**；消费端用 `MongoEffectInbox` 把业务写与 effect 收据同事务提交实现恰好一次，JetStream 的 `MsgID` 去重窗口只是热路径优化。
 
-协议连接必须先经过网关鉴权并调用具体 Transport 的 `BindSession`，再调用 `FrameReplicationManager.RegisterSession`；后者会把 Session 生命周期自动传递到底层。推荐装配方式：
+### checkpoint：快照外化闸门
 
-```go
-protocol := replication.NewQUICTransport(replication.QUICTransportConfig{})
-async, err := replication.NewAsyncTransport(protocol, replication.DefaultAsyncTransportConfig())
-if err != nil {
-    return err
-}
-if err := manager.SetTransport(async); err != nil {
-    return err
-}
+- **durable watermark gate**（`checkpoint/mod.go` `entityDurable`/`onEntityRelease`）：实体释放时若 `base.LastCommitLSN() > DurableLSN()`，说明它最后一笔 pipelined 提交还没落盘——此时**先不做快照**（保住 dirty 位），放进 `pendingReleases`，由 admission 重试循环在水位线追上后再快照提交。闸门由 `nestwal/mod.go` 的 `cp.SetDurableWatermark(runtime.Committer.DurableLSN)` 自动接线；未用 pipelined 的实体 LSN 为 0 恒通过，代价只是一次原子读。
+- **pendingReleases / pendingSaves 与熔断**：重试集合有容量上限（`checkpoint.admission_pending_capacity`），超限触发 `fenceAdmission` → `RuntimeFailure`——宁可停服也不静默丢快照。
+- **Stop 有 30s 上界**（`mod.go` `Stop`）：若 WAL 已被熔断，水位线永远追不上，无界 flush 会让停服挂死；带 deadline 的 `StopWithContext` 保证停服收敛。
+- **Redis 快照 WAL 强制 AOF**（`mod.go` `validateRedisWALDurability`）：启动时用同一物理连接做探针写 + `WAITAOF`，阈值不满足直接启动失败；要求 Redis 7.2+ 开 AOF，拒绝无法保证 Lua 与 `WAITAOF` 同连接同分片的 Redis Cluster。
 
-// TLS/登录票据认证完成后：
-if err := protocol.BindSession(sessionID, quicConnection); err != nil {
-    return err
-}
-if err := manager.RegisterSession(corereplication.SessionInfo{ID: sessionID, OwnerID: playerID}); err != nil {
-    return err
-}
-```
+### 分布式锁与选主
 
-生产环境应配置非阻塞错误回调、发送超时和容量，并监控 active/draining、pending/in-flight、dropped frame、reliable abandoned/backpressure、send/receive/auth errors。UDP/KCP 仍需接入层提供登录握手、密钥派生与轮换、Cookie/限速和 DDoS 防护；QUIC 必须使用正式证书校验和固定 ALPN。完整约束见 `cube/docs/frame-replication-design.md`。
+- **`AutoExtendLock` 的 TTL 预算重试**（`redis/lock.go` `watch`）：每次续期调用都被限时（`extendCtx` 超时 = 续期间隔），防止挂死的 Redis 冻结 watchdog 而租约静默过期。续期遇到**瞬时错误**（网络/超时）不立即判丢——上一次成功续期可能仍覆盖着租约——只有 `time.Since(lastRenewed) >= ttl`（租约可证明已过期）才置 `Err()`；而服务器明确答复“不再持有”则立即停止续期。注意它**不带栅栏**：需要防旧持有者脏写时用 `IVersionedLock`。
+- **`versionedLock` 的 fence 与 TTL 分离**（`remote_entity/versioned_lock_lua.go`）：fence 来自独立的 `key:fence` 计数器（`INCR`），**永不过期、不共享锁 hash 的 TTL**——若 fence 随锁一起过期，计数器归零后新持有者会拿到更小的 fence，栅栏失效。锁本体是带 TTL 的 hash（owner/version），下游写路径按 fence 单调性做 CAS 拒绝旧持有者。
+- **幂等 unlock**（`versioned_lock_lua.go` `versionedUnlockLua`）：unlock 的应答可能丢失，重试时若发现 `version == 本次要写的新版本`，证明先前那次 unlock 已生效，返回 2（成功）而非 NotOwned——依赖“unlock 版本按 key 单调唯一”的接口契约。
+- **watchdog 续期上限 2×TTL**（`remote_entity/versioned_lock.go` `Touch`）：`AutoAsyncTouch` 每次把剩余 PTTL 加 `AsyncTouchExtend`，但封顶 `2*TTL`——续期只能维持租约，不能把租约无限抬长，持有者崩溃后锁仍在有界时间内自然释放。
+- **选主 fence**（`etcd/election.go`）：`Fence()` 返回本候选者 campaign key 的 **CreateRevision**，它随 prefix 的每次领导权更替单调递增。`IsLeader()` 存在固有 stale 窗口（lease 已在服务端过期、客户端未感知），所以领导权敏感写必须携带 fence token 并在存储侧拒绝旧 token。实现上 fence 先于 `isLeader` 标志发布：观察到 `IsLeader==true` 的调用方一定能读到本任期的 token。
 
-### Observer-free 房间状态同步
+### 其它
 
-`sync.RoomReplication` 承接 core 的 `SubjectSyncState` 与 `SubscriptionCoordinator`，适合 AOI、开房间和有限 LOD/权限视图：
+- **saga Mongo store**（`saga/mongo_store.go`）：任务领取用 `FindOneAndUpdate` 带 `version` + `lease_until <= now` 的 CAS，`$inc lease_token` 使过期实例的后续提交被 owner+token 过滤；`SaveWithOutbox` 在**一个 Mongo 事务**里同落 saga 状态、outbox 命令与 completion 收据，重复完成通过收据 digest 幂等判定。
+- **replication AEAD UDP**（`replication/udp_crypto.go`、`udp_transport.go`）：AES-GCM per-session；`SendSalt`/`ReceiveSalt` 每个方向独立且构造时强制不相等（同 key 双向复用同一 nonce 空间会灾难性破坏 GCM）；nonce = salt(4B) + 单调 sequence(8B)，序列号耗尽即拒发；接收端 64 包位图防重放窗口；**地址迁移只在 AEAD 验证通过之后**（`Open` 成功且 `isCurrentRoute`）才生效，未认证的包改不了路由。
+- **spatial**（`spatial/terrain.go`、`pathfind.go`、`block_index.go`）：`GridTerrain` 并发安全网格阻挡；`FindPath` 四方向 A*（曼哈顿启发，含起终点）；`BlockIndex` 是 ID-only 的分块 AOI 索引，`QueryRadius` 先按块粗筛再精确过滤，附带块版本号供增量同步。
 
-- Entity 只保存 dirty、内容版本和 Packer，不保存 Observer。
-- 同一 Profile 的冻结 Payload 在全部 Subscriber 之间共享。
-- Room Frame 与每个 Subscriber 的 Session Sequence 独立推进；下游拒绝整批时二者都不跳号。
-- `RoomTransportSink` 将 Snapshot/Leave 放入可靠 lane、将 Delta 分片放入 latest-only datagram lane；object ref 与 baseline 按 `(room, session)` 隔离，共享 sink 使用分片房间锁，不会因一个房间的 admission 阻塞所有房间。
-- `Start(ctx, 0)` 默认按 50ms（20Hz）合并 dirty；`FlushSubject`/`FlushDirty` 可主动刷新。
-- `RetireSubject` 在可靠 Leave 全部接纳前保留 Subject，并由 worker 自动重试。
-- `ReliableRoomFrameSink` 必须满足 all-or-none admission；不可将会部分入队、但只返回单个成功标志的发送循环直接作为下游。
+---
 
-```go
-room, err := sync.NewRoomReplication(roomID, frameSink)
-if err != nil {
-    return err
-}
-if err := room.RegisterSubject(subjectState); err != nil {
-    return err
-}
-if err := room.Start(ctx, 50*time.Millisecond); err != nil {
-    return err
-}
-defer room.Close(shutdownCtx)
+## 5. 学习路径
 
-_, err = room.Subscribe(ctx, subscriber, subjectState.SubjectID(), entity.SyncProfile{
-    Key: "near", LOD: 1, SchemaVersion: 3,
-})
-```
+按下面的顺序读源码与测试，每步都可 `go test ./<pkg>/` 验证认知：
 
-开房间服务应使用 `RoomManager`，而不是在业务层维护无上限的 map。Manager 对房间数、全局 subject/subscriber 和空闲生命周期做统一 admission：
+1. **框架心智模型**：`cube-core` 仓库 `README.md` + `RUNTIME_EXECUTION_MODEL.md`，然后读本仓库 `mods/name.go` 和任意一个小 Mod（如 `lock/lock_mod.go`）理解四阶段生命周期。
+2. **WAL 设计文档**：`cube-core/NEST_TRANSACTION_WAL.md` → `NEST_PIPELINED_COMMIT.md`（中文，含 Strict/Pipelined 语义对比与正确性论证）。
+3. **nestwal 主线**（本仓库核心，建议精读）：
+   - `nestwal/wal.go`（帧格式、group commit、Enqueue/ticket、terminal 熔断）→ `nestwal/checkpoint.go`（双 slot ack）→ `nestwal/committer.go`（重放循环）→ `nestwal/runtime.go` + `nestwal/mod.go`（装配与 watermark 接线）。
+   - 测试按价值排序：**`crash_test.go`**（`TestNestWALCrashChildProcess` 用真实子进程 `SIGKILL` 验证崩溃后 durable 前缀完整——最值得读）、`pipelined_test.go`（ticket 语义、同步拒绝、terminal 时 fail 所有 ticket）、`wal_test.go`（torn tail、ack、rotate）、`fatal_fence_test.go`（熔断到 Nest/RuntimeFailure 的传导）、**`pilot_test.go`**（`NESTWAL_PILOT=1 go test -run TestPipelinedPilot -v ./nestwal/`：真实引擎 + 真实磁盘的 strict vs pipelined 压测，理解为什么需要 pipelined）。
+4. **checkpoint 闸门**：`checkpoint/mod.go` + `checkpoint/pipelined_gate_test.go`（`TestReleaseGateDefersSnapshotUntilDurable`）+ `admission_limit_test.go`。
+5. **锁与选主**：`redis/lock.go` + `lock_test.go` → `remote_entity/versioned_lock.go`、`versioned_lock_lua.go` + `versioned_lock_unlock_test.go` → `etcd/election.go` + `election_test.go`。
+6. **横向扩展**：`saga/mongo_store.go`（lease CAS）→ `remote_entity/transaction_manager.go`（跨服事务追踪）→ `replication/udp_crypto.go`、`udp_transport.go` → `sync/room_replication.go` → `spatial/`、`ai/`、`taskflow/`。
 
-```go
-rooms, err := sync.NewRoomManager(sync.RoomManagerConfig{
-    Downstream: frameSink,
-    MaxRooms: 2000,
-    MaxTotalSubjects: 200000,
-    MaxTotalSubscribers: 100000,
-    MaxSubjectsPerRoom: 100,
-    MaxSubscribersPerRoom: 100,
-    ReplicationInterval: 50 * time.Millisecond,
-    IdleTTL: 5 * time.Minute,
-})
-if err != nil { return err }
-if err := rooms.Start(ctx); err != nil { return err }
-defer rooms.Close(shutdownCtx)
+---
 
-room, err := rooms.GetOrCreate(roomID)
-```
+## 6. 版本与仓库关系
 
-生产网络桥使用 `sync.NewRoomTransportSink`，其下游必须实现
-`replication.AtomicBatchTransport`（通常为 `AsyncTransport`）。同一批中只有所有
-session 都有容量时才提交 Room sequence/dirty；Session resolver 必须绑定到已认证且
-已完成 `BindSession` 的连接。客户端用 `DecodeRoomWireFrame` 和
-`DecodeRoomSubjectUpdate` 解码，并在 gap/checksum/baseline 错误时请求可靠 full resync。
-每个 20Hz tick 会把该房间全部 dirty subject 通过一次批量 admission 合并为接收者级全局帧；不要在业务层逐 entity 循环调用主动 flush，只有确实要求立即可见的单个 subject 才调用 `FlushSubject`。
+- **与 cube-core 的版本对应**：以本仓库 `go.mod` 为准——每个 cube-kit 版本固定其所需的 `cube-core` 最低版本（当前 `main`/v1.6.1 之后要求 `cube-core v1.6.2`）。升级 cube-kit 时同步升级 cube-core 到 go.mod 声明的版本即可；两仓库的 tag 大体同步演进（v1.2.x … v1.6.x）。
+- **仓库分工**：
 
-生产监控至少包含 `AdmittedFrames`、`AdmittedEntries`、`FailedBatches`、`FlushFailures`、`PendingSubjects`、`PendingRetirements`、`CallbackPending`、`CallbackCoalesced`、`CallbackPanics`、房间/subject/subscriber 使用率和 `LastError`。`PendingRetirements` 或 `CallbackPending` 持续增长应影响 readiness；慢客户端生命周期事件使用合并邮箱，不会因通知通道满而丢失。停服最后一次 flush 失败会由 `Close` 返回，共享 `RoomTransportSink` 在应用停止时也必须调用 `Close(ctx)`。
+  | 仓库 | 模块路径 | 角色 |
+  | --- | --- | --- |
+  | roost-core | `github.com/tjbdwanghaibo/cube-core` | 生命周期、Registry、Nest 引擎、稳定接口与设计文档 |
+  | roost-kit（本仓库） | `github.com/tjbdwanghaibo/cube-kit` | 基础设施 Mod 与中间件实现 |
+  | roost-codegen | `github.com/tjbdwanghaibo/roost-codegen` | DAO/Sender 等代码生成 |
+  | roost-skill | — | 技能/战斗玩法组件 |
 
-### Nest transaction WAL 与 outbox
+- **本地联调**：在共同父目录建 workspace，勿把 `go.work` 提交进任何仓库：
 
-`nestwal` 为 core Nest transaction 提供分段 commit WAL、group commit、CRC 恢复、顺序 replay、双槽 ack、transactional outbox 和主动 flush。生成 DAO 的 mutation 可通过 `CheckpointApplier` 复用现有 `checkpoint.StorageBackend`，effect publisher 必须按 `Effect.ID` 幂等。
+  ```bash
+  cd /path/to/workspace
+  go work init ./roost-core ./roost-kit ./your-service
+  ```
 
-```go
-walOpts := nestwal.DefaultOptions("./data/nest-wal")
-walOpts.OnFatal = stopAndFenceProcess
+- **开发验证**：
 
-runtime, err := nestwal.OpenRuntime(
-    walOpts,
-    nestwal.CheckpointApplier{Backend: backend},
-    publisher,
-    nestwal.DefaultCommitterOptions(),
-)
-if err != nil {
-    return err
-}
+  ```bash
+  go build ./... && go test ./...
+  # 单独跑核心持久化链路：
+  go test ./nestwal/ ./checkpoint/
+  ```
 
-nestMod := nestkit.NewMod(getter, runtime.NestOption())
-```
+新增 Mod 时请同时提供：配置读取、Registry capability、health 检查、确定的 Stop 行为，以及不依赖真实外部服务的测试替身。
 
-`strict` handler 在返回成功前等待 group fsync；`async` 等待 write 并由后台周期刷盘。WAL replay 只在 entity guard 解锁后开始，避免与既有 release checkpoint 并发。停服应先停止接流并排空 Nest，再调用 `runtime.Shutdown(ctx)`。`ErrCommitIndeterminate` 是必须 fencing 并重启恢复的终止性错误，不能在线 rollback 后继续服务。
-
-### 许可证
-
-本仓库随 Cube 项目以 [MIT License](LICENSE) 发布。
-
-## English
-
-`cube-kit` contains composable infrastructure Mods for Cube services: Redis, MongoDB, NATS/JetStream, etcd, operational HTTP endpoints, synchronization, remote entities, configuration data, and runtime statistics. It builds on [`cube-core`](https://github.com/tjbdwanghaibo/cube-core) and registers typed capabilities through `app.Registry`.
-
-```bash
-go get github.com/tjbdwanghaibo/cube-kit@latest
-```
-
-Use only the Mods required by a service, keep concrete client details out of gameplay code, and create a local Go workspace for coordinated development of `cube`, `cube-core`, and `cube-kit`.
+本仓库以 [MIT License](LICENSE) 发布。
