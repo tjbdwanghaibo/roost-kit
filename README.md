@@ -2,6 +2,8 @@
 
 `cube-kit`（仓库目录名 `roost-kit`，Go 模块 `github.com/tjbdwanghaibo/cube-kit`）是 roost 框架的**中间件组件层**：它把 Redis、MongoDB、NATS/JetStream、etcd、本地磁盘 WAL 等具体基础设施实现为 `cube-core` 定义的稳定接口与 `app.Mod` 生命周期组件，业务服务只需按需装配。
 
+三级阅读路径：完全新手从 [Roost 五分钟快速开始](https://github.com/tjbdwanghaibo/cube-core/blob/main/docs/QUICKSTART.md) 开始；熟练开发者阅读 [完整使用说明](https://github.com/tjbdwanghaibo/cube-core/blob/main/docs/USER_GUIDE.md) 后按本 README 查具体 Mod；框架维护者阅读 [实现原理](https://github.com/tjbdwanghaibo/cube-core/blob/main/docs/INTERNALS.md)、[生产部署](https://github.com/tjbdwanghaibo/cube-core/blob/main/docs/DEPLOYMENT.md) 与本 README 的实现章节。
+
 ```text
 业务服务（游戏服 / world 服 / 自定义服务）
   └─> cube-kit   具体基础设施 Mod（本仓库）
@@ -46,7 +48,7 @@
 
 下面的程序不需要任何外部设施，直接演示 WAL 的核心承诺：**Append 返回即持久化；崩溃产生的 torn tail 会在重开时被截断；重放从 ack fence 开始且不重复**。
 
-新建一个空目录，写入 `go.mod`（发布版可直接 `go get`；本地联调时用 `replace` 指向你的 checkout）：
+新建一个空目录，写入 `go.mod`。core 与 kit 均使用已经发布的版本，不需要本地 `replace`：
 
 ```go
 module nestwal-demo
@@ -55,14 +57,11 @@ go 1.25.0
 
 require (
 	github.com/tjbdwanghaibo/cube-core v1.8.0
-	github.com/tjbdwanghaibo/cube-kit v1.7.1
+	github.com/tjbdwanghaibo/cube-kit v1.8.0
 )
-
-// 本地联调时（路径改成你的实际 checkout 位置）：
-replace github.com/tjbdwanghaibo/cube-kit => /path/to/roost-kit
-
-replace github.com/tjbdwanghaibo/cube-core => /path/to/roost-core
 ```
+
+框架贡献者需要同时联调 core/kit 工作树时使用 `go work`；不要把本地 `replace` 提交进可发布的 `go.mod`。
 
 `main.go`：
 
@@ -289,7 +288,7 @@ Start()     建连、注册 health、启动后台任务（失败必须向上传�
 Stop()      停后台任务、flush、关连接（保证停服收敛）
 ```
 
-- **依赖声明**：只有 6 个 Mod 实现了 `DependsOn()`——`nestwal`（checkpoint/nats.jetstream/health）、`checkpoint`（mongo/redis/health）、`saga`（mongo/nats.jetstream/health/**nestwal**）、`remote_entity`（redis/sync/health）、`sync`（nats）、`nest`（nest.wal）——框架对它们按拓扑序执行 Provide/Start。**其余 Mod 靠 `Mods(...)` 的书写顺序**，且存在两条未声明的顺序依赖：`nats.reliable.enabled=true` 时 nats Mod 在 Provide 里查 redis capability（redis 必须排在 nats 之前）；nest Mod 会可选地接 `remote_entity`（想生效则 remote_entity 排在 nest 之前）。
+- **依赖声明**：硬要求使用 `DependsOn()`，缺失立即失败；可选集成使用 `OptionalDependsOn()`，依赖存在时自动排到当前 Mod 之前、缺失时忽略。框架统一做拓扑排序和环检测。NATS→Redis（reliable 开启时使用）与 Nest→Remote Entity 已使用可选依赖契约，业务不再依靠 `Mods(...)` 书写顺序碰运气。
 - **capability 查询**：业务永远通过 `app.Lookup[接口类型](registry, mods.ModXxx)` 取依赖，只依赖 `cube-core` 接口，不触碰 Mod 私有实现。名称常量集中在 `mods/name.go`；泛型参数容易写错的常量见 §3.3 的对照表。
 - **配置**：每个 Mod 在 `Init` 中读取自己的配置命名空间（`nest.wal.*`、`checkpoint.*`、`nest.pipelined.*`…），零配置时使用可运行的默认值。`nestwal/mod.go` 的 `Init` 是完整样例：所有 `nest.wal.*` 键逐个覆盖 `DefaultOptions`。
 
@@ -335,7 +334,7 @@ Stop()      停后台任务、flush、关连接（保证停服收敛）
 | ops / etcd | ✅ | 默认 5s |
 | nats | ✅ | bus → rpc → Drain，超时强制 Close |
 | statslog | ✅ | 有界：卡住的 provider 不会挂死停服（文件留给后台关闭） |
-| saga / nest | `Stop()` 传 `context.Background()` | **无上界**——停服预算要在外层控制 |
+| saga / nest | ✅ | App 传入统一 `shutdown.total_timeout`；直接调用兼容 `Stop()` 才使用 background context |
 
 ### 3.5 Durability 管线全景（nest 事务 → 磁盘 → 数据库）
 
@@ -517,7 +516,7 @@ ack 检查点推进（nestwal/checkpoint.go）
 
 ## 6. 版本与仓库关系
 
-- **与 cube-core 的版本对应**：以本仓库 `go.mod` 为准——每个 cube-kit 版本固定其所需的 `cube-core` 最低版本（当前 `main` 要求 `cube-core v1.8.0`，lockstep 依赖其新增的 `lockstep` 包）。升级 cube-kit 时同步升级 cube-core 到 go.mod 声明的版本即可；两仓库的 tag 大体同步演进（v1.2.x … v1.7.x）。
+- **与 cube-core 的版本对应**：以本仓库 `go.mod` 为准——`cube-kit v1.8.0` 要求 `cube-core v1.8.0`。升级 cube-kit 时同步升级 core 到 go.mod 声明的最低版本；发布版 `go.mod` 不允许包含本地 `replace`。
 - **仓库分工**：
 
   | 仓库 | 模块路径 | 角色 |

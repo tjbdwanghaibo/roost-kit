@@ -43,6 +43,10 @@ func (m *Mod) Name() app.ModName { return mods.ModNest }
 
 func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModNestWAL} }
 
+// OptionalDependsOn ensures the Remote Entity transaction participant is
+// visible during Provide when the application has installed it.
+func (m *Mod) OptionalDependsOn() []app.ModName { return []app.ModName{mods.ModRemoteEntity} }
+
 func (m *Mod) Init(cfg *viper.Viper) error {
 	if m == nil || m.getter == nil {
 		return corenest.ErrGetterNotSet

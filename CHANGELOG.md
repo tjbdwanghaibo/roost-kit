@@ -4,11 +4,17 @@
 
 ## [Unreleased]
 
+### Changed
+- NATS Mod 通过 core `OptionalDependsOn` 声明 Redis 可选排序依赖，Nest Mod 同样声明 Remote Entity；reliable bus/远程事务集成不再依赖业务传入 Mods 的偶然顺序。
+- README 接入 Roost 三级文档导航，并修正停机说明：App 会把统一 shutdown deadline 传给 Saga/Nest/WAL 的 `StopWithContext`。
+
 ### Added
 - **`robot/` 机器人框架的 kit 侧**（配合 cube-core 新增的 `robot` 框架）：
   - `RegisterKCPDialer`/`RegisterQUICDialer` 经 core `transport.RegisterDialer` 挂载 KCP（AES-GCM + FEC，复用 `replication.DialKCP`，KCP 流上直接跑统一包协议）与 QUIC（`replication.DialQUIC` + 单双向 stream 承载，对端关流归一化为 EOF）客户端拨号——runner 配置里 `Transport.Type` 选中即用。
   - `LockstepBot`：lockstep 客户端半场——基于 core `lockstep.FrameAssembler`（去重 + 严格顺序）应用帧、按帧生成并提交输入、关键帧哈希上报（缺省 `FrameHasher` 输入链 FNV 折叠：确定性模拟下输入同则状态同）、缓冲越界时每 gap 恰好一次追帧请求；出站走业务注入的 `LockstepSink`（提交/上报/追帧的线格式由业务定义）。回归基线：3 bot × 600 帧 × 各自独立 30% 丢包，冗余 + 追帧后全帧应用、`DesyncDetector` 全程零误报（16 次追帧、30 次裁决）。
-- **发布顺序**：本包依赖 cube-core 未发布的 `robot/*` 与 `lockstep.FrameAssembler`，go.mod 暂以 `replace ../roost-core` 指向本地——**须先发 cube-core，再把本仓 go.mod 升到对应版本并删除 replace 后发布**。
+
+### Changed
+- 移除根模块的本地 `replace`。当前未发布的 robot 功能依赖 core HEAD 新增 API，因此开发主线固定到可由 Go proxy 解析的精确 pseudo-version `cube-core v1.8.1-0.20260826111010-16f057d5e22f`；正式 tag 必须先切回已发布的 core tag，release-hygiene 会拒绝 pseudo-version。
 
 ## [1.8.0] - 2026-08
 
