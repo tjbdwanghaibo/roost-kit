@@ -3,6 +3,7 @@ name: ci
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -10,6 +11,10 @@ on:
         description: cube-core ref used by local-source integration
         required: false
         default: main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -23,13 +28,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
       - run: go mod download
       - run: go mod verify
+      - if: runner.os == 'Linux'
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
       - run: go mod tidy
       - run: git diff --exit-code -- go.mod go.sum
       - run: go test ./...
@@ -39,20 +46,22 @@ jobs:
         run: go test -race ./checkpoint ./remote_entity ./nest ./nestwal ./replication ./sync ./etcd ./mongo ./nats ./saga
       - if: runner.os == 'Linux'
         run: go test -run '^$' -bench 'Benchmark(RoomReplicationFlush100Subscribers|RoomTransportSinkAdmit100Subscribers|RoomReplicationGlobalFrame100x100)$' -benchtime=1s ./sync
+      - if: runner.os == 'Linux'
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
   local-core-source:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: cube-kit
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: tjbdwanghaibo/cube-core
           ref: ${{ inputs.core_ref || 'main' }}
           path: cube-core
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: cube-kit/go.mod
           cache-dependency-path: |
@@ -72,7 +81,7 @@ jobs:
   release-hygiene:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: root module has no local replace
         run: |
           if grep -Eq '^[[:space:]]*replace([[:space:]]|\()' go.mod; then
