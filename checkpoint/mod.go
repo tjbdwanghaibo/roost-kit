@@ -20,6 +20,7 @@ import (
 )
 
 type Mod struct {
+	active     bool
 	cfg        modConfig
 	backend    *MongoBackend
 	checkpoint *corecheckpoint.Checkpoint
@@ -104,12 +105,24 @@ func NewMod(options ...ModOption) *Mod {
 func (m *Mod) Name() app.ModName { return mods.ModCheckpoint }
 
 func (m *Mod) DependsOn() []app.ModName {
-	return []app.ModName{mods.ModMongo, mods.ModRedis, mods.ModHealth}
+	return []app.ModName{mods.ModHealth}
+}
+
+func (m *Mod) OptionalDependsOn() []app.ModName {
+	return []app.ModName{mods.ModMongo, mods.ModRedis}
 }
 
 func (m *Mod) Init(cfg *viper.Viper) error {
 	if cfg == nil {
 		cfg = viper.New()
+	}
+	selection, err := mods.ResolvePersistenceEngine(cfg)
+	if err != nil {
+		return err
+	}
+	m.active = selection.CheckpointEnabled
+	if !m.active {
+		return nil
 	}
 	m.cfg = modConfig{
 		database:            valueOr(cfg.GetString("checkpoint.database"), "game"),
@@ -155,6 +168,9 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 }
 
 func (m *Mod) Provide(registry *app.Registry) error {
+	if m != nil && !m.active {
+		return nil
+	}
 	if registry == nil {
 		return fmt.Errorf("checkpoint mod: nil registry")
 	}
@@ -257,6 +273,9 @@ func (m *Mod) Checkpoint() *corecheckpoint.Checkpoint {
 }
 
 func (m *Mod) Start() error {
+	if m != nil && !m.active {
+		return nil
+	}
 	if m == nil || m.checkpoint == nil {
 		return fmt.Errorf("checkpoint mod: not provided")
 	}
@@ -306,7 +325,7 @@ func (m *Mod) Stop() {
 }
 
 func (m *Mod) StopWithContext(ctx context.Context) error {
-	if m == nil {
+	if m == nil || !m.active {
 		return nil
 	}
 	if m.unregisterRelease != nil {
@@ -631,3 +650,4 @@ func valueOr(value, fallback string) string {
 
 var _ app.Mod = (*Mod)(nil)
 var _ app.ModStopperWithContext = (*Mod)(nil)
+var _ app.ModOptionalDependencyProvider = (*Mod)(nil)
