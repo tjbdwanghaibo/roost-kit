@@ -62,7 +62,8 @@ bulk write；包含 Saga receipt、effect、remote mutation、migration 或多�
 - Mongo collection、index 和 transaction marker schema 不变。
 - 配置未设置新字节上限时必须使用安全默认值。
 - 现有只实现 `ProjectionStore` 的自定义 store 继续逐条投影。
-- 现有普通 replay batch 的一次 Mongo transaction + 一次 WAL ack 行为保持不变。
+- 现有多条普通 replay batch 的一次 Mongo transaction + 一次 WAL ack 行为保持不变；单条普通
+  segment 仍使用无 Mongo transaction 的单文档 fast path。
 
 ## 5. 设计
 
@@ -99,8 +100,9 @@ planner 只进行确定性分类，不执行 I/O：
 
 Projector 顺序执行 planner 输出：
 
-1. `batch=true` 且 store 支持 `BatchProjectionStore` 时调用 `ProjectBatch`。
-2. 其他 segment 逐条调用 `Project`；特殊 segment 固定只有一条记录。
+1. `batch=true`、记录数大于 1 且 store 支持 `BatchProjectionStore` 时调用 `ProjectBatch`。
+2. 单条普通 segment 与特殊 segment 调用 `Project`，保留现有单文档 fast path；特殊 segment
+   固定只有一条记录。
 3. Mongo 成功后完成该 segment 中的 system projection ticket，并增加 Mongo projection 成功统计。
 4. 调用 `WAL.Ack`，fence 为该 segment 最后一条记录的 fence。
 5. ack 成功后更新 admitted/WALUnacked 统计，再继续下一 segment。
