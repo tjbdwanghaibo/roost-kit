@@ -144,3 +144,33 @@ Checkpoint 删除以真实集成测试全部通过为前置条件，按以下顺
 - 第 5 节全部真实集成测试通过，普通单元测试仍通过。
 - 旧 Checkpoint 写路径和生成入口已物理删除，引用扫描只有历史文档允许项。
 - 四个 Go workspace 模块的全量测试、相关 race 和 vet 全部通过。
+
+## 9. 2026-09-01 本机实测结果
+
+环境版本与拓扑：
+
+- MongoDB 8.0.28，replica set `roost-it`，端口 27117/27118/27119；
+- NATS Server 2.14.5，三节点 JetStream，client 端口 14222/14223/14224；
+- mongosh 2.9.2；环境根目录 `/private/tmp/roost-dataengine-it`；
+- 本机原有 27017/4222/2379/6379 服务未被脚本停止或重配。
+
+完整门禁：
+
+```text
+scripts/integration/dataengine-env.sh test
+dataengine  PASS  36.564s
+nestwal    PASS   9.301s
+saga       PASS   0.618s
+```
+
+故障用例单独以 verbose 模式复测：Mongo primary failover 5.70s，NATS 全断、Mongo
+projection 继续并恢复 outbox 13.04s，JetStream leader failover + dedup/order 4.29s。
+
+100k backlog 实测：append 446.917ms（223,755 records/s），projection 4.408s
+（22,688 records/s），WAL 21,360,637 bytes，98 个 ack batch。Saga receipt 独立的
+1000 次真实 Mongo transaction 为 8.562s（117 records/s）。两者分开记录是因为前者衡量
+批 projection/backlog 恢复，后者衡量每条 Saga 多文档事务的固定成本，不能把二者混成同一个
+吞吐数字。
+
+这些结果是开发机功能与回归基线，不是生产容量认证。生产 sizing 仍需使用目标磁盘、Mongo
+拓扑、网络延迟、文档大小、事务冲突率和 Saga 比例重新压测。
