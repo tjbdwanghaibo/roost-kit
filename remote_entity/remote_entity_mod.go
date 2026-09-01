@@ -207,13 +207,11 @@ func (m *RemoteEntityMod) Provide(r *app.Registry) error {
 	m.mgr.SetOwnershipStore(ownership)
 
 	// Register into app registry
-	if err := r.Register(mods.ModRemoteEntity, entity.IRemoteEntityManager(m.mgr)); err != nil {
-		return err
-	}
-	if err := r.Register(mods.ModRemoteEntityAtomicStore, m.atomicStore); err != nil {
-		return err
-	}
-	if err := r.Register(mods.ModRedisVLock, fredis.IVersionedLockFactory(lockFactory)); err != nil {
+	if err := mods.RegisterAll(r,
+		mods.Capability{Name: mods.ModRemoteEntity, Value: entity.IRemoteEntityManager(m.mgr)},
+		mods.Capability{Name: mods.ModRemoteEntityAtomicStore, Value: m.atomicStore},
+		mods.Capability{Name: mods.ModRedisVLock, Value: fredis.IVersionedLockFactory(lockFactory)},
+	); err != nil {
 		return err
 	}
 	healthRegistry, ok := app.Lookup[*health.Registry](r, mods.ModHealth)

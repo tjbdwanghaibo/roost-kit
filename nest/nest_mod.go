@@ -90,15 +90,13 @@ func (m *Mod) Provide(registry *app.Registry) error {
 	}
 	opts = append(opts, m.opts...)
 	m.engine = corenest.NewEngine(opts...)
-	if err := registry.Register(mods.ModNest, m.engine); err != nil {
+	capabilities := []mods.Capability{{Name: mods.ModNest, Value: m.engine}}
+	if _, exists := registry.Get(mods.ModEntityRuntime); !exists {
+		capabilities = append(capabilities, mods.Capability{Name: mods.ModEntityRuntime, Value: m.getter})
+	}
+	if err := mods.RegisterAll(registry, capabilities...); err != nil {
 		m.engine = nil
 		return err
-	}
-	if _, exists := registry.Get(mods.ModEntityRuntime); !exists {
-		if err := registry.Register(mods.ModEntityRuntime, m.getter); err != nil {
-			m.engine = nil
-			return err
-		}
 	}
 	if healthRegistry, ok := app.Lookup[*health.Registry](registry, mods.ModHealth); ok && healthRegistry != nil {
 		healthRegistry.Register("nest", health.CheckerFunc(m.checkHealth))

@@ -1,6 +1,8 @@
 package lock
 
 import (
+	"context"
+
 	"github.com/tjbdwanghaibo/cube-core/app"
 	flock "github.com/tjbdwanghaibo/cube-core/lock"
 	"github.com/tjbdwanghaibo/cube-kit/mods"
@@ -22,5 +24,8 @@ func (m *LockMod) Provide(r *app.Registry) error {
 	return r.Register(mods.ModLock, flock.NewLockManager(nil))
 }
 
-func (m *LockMod) Start() error { return nil }
-func (m *LockMod) Stop()        {}
+func (m *LockMod) Start() error                          { return nil }
+func (m *LockMod) Stop()                                 {}
+func (m *LockMod) StopWithContext(context.Context) error { return nil }
+
+var _ app.ModStopperWithContext = (*LockMod)(nil)

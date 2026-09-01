@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Fixed
+- NATS async RPC 增加 started/completed/pending、callback latency、duplicate completion 和 callback queue rejected 指标，并加入 10 万 pending 取消守恒验收，确保 exactly-once completion 不仅被实现，也能被监控和规模验证。
+- NATS async RPC 将 reply、timeout、publish error 和 Stop 收敛到唯一 `LoadAndDelete` 终态入口；callback worker 队列关闭/满载时同步兜底，并以 once 防止正常执行与释放路径重复回调，实现 exactly-once completion。
+- NATS 同步 RPC 使用 `RequestWithContext`，调用方取消可立即中断正在等待的请求；默认重试策略随 core 收敛为单次发送，避免未知幂等性的业务调用被框架静默重复执行。
+- Mongo、Redis、ConfigData、Lock 四个内置 Mod 补齐 `StopWithContext`，统一接受 App 的 shutdown budget；关闭错误不再被 Redis/Mongo 的无返回 Stop 路径静默吞掉。
+- 多 capability Mod 在注册前统一预检名称、重复项和现有冲突，避免 Provide 失败留下半装配 registry；Etcd 服务注册复用有界启动 context，不再可能无限阻塞 Start。
+
 ### Changed
 - NATS Mod 通过 core `OptionalDependsOn` 声明 Redis 可选排序依赖，Nest Mod 同样声明 Remote Entity；reliable bus/远程事务集成不再依赖业务传入 Mods 的偶然顺序。
 - README 接入 Roost 三级文档导航，并修正停机说明：App 会把统一 shutdown deadline 传给 Saga/Nest/WAL 的 `StopWithContext`。
