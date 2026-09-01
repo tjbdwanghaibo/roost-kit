@@ -15,6 +15,18 @@ import (
 
 type emptyGetter struct{}
 
+type dataEngineNestProvider struct {
+	committer corenest.TransactionCommitter
+}
+
+func (provider dataEngineNestProvider) NestOptions() []corenest.NestOption {
+	return []corenest.NestOption{corenest.NestOptionWithTransactionCommitter(provider.committer)}
+}
+
+type noOpCommitter struct{}
+
+func (noOpCommitter) Commit(context.Context, corenest.CommitRecord) error { return nil }
+
 func (emptyGetter) Get(context.Context, int64, entity.EntityCategory) (entity.IThreadSafeEntity, error) {
 	return nil, corenest.ErrEntityNotFound
 }
@@ -62,5 +74,24 @@ func TestModProvidesInstanceClientAndHealth(t *testing.T) {
 	}
 	if mod.Engine().Running() {
 		t.Fatal("engine still running")
+	}
+}
+
+func TestModSelectsDataEngineCommitterWithoutLegacyWALRuntime(t *testing.T) {
+	cfg := viper.New()
+	cfg.Set("persistence.engine", "dataengine")
+	registry := app.NewRegistry(cfg)
+	if err := registry.Register(mods.ModDataEngine, dataEngineNestProvider{committer: noOpCommitter{}}); err != nil {
+		t.Fatal(err)
+	}
+	mod := NewMod(emptyGetter{})
+	if err := mod.Init(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := mod.Provide(registry); err != nil {
+		t.Fatal(err)
+	}
+	if mod.Engine() == nil {
+		t.Fatal("dataengine-backed Nest engine was not constructed")
 	}
 }

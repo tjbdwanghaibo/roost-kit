@@ -26,6 +26,7 @@ type Mod struct {
 }
 
 type engineConfig struct {
+	persistence string
 	workerNum   int
 	hbWorkerNum int
 	queueCap    int
@@ -41,20 +42,27 @@ func NewMod(getter entity.Getter, opts ...corenest.NestOption) *Mod {
 
 func (m *Mod) Name() app.ModName { return mods.ModNest }
 
-func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModNestWAL} }
+func (m *Mod) DependsOn() []app.ModName { return nil }
 
 // OptionalDependsOn ensures the Remote Entity transaction participant is
 // visible during Provide when the application has installed it.
-func (m *Mod) OptionalDependsOn() []app.ModName { return []app.ModName{mods.ModRemoteEntity} }
+func (m *Mod) OptionalDependsOn() []app.ModName {
+	return []app.ModName{mods.ModNestWAL, mods.ModDataEngine, mods.ModRemoteEntity}
+}
 
 func (m *Mod) Init(cfg *viper.Viper) error {
 	if m == nil || m.getter == nil {
 		return corenest.ErrGetterNotSet
 	}
 	if cfg == nil {
-		return nil
+		cfg = viper.New()
+	}
+	selection, err := mods.ResolvePersistenceEngine(cfg)
+	if err != nil {
+		return err
 	}
 	m.config = engineConfig{
+		persistence: selection.Engine,
 		workerNum:   cfg.GetInt("nest.worker_num"),
 		hbWorkerNum: cfg.GetInt("nest.heartbeat_worker_num"),
 		queueCap:    cfg.GetInt("nest.queue_capacity"),
@@ -73,17 +81,32 @@ func (m *Mod) Provide(registry *app.Registry) error {
 	if registry == nil {
 		return fmt.Errorf("nest mod: nil app registry")
 	}
-	walRuntime, ok := app.Lookup[*nestwal.Runtime](registry, mods.ModNestWAL)
-	if !ok || walRuntime == nil || walRuntime.Committer == nil {
-		return fmt.Errorf("nest mod: required capability %q not found", mods.ModNestWAL)
-	}
 	opts := []corenest.NestOption{
 		corenest.NestOptionWithGetter(m.getter),
 		corenest.NestOptionWithWorkerNumAndMsgCap(m.config.workerNum, m.config.hbWorkerNum, m.config.queueCap),
 		corenest.NestOptionWithTickDuration(m.config.tick),
 		corenest.NestOptionWithSyncTimeout(m.config.timeout),
 		corenest.NestOptionWithDelayedAdmission(m.config.delayedCap, m.config.maxDelay),
-		walRuntime.NestOption(),
+	}
+	switch m.config.persistence {
+	case mods.PersistenceCheckpoint:
+		walRuntime, ok := app.Lookup[*nestwal.Runtime](registry, mods.ModNestWAL)
+		if !ok || walRuntime == nil || walRuntime.Committer == nil {
+			return fmt.Errorf("nest mod: required checkpoint capability %q not found", mods.ModNestWAL)
+		}
+		opts = append(opts, walRuntime.NestOption())
+	case mods.PersistenceDataEngine:
+		provider, ok := app.Lookup[interface{ NestOptions() []corenest.NestOption }](registry, mods.ModDataEngine)
+		if !ok || provider == nil {
+			return fmt.Errorf("nest mod: required data engine capability %q not found", mods.ModDataEngine)
+		}
+		engineOptions := provider.NestOptions()
+		if len(engineOptions) == 0 {
+			return fmt.Errorf("nest mod: data engine capability %q is inactive", mods.ModDataEngine)
+		}
+		opts = append(opts, engineOptions...)
+	default:
+		return fmt.Errorf("nest mod: unsupported persistence engine %q", m.config.persistence)
 	}
 	if remoteManager, ok := app.Lookup[entity.IRemoteEntityManager](registry, mods.ModRemoteEntity); ok && remoteManager != nil {
 		opts = append(opts, corenest.NestOptionWithRemoteEntityManager(remoteManager))
