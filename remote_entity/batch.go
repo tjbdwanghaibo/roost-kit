@@ -276,13 +276,22 @@ func (b *remoteWriteBatch) FinalizeLocked(outcome entity.RemoteTransactionOutcom
 		return entity.ErrRemoteCommitNotFinalized
 	}
 	for _, entry := range b.entries {
-		if entry.entity == nil || (!entry.entity.IsRemoved() && !hasEntityDirty(entry.entity)) {
+		if entry.entity == nil {
 			continue
 		}
 		participant, ok := entry.entity.(entity.IRemoteCommitParticipant)
 		if !ok {
 			b.rollbackFinalizedLocked()
 			return fmt.Errorf("%w: entity %d has no generated remote commit participant", entity.ErrRemoteWriteCapabilityDisabled, entry.lease.EntityID)
+		}
+		if !entry.entity.IsRemoved() {
+			if transactional, ok := participant.(entity.IRemoteCommitChangeParticipant); ok {
+				if !transactional.HasRemoteCommitLocked(outcome) {
+					continue
+				}
+			} else if !hasEntityDirty(entry.entity) {
+				continue
+			}
 		}
 		commit, err := participant.BuildRemoteCommitLocked(entry.lease, outcome)
 		if err != nil {
