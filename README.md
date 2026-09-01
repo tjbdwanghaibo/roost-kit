@@ -16,9 +16,10 @@
 
 | 组件 | 解决什么问题 | 外部设施 | 何时用 |
 | --- | --- | --- | --- |
-| `nestwal/` | Nest 事务的段式 commit WAL：group commit、崩溃恢复、顺序 replay、transactional outbox；是 `DurabilityStrict/Pipelined` 的 `TransactionCommitter` 实现 | 本地磁盘 + NATS JetStream（effect 投递）+ MongoDB（经 checkpoint backend 落库） | 任何要求"成功回包 = 已持久化"的 Nest 服务 |
-| `checkpoint/` | 实体快照异步落库：journal、批量 flush、版本 CAS、admission 重试，以及 pipelined durable watermark 外化闸门 | MongoDB + Redis（7.2+，强制 AOF 快照 WAL） | 使用 Nest 实体自动持久化的服务 |
-| `nest/` | 装配一个实例级 core Nest 引擎（capability `mods.ModNest` 的实际类型是 `*corenest.NestMgr`），顺带注册 `entity.runtime`（statslog 实体统计的数据源）；`nest.*` 七个引擎调参键；用户传入的 NestOption 追加在最后（优先级最高） | 无（依赖 `nestwal` Mod） | 所有 Nest 服务 |
+| `dataengine/` | 统一的 Nest 事务持久化：本地 WAL、Put/Patch/Delete Mongo CAS projection、receipt/effect outbox、聚合 load、schema migration、Saga native step 与 Remote commit | 本地独占磁盘 + MongoDB replica set + NATS JetStream | 新服务与完成迁移的 Entity 服务 |
+| `nestwal/` | WAL frame、group commit 与 v1/v2 reader/writer；Data Engine 复用其物理 WAL，legacy Mod 仅服务 checkpoint 引擎 | 本地磁盘 | WAL 底层与迁移期旧引擎 |
+| `checkpoint/` | legacy 实体快照写引擎；迁移期只允许作为 `persistence.engine=checkpoint` 的独占旧路径 | MongoDB + Redis（7.2+，强制 AOF） | 尚未完成 Data Engine 切换的旧服务 |
+| `nest/` | 装配实例级 core Nest 引擎，并根据 `persistence.engine` 从 Data Engine 或 legacy NestWAL 选择唯一 committer | 无 | 所有 Nest 服务 |
 | `redis/` | Redis 客户端、pipeline、pub/sub、分布式锁（`SetNX`）与 `AutoExtendLock` 自动续期包装；**`EvalDurable`/`EvalBatchDurable`（Lua + `WAITAOF` 同连接管线）是 checkpoint 快照 WAL 的底座**——它拒绝 Cluster 拓扑，因此 `redis.cluster_addrs` 与 checkpoint 互斥 | Redis | 缓存、去重、可容忍双写的互斥 |
 | `mongo/` | MongoDB 客户端、collection、session/事务封装。写关注硬编码 majority+journal、事务读关注 snapshot；**启动预检拒绝无逻辑会话的部署（单机 mongod 起不来），`require_replica_set` 可再收紧**；索引冲突重建需全局与单索引双开关 | MongoDB（副本集或分片集） | 一切持久化 |
 | `nats/` | NATS 连接、RPC（同步 Call 带 jitter 退避 / CallAsync 固定 5s）、JetStream（消费端 Nak 指数退避、Drain 与 Stop 语义分离）、可靠 Bus（inbox 去重 + 死信，**需 redis Mod 且装配顺序在前**）；`nats.rpc.transport=jetstream` 可切 JetStream RPC | NATS/JetStream（Provide 硬依赖 admin registry） | 服务间消息 |
@@ -208,39 +209,29 @@ ticket lsn=1 durable, watermark DurableLSN=1
 
 ### 2.2 作为 committer 接入 cube-core Nest（生产装配）
 
-生产装配走 Mod 体系。下面的骨架已通过编译校验（`app.Service` 与 `entity.Getter/ManagerAccess` 由业务提供）：
+生产装配走 Mod 体系。新服务使用 Data Engine；下列骨架中的 `entity.Getter/ManagerAccess`
+由业务提供。Checkpoint/NestWAL 的旧装配只用于迁移，不得与 Data Engine 同时 active。
 
 ```go
 import (
 	"github.com/tjbdwanghaibo/cube-core/app"
 	"github.com/tjbdwanghaibo/cube-core/bus"
-	corenest "github.com/tjbdwanghaibo/cube-core/nest"
-	kitcheckpoint "github.com/tjbdwanghaibo/cube-kit/checkpoint"
+	kitdata "github.com/tjbdwanghaibo/cube-kit/dataengine"
 	kitnest "github.com/tjbdwanghaibo/cube-kit/nest"
 	"github.com/tjbdwanghaibo/cube-kit/mongo"
 	"github.com/tjbdwanghaibo/cube-kit/nats"
-	"github.com/tjbdwanghaibo/cube-kit/nestwal"
 	"github.com/tjbdwanghaibo/cube-kit/ops"
-	"github.com/tjbdwanghaibo/cube-kit/redis"
 )
 
-walMod := nestwal.NewMod(false) // true 时额外接入 remote_entity
+dataMod := kitdata.NewMod(kitdata.WithEntityAccess(access))
 
 application := app.New("game", "v1.0.0").
 	Mods(
 		ops.NewOpsMod(), // health/ready/metrics HTTP
-		redis.NewRedisMod(),
 		mongo.NewMongoMod(),
 		nats.NewNatsMod(bus.JSONCodec{}),
-		kitcheckpoint.NewMod(kitcheckpoint.WithEntityAccess(access)),
-		walMod,
-		kitnest.NewMod(getter, func(o *corenest.NestOpts) {
-			// nest Mod 的 Provide 晚于 nestwal Mod 执行（DependsOn 保证），
-			// 此时 NestOptions() 已携带 committer 与 pipelined 灰度配置。
-			for _, opt := range walMod.NestOptions() {
-				opt(o)
-			}
-		}),
+		dataMod,
+		kitnest.NewMod(getter), // 自动读取 dataMod 的 lazy committer；recovery 后才 Start
 	).
 	RegisterServer("game", service)
 
@@ -253,25 +244,33 @@ if err := application.Execute(); err != nil {
 
 ```yaml
 sid: 1
+persistence:
+  engine: dataengine
 ops:
   enabled: true        # ops 默认关闭：不写这行，/healthz 等端点不会监听任何端口
-redis:
-  addr: "127.0.0.1:6379"
 mongo:
   uri: "mongodb://127.0.0.1:27017"   # 必须是副本集或分片集（事务前提），单机 mongod 会被启动预检拒绝
 nats:
   url: "nats://127.0.0.1:4222"
 
-nest:
+dataengine:
   wal:
-    dir: "data/wal/nest/1"     # 缺省为 data/wal/nest/<sid>
+    dir: "data/wal/dataengine/1" # 缺省为 data/wal/dataengine/<sid>
+    writer_version: 2
     group_commit_interval: 10ms
+  outbox:
+    max_pending: 1000000
+    max_oldest_age: 30m
+nest:
   pipelined:
     allowlist: ["player.consume", "player.reward"]  # 允许 DurabilityPipelined 的 handler
     async: false                                    # Phase 2：异步完成
 ```
 
-handler 侧通过 `HandlerMeta{Durability: corenest.DurabilityStrict}`（或 `DurabilityPipelined`）声明持久化级别；成功回包时事务已在 WAL 中持久化，落库与 effect 投递由 `nestwal.Committer` 的后台重放循环异步完成。
+handler 侧通过 `HandlerMeta{Durability: corenest.DurabilityStrict}`（或
+`DurabilityPipelined`）声明持久化级别；成功回包时事务已进入 Data Engine WAL。Mongo
+projection 完成后推进 WAL ACK，effect 由独立 outbox worker 投递，因此 NATS 故障不会
+阻塞 Entity 落库。完整迁移和回滚边界见 cube-core `docs/DATA_ENGINE_MIGRATION.md`。
 
 ---
 
@@ -354,18 +353,20 @@ durable 水位线发布（resolveDurableLocked）
   DurableLSN 先推进，随后才唤醒 ticket 等待者
   ▼
 外化闸门（externalization gates）
-  一切“离开进程”的动作 gate 在 durableLSN >= tx.LSN：
-  · 回包 / AfterCommit 副作用（cube-core nest 引擎内）
-  · checkpoint 快照外化（checkpoint/mod.go entityDurable）
+  回包 / AfterCommit 等动作 gate 在 durableLSN >= tx.LSN
   ▼
-后台重放循环（nestwal/committer.go replayPass）
-  从 ack fence 顺序 Replay → MongoAtomicApplier 落库（幂等）→ EffectPublisher 发 outbox
+Data Engine projector（dataengine/projector.go）
+  从 ack fence 顺序 Replay → MongoStore 版本 CAS/事务投影
+  · mutation + receipt + effect staging 原子落 Mongo
+  · NATS publisher 不在 WAL ACK 路径
   ▼
 ack 检查点推进（nestwal/checkpoint.go）
   双 slot + generation + fsync；已确认前缀此后不再重放，旧 segment 可回收
 ```
 
-关键点：**WAL 是 commit point**。落库（Mongo）和 effect（JetStream）都是 commit 之后的至少一次投递，靠幂等（版本 CAS、`Effect.ID` 去重、`MongoEffectInbox` 收据）收敛为恰好一次的业务效果。`checkpoint` 的快照落库则永远不允许跑到 WAL 前面——这是 watermark 闸门的职责。
+关键点：**WAL 是本地 commit point，Mongo projection 是 ACK 前置条件，JetStream
+publish 不是**。Mongo 事务先把 mutation、receipt 和 effect outbox 原子 staged；独立
+publisher 再按 EffectID 至少一次投递。NATS 停机只增加 outbox backlog，不阻塞 WAL ACK。
 
 设计文档：`cube-core` 仓库的 `NEST_TRANSACTION_WAL.md` 与 `NEST_PIPELINED_COMMIT.md`（中文，含正确性论证）。
 
@@ -386,9 +387,13 @@ ack 检查点推进（nestwal/checkpoint.go）
 - **ack 检查点：双 slot + generation + 目录 fsync**（`nestwal/checkpoint.go`）：`ack-0.chk`/`ack-1.chk` 按 `generation & 1` 交替写，写入走 tmp 文件 → fsync → rename → `syncDirectory`。加载时取 CRC 合法者中 generation 最大的一个：任何时刻允许一个 slot 是 torn 的，另一个 slot 在替换者持久化前不会被碰。ack 丢失最多导致重复重放（幂等吸收），绝不会跳过记录。
 - **fsync 不确定 ⇒ 熔断而非重试**（`wal.go` `Options.OnFatal` 注释、`setTerminal`；`nestwal/mod.go` `onFatal`）：fsync 报错后，内核可能已经丢弃了 dirty page 却清掉了错误标记，重试的 fsync 会“成功”但数据并没有落盘——写入结果从此不可知。所以任何物理写/fsync 失败都被包装为 `corenest.ErrCommitIndeterminate` 并置 terminal：拒绝一切后续写入、以该错误 resolve 所有 pending ticket，并经 `OnFatal` 熔断进程（Mod 会 `NestMgr.Fence` + `app.RuntimeFailure.Fail`）。重启后由重放从最后一个 ack 恢复出唯一可信的历史。
 - **单写者锁与容量健康**：`writer.lock` 文件锁防止双进程写同一目录（`lock_unix.go`）；`MaxDiskBytes`/`MaxUnackedAge` 超限时 `Healthy()` 报错，接入 health 后表现为实例不健康而不是静默膨胀。
-- **落库与 outbox**（`nestwal/committer.go`、`mongo_atomic_applier.go`、`effect_inbox.go`）：重放循环在事务仍被实体锁持有时让路（`errTransactionHeld`，由 `TransactionReleased` 唤醒）；`MongoAtomicApplier` 把普通 after-image 与 Remote Entity 提交放进**一个 Mongo session 事务**；消费端用 `MongoEffectInbox` 把业务写与 effect 收据同事务提交实现恰好一次，JetStream 的 `MsgID` 去重窗口只是热路径优化。
+- **落库与 outbox**（`dataengine/projector.go`、`mongo_store.go`、`outbox_worker.go`）：重放循环在事务仍被 Entity 锁持有时让路（`TransactionReleased` 唤醒）；普通 mutation、Remote commit、receipt 和 effect staging 按需要进入同一个 Mongo session transaction。WAL ACK 在 projection 后推进，outbox publisher 独立 claim/lease/retry，JetStream MsgID 去重只是热路径优化。
 
-### checkpoint：快照外化闸门
+### checkpoint：legacy 迁移期写引擎
+
+以下内容只描述 `persistence.engine=checkpoint` 的旧服务，不能与 Data Engine 同时
+active。新生成 DAO 已无 persistence dirty/Snapshot 写协议；完成 patch-only 切换后不
+允许回切。删除旧包前的生产门禁见 core `docs/DATA_ENGINE_MIGRATION.md`。
 
 - **durable watermark gate**（`checkpoint/mod.go` `entityDurable`/`onEntityRelease`）：实体释放时若 `base.LastCommitLSN() > DurableLSN()`，说明它最后一笔 pipelined 提交还没落盘——此时**先不做快照**（保住 dirty 位），放进 `pendingReleases`，由 admission 重试循环在水位线追上后再快照提交。闸门由 `nestwal/mod.go` 的 `cp.SetDurableWatermark(runtime.Committer.DurableLSN)` 自动接线；未用 pipelined 的实体 LSN 为 0 恒通过，代价只是一次原子读。
 - **pendingReleases / pendingSaves 与熔断**：重试集合有容量上限（`checkpoint.admission_pending_capacity`），超限触发 `fenceAdmission` → `RuntimeFailure`——宁可停服也不静默丢快照。

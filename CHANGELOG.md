@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### Added — Data Engine
+- 新增统一 Data Engine runtime：WAL recovery barrier、Mongo Put/Patch/Delete 版本 CAS、transaction receipt/effect outbox、聚合 snapshot load、system-transaction migration、tombstone、健康/积压硬限制和有界 shutdown。
+- Saga 新增 Data Engine step inbox（claim lease + 权威 receipt replay），Remote mutation 与普通 mutation 可在同一 Mongo transaction 投影；NATS publisher 与 WAL ACK 解耦。
+- 新增 WAL/投影/Saga benchmark 矩阵及 NATS outage backlog 恢复测试，脚本位于 `scripts/perf/dataengine.sh`。
+
+### Changed — Data Engine
+- `persistence.engine=checkpoint|dataengine` 强制二选一；Nest Mod 按所选引擎获取 committer，Data Engine 通过 lazy proxy 保证 recovery 完成后 Nest 才接流量。
+- WAL reader 同时支持 v1/v2，writer 显式选择版本；Data Engine 默认迁移阶段保持 v1，patch-only 生成代码要求 reader-first 后切 writer v2。
+- Legacy checkpoint/NestWAL Mod 在 Data Engine 模式下 inactive，保留只为生产观察期内的旧服务迁移，不允许双写。
+
 ### Fixed
 - NATS async RPC 增加 started/completed/pending、callback latency、duplicate completion 和 callback queue rejected 指标，并加入 10 万 pending 取消守恒验收，确保 exactly-once completion 不仅被实现，也能被监控和规模验证。
 - NATS async RPC 将 reply、timeout、publish error 和 Stop 收敛到唯一 `LoadAndDelete` 终态入口；callback worker 队列关闭/满载时同步兜底，并以 once 防止正常执行与释放路径重复回调，实现 exactly-once completion。
