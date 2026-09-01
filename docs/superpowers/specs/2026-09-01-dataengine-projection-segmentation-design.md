@@ -201,6 +201,53 @@ Mongo transaction 固定成本，额外 checkpoint 成本需要通过混合比�
 证明 transaction marker 是主要瓶颈，再为 Transaction Ledger v2 单独设计可滚动升级、回滚兼容
 和 crash recovery 协议，避免把未经证明的存储格式复杂度混入本次优化。
 
+### 8.1 本机回归测量
+
+以下数据来自同一台 Apple M5、darwin/arm64 开发机上的隔离环境
+`/private/tmp/roost-dataengine-it`。它们只用于本机功能与回归比较，不代表生产容量，也不设置性能
+通过阈值。
+
+优化前基线沿用
+`docs/superpowers/specs/2026-09-01-dataengine-local-integration-design.md` 的原始记录：100k backlog
+append 446.917ms（223,755 records/s），projection 4.408s（22,688 records/s），WAL
+21,360,637 bytes，98 个 ack batch；1,000 次 Saga receipt transaction 为 8.562s
+（117 records/s）。
+
+优化后以本设计的最终代码重新运行：
+
+```text
+100k backlog: append=473.874791ms (211026 records/s), projection=4.253007167s (23513 records/s), wal_bytes=21372621 ack_batches=98
+Saga receipt transactions: 9.679899667s (103 records/s)
+```
+
+按以上日志显示值计算，100k append 耗时增加 6.0319%，append 吞吐下降 5.6888%；projection
+耗时下降 3.5162%，projection 吞吐提高 3.6363%；WAL 增加 11,984 bytes（0.0561%），ack batch
+保持 98。Saga 耗时增加 13.0565%，显示吞吐下降 11.9658%。这些单次开发机结果受本机负载影响，
+只能作为本次变更的可复现参考。
+
+Projection segment planner 的三次 `benchmem` 样本如下：
+
+```text
+goos: darwin
+goarch: arm64
+pkg: github.com/tjbdwanghaibo/cube-kit/dataengine
+cpu: Apple M5
+BenchmarkProjectionSegmentPlanner/special_every_0-10         	   96606	     11003 ns/op	      64 B/op	       1 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_0-10         	  106351	     11168 ns/op	      64 B/op	       1 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_0-10         	  104752	     11090 ns/op	      64 B/op	       1 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_100-10       	   92749	     12382 ns/op	    5856 B/op	      28 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_100-10       	   98698	     12480 ns/op	    5856 B/op	      28 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_100-10       	   97557	     12789 ns/op	    5856 B/op	      28 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_10-10        	   66260	     18725 ns/op	   50720 B/op	     215 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_10-10        	   67575	     18039 ns/op	   50720 B/op	     215 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_10-10        	   63913	     19679 ns/op	   50720 B/op	     215 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_1-10         	   20744	     50001 ns/op	  302929 B/op	    2059 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_1-10         	   24508	     51490 ns/op	  302929 B/op	    2059 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_1-10         	   24112	     51486 ns/op	  302929 B/op	    2059 allocs/op
+PASS
+ok  	github.com/tjbdwanghaibo/cube-kit/dataengine	17.690s
+```
+
 ## 9. 验收标准
 
 - 持久化格式、Saga 原子性、Outbox 语义和 WAL durability 均未改变。
