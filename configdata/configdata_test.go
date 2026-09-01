@@ -1,6 +1,7 @@
 package configdata
 
 import (
+	"context"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -22,6 +23,20 @@ func newProvidedConfigDataMod(t *testing.T, cfg *viper.Viper) (*Mod, *app.Regist
 		t.Fatal(err)
 	}
 	return mod, registry
+}
+
+func TestConfigDataStopStillReleasesHooksAfterDeadline(t *testing.T) {
+	mod := &Mod{}
+	released := false
+	mod.unregisters = []func(){func() { released = true }}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := mod.StopWithContext(ctx); err != nil {
+		t.Fatalf("fast local cleanup should complete after deadline: %v", err)
+	}
+	if !released || mod.unregisters != nil {
+		t.Fatalf("cleanup not released: released=%v unregisters=%v", released, mod.unregisters)
+	}
 }
 
 func TestConfigDataModInitHonorsConfiguredDir(t *testing.T) {

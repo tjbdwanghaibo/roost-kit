@@ -82,13 +82,23 @@ func (m *Mod) Start() error {
 }
 
 func (m *Mod) Stop() {
+	_ = m.StopWithContext(context.Background())
+}
+
+func (m *Mod) StopWithContext(_ context.Context) error {
+	if m == nil {
+		return nil
+	}
 	for i := len(m.unregisters) - 1; i >= 0; i-- {
 		if m.unregisters[i] != nil {
 			m.unregisters[i]()
 		}
 	}
 	m.unregisters = nil
+	return nil
 }
+
+var _ app.ModStopperWithContext = (*Mod)(nil)
 
 func (m *Mod) Store() *fconfigdata.Store {
 	if m == nil {

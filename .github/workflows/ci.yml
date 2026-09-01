@@ -43,7 +43,9 @@ jobs:
       - if: runner.os == 'Linux'
         run: go vet ./...
       - if: runner.os == 'Linux'
-        run: go test -race ./checkpoint ./remote_entity ./nest ./nestwal ./replication ./sync ./etcd ./mongo ./nats ./saga
+        run: go run github.com/tjbdwanghaibo/cube-core/cmd/glsvet ./...
+      - if: runner.os == 'Linux'
+        run: go test -race ./...
       - if: runner.os == 'Linux'
         run: go test -run '^$' -bench 'Benchmark(RoomReplicationFlush100Subscribers|RoomTransportSinkAdmit100Subscribers|RoomReplicationGlobalFrame100x100)$' -benchtime=1s ./sync
       - if: runner.os == 'Linux'
@@ -76,7 +78,9 @@ jobs:
       - working-directory: cube-kit
         run: go vet ./...
       - working-directory: cube-kit
-        run: go test -race ./checkpoint ./remote_entity ./nest ./nestwal ./replication ./sync ./saga
+        run: go run ../cube-core/cmd/glsvet ./...
+      - working-directory: cube-kit
+        run: go test -race ./...
 
   release-hygiene:
     runs-on: ubuntu-latest
