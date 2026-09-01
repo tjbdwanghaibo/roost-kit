@@ -11,10 +11,6 @@ import (
 	"github.com/tjbdwanghaibo/cube-core/obs"
 )
 
-type lockFenceProvider interface {
-	Fence() uint64
-}
-
 type remoteWriteEntry struct {
 	wrapper   *remoteEntityWrapper
 	entity    entity.IThreadSafeRemoteEntity
@@ -158,7 +154,9 @@ func (w *remoteEntityWrapper) beginWrite(parent context.Context) (*remoteWriteEn
 			return nil, fmt.Errorf("remote_entity: shared lock %d: %w", w.id, err)
 		}
 		distLocked = true
-		if provider, ok := w.rMu.(lockFenceProvider); ok {
+		// Keep this structural assertion while cube-kit supports the preceding
+		// cube-core release; the public equivalent is redis.IFencedVersionedLock.
+		if provider, ok := w.rMu.(interface{ Fence() uint64 }); ok {
 			lockFence = provider.Fence()
 		}
 		if lockFence == 0 {

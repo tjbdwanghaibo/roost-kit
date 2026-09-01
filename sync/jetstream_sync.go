@@ -2,9 +2,11 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -76,7 +78,11 @@ type jetStreamSyncBus struct {
 	cfg JetStreamSyncConfig
 
 	mu   sync.Mutex
-	subs []fnats.IJetStreamSubscription
+	subs []*syncSubscription
+}
+
+type syncSubscription struct {
+	sub fnats.IJetStreamSubscription
 }
 
 func NewJetStreamSyncBus(ctx context.Context, js fnats.IJetStream, cfg JetStreamSyncConfig) (*jetStreamSyncBus, error) {
@@ -104,31 +110,52 @@ func NewJetStreamSyncBus(ctx context.Context, js fnats.IJetStream, cfg JetStream
 }
 
 func (b *jetStreamSyncBus) Publish(msg *fsync.SyncMsg) error {
-	if b == nil || b.js == nil || msg == nil {
-		return nil
+	return b.PublishContext(fctx.BaseContext(), msg)
+}
+
+func (b *jetStreamSyncBus) PublishContext(ctx context.Context, msg *fsync.SyncMsg) error {
+	if b == nil || b.js == nil {
+		return fmt.Errorf("jetstream sync: bus is not initialized")
+	}
+	if msg == nil {
+		return fmt.Errorf("jetstream sync: message is nil")
 	}
 	if strings.TrimSpace(msg.Topic) == "" {
 		return fmt.Errorf("jetstream sync: topic is empty")
 	}
-	if msg.FromSid == 0 {
-		msg.FromSid = b.cfg.LocalSid
+	owned := *msg
+	owned.Data = append([]byte(nil), msg.Data...)
+	if owned.FromSid == 0 {
+		owned.FromSid = b.cfg.LocalSid
 	}
-	data, err := json.Marshal(msg)
+	data, err := json.Marshal(&owned)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(fctx.BaseContext(), b.cfg.PublishTime)
+	if ctx == nil {
+		ctx = fctx.BaseContext()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, b.cfg.PublishTime)
 	defer cancel()
-	_, err = b.js.Publish(ctx, b.subject(msg.Topic), data, fnats.JetStreamPublishOptions{MsgID: syncMsgID(msg)})
+	_, err = b.js.Publish(ctx, b.subject(owned.Topic), data, fnats.JetStreamPublishOptions{MsgID: syncMsgID(&owned)})
 	return err
 }
 
 func (b *jetStreamSyncBus) Subscribe(topic string, handler fsync.Handler) (func(), error) {
-	if b == nil || b.js == nil || strings.TrimSpace(topic) == "" || handler == nil {
-		return func() {}, nil
+	if b == nil || b.js == nil {
+		return nil, fmt.Errorf("jetstream sync: bus is not initialized")
+	}
+	if strings.TrimSpace(topic) == "" {
+		return nil, fmt.Errorf("jetstream sync: topic is empty")
+	}
+	if handler == nil {
+		return nil, fmt.Errorf("jetstream sync: handler is nil")
 	}
 	cfg := b.cfg
-	name := sanitizeSyncName(fmt.Sprintf("sync_%s_%d", topic, cfg.LocalSid))
+	name := durableSyncName(topic, cfg.LocalSid)
 	ctx, cancel := context.WithTimeout(fctx.BaseContext(), cfg.SetupTimeout)
 	defer cancel()
 	sub, err := b.js.Subscribe(ctx, fnats.JetStreamConsumerConfig{
@@ -146,25 +173,37 @@ func (b *jetStreamSyncBus) Subscribe(topic string, handler fsync.Handler) (func(
 		var msg fsync.SyncMsg
 		if err := json.Unmarshal(raw.Data, &msg); err != nil {
 			slog.Warn("jetstream sync: unmarshal failed", "topic", topic, "err", err)
-			return err
+			return nil
 		}
 		if msg.FromSid == cfg.LocalSid {
 			return nil
 		}
 		if err := handler(&msg); err != nil {
 			slog.Warn("jetstream sync: handler error", "topic", topic, "key", msg.Key, "version", msg.Version, "err", err)
-			return err
+			return nil
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	entry := &syncSubscription{sub: sub}
 	b.mu.Lock()
-	b.subs = append(b.subs, sub)
+	b.subs = append(b.subs, entry)
 	b.mu.Unlock()
+	var once sync.Once
 	return func() {
-		sub.Stop()
+		once.Do(func() {
+			sub.Stop()
+			b.mu.Lock()
+			for i, candidate := range b.subs {
+				if candidate == entry {
+					b.subs = append(b.subs[:i], b.subs[i+1:]...)
+					break
+				}
+			}
+			b.mu.Unlock()
+		})
 	}, nil
 }
 
@@ -173,12 +212,12 @@ func (b *jetStreamSyncBus) Stop() {
 		return
 	}
 	b.mu.Lock()
-	subs := append([]fnats.IJetStreamSubscription(nil), b.subs...)
+	subs := append([]*syncSubscription(nil), b.subs...)
 	b.subs = nil
 	b.mu.Unlock()
-	for _, sub := range subs {
-		if sub != nil {
-			sub.Stop()
+	for _, entry := range subs {
+		if entry != nil && entry.sub != nil {
+			entry.sub.Stop()
 		}
 	}
 }
@@ -188,10 +227,28 @@ func (b *jetStreamSyncBus) subject(topic string) string {
 }
 
 func syncMsgID(msg *fsync.SyncMsg) string {
+	// MessageID was added after the first SyncMsg release. Read it
+	// reflectively so core and kit can be rolled out independently.
+	if msg != nil {
+		value := reflect.ValueOf(msg).Elem().FieldByName("MessageID")
+		if value.IsValid() && value.Kind() == reflect.String && strings.TrimSpace(value.String()) != "" {
+			return value.String()
+		}
+	}
 	if msg == nil || msg.Topic == "" || msg.Key == 0 || msg.Version == 0 || msg.FromSid == 0 {
 		return ""
 	}
 	return fmt.Sprintf("sync:%s:%d:%d:%d:%d", msg.Topic, msg.Key, msg.Version, msg.FromSid, msg.Part)
+}
+
+func durableSyncName(topic string, sid int32) string {
+	raw := fmt.Sprintf("%s\x00%d", topic, sid)
+	hash := sha256.Sum256([]byte(raw))
+	prefix := sanitizeSyncName(fmt.Sprintf("sync_%s_%d", topic, sid))
+	if len(prefix) > 180 {
+		prefix = prefix[:180]
+	}
+	return fmt.Sprintf("%s_%x", strings.TrimRight(prefix, "_"), hash[:8])
 }
 
 // PublishConfirmed satisfies syncstream's confirmation capability. JetStream

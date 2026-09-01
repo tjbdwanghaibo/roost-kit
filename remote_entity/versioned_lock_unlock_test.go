@@ -46,9 +46,11 @@ func (s *unlockEvalStub) Eval(_ context.Context, script string, _ []string, args
 	case versionedUnlockLua:
 		s.unlockCalls++
 		token := args[0].(string)
-		newVersion := fmt.Sprint(args[1])
+		unlockID := args[1].(string)
+		newVersion := fmt.Sprint(args[2])
 		if s.hash["owner"] == token {
 			s.hash["version"] = newVersion
+			s.hash["last_unlock"] = unlockID
 			delete(s.hash, "owner")
 			if s.dropNextReply {
 				s.dropNextReply = false
@@ -56,7 +58,7 @@ func (s *unlockEvalStub) Eval(_ context.Context, script string, _ []string, args
 			}
 			return int64(1), nil
 		}
-		if s.hash["version"] == newVersion {
+		if s.hash["last_unlock"] == unlockID {
 			return int64(2), nil
 		}
 		return int64(0), nil
@@ -90,8 +92,8 @@ func TestVersionedLockUnlockRetryAfterLostResponseSucceeds(t *testing.T) {
 		t.Fatalf("server state: version=%q owner=%q", version, owned)
 	}
 
-	// A genuinely foreign lock still reports NotOwned: reacquire under a new
-	// token, then retry the old unlock with a stale version.
+	// A genuinely foreign operation still reports NotOwned even when it writes
+	// the same business version. Version equality is not an unlock receipt.
 	if err := lock.TryLock(context.Background()); err != nil {
 		t.Fatalf("reacquire: %v", err)
 	}
@@ -100,7 +102,74 @@ func TestVersionedLockUnlockRetryAfterLostResponseSucceeds(t *testing.T) {
 	stale.acquired = true
 	stale.token = "someone-else"
 	stale.mu.Unlock()
-	if err := stale.UnlockWithRetry(context.Background(), 3, time.Second, 0, 0); !errors.Is(err, ErrVersionedLockNotOwned) {
+	if err := stale.UnlockWithRetry(context.Background(), 7, time.Second, 0, 0); !errors.Is(err, ErrVersionedLockNotOwned) {
 		t.Fatalf("foreign unlock err=%v, want %v", err, ErrVersionedLockNotOwned)
+	}
+}
+
+func TestVersionedLockUsesNewOwnerTokenForEveryAcquisition(t *testing.T) {
+	stub := newUnlockEvalStub()
+	lock := newVersionedLock(stub, 42, fredis.VersionedLockOptions{TTL: time.Second})
+	if err := lock.TryLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lock.mu.Lock()
+	first := lock.token
+	lock.mu.Unlock()
+	if err := lock.Unlock(context.Background(), 1, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.TryLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lock.mu.Lock()
+	second := lock.token
+	lock.mu.Unlock()
+	if first == "" || second == "" || first == second {
+		t.Fatalf("owner token reused: first=%q second=%q", first, second)
+	}
+}
+
+type delayedTouchStub struct {
+	*unlockEvalStub
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *delayedTouchStub) Eval(ctx context.Context, script string, keys []string, args ...any) (any, error) {
+	if script != versionedTouchLua {
+		return s.unlockEvalStub.Eval(ctx, script, keys, args...)
+	}
+	close(s.started)
+	<-s.release
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hash["owner"] != args[0].(string) {
+		return int64(-1), nil
+	}
+	return int64(1000), nil
+}
+
+func TestDelayedOldTouchDoesNotClearNewAcquisition(t *testing.T) {
+	stub := &delayedTouchStub{unlockEvalStub: newUnlockEvalStub(), started: make(chan struct{}), release: make(chan struct{})}
+	lock := newVersionedLock(stub, 42, fredis.VersionedLockOptions{TTL: time.Second})
+	if err := lock.TryLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	touchDone := make(chan error, 1)
+	go func() { touchDone <- lock.Touch(context.Background(), time.Millisecond) }()
+	<-stub.started
+	if err := lock.Unlock(context.Background(), 1, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.TryLock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	close(stub.release)
+	if err := <-touchDone; !errors.Is(err, ErrVersionedLockExpired) {
+		t.Fatalf("old touch error=%v", err)
+	}
+	if !lock.IsAcquired() {
+		t.Fatal("delayed old touch cleared the new acquisition")
 	}
 }

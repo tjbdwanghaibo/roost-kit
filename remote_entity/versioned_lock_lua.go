@@ -16,23 +16,24 @@ end
 return {0, 0, 0}
 `
 
-// versionedUnlockLua: verify owner → HSET version → HDEL owner → PEXPIRE.
+// versionedUnlockLua: verify owner → store version and operation receipt →
+// HDEL owner → PEXPIRE.
 // Returns 1 on unlock, 2 when a previous attempt already landed (idempotent
 // retry), 0 when the lock is genuinely not owned.
 //
-// The idempotent branch relies on the interface contract that unlock versions
-// are unique and monotonic per key: observing version == ARGV[2] proves this
-// caller's earlier unlock reached the server even though its response was
-// lost, so an at-least-once retry must report success, not NotOwned.
+// The idempotent branch is tied to one UnlockWithRetry operation. Business
+// versions may legitimately be unchanged and therefore cannot prove that a
+// particular unlock attempt reached Redis.
 const versionedUnlockLua = `
 local cur = redis.call("HGET", KEYS[1], "owner")
 if cur == ARGV[1] then
-    redis.call("HSET", KEYS[1], "version", ARGV[2])
+    redis.call("HSET", KEYS[1], "version", ARGV[3])
+    redis.call("HSET", KEYS[1], "last_unlock", ARGV[2])
     redis.call("HDEL", KEYS[1], "owner")
-    redis.call("PEXPIRE", KEYS[1], ARGV[3])
+    redis.call("PEXPIRE", KEYS[1], ARGV[4])
     return 1
 end
-if redis.call("HGET", KEYS[1], "version") == ARGV[2] then
+if redis.call("HGET", KEYS[1], "last_unlock") == ARGV[2] then
     return 2
 end
 return 0

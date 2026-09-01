@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 	fsync "github.com/tjbdwanghaibo/cube-core/sync"
 )
 
-func TestJetStreamSyncBusPublishesAndPropagatesHandlerError(t *testing.T) {
+func TestJetStreamSyncBusPublishesAndAcknowledgesHandlerError(t *testing.T) {
 	js := newFakeJetStream()
 	bus, err := NewJetStreamSyncBus(context.Background(), js, JetStreamSyncConfig{
 		LocalSid: 7,
@@ -46,15 +47,16 @@ func TestJetStreamSyncBusPublishesAndPropagatesHandlerError(t *testing.T) {
 		t.Fatalf("consumer config mismatch: %+v", js.consumers[0])
 	}
 
-	err = bus.Publish(&fsync.SyncMsg{
-		Topic:   "remote_entity",
-		Key:     101,
-		Version: 3,
-		Data:    []byte("payload"),
-		FromSid: 12,
-	})
-	if !errors.Is(err, handlerErr) {
-		t.Fatalf("Publish error=%v, want handler error", err)
+	msg := &fsync.SyncMsg{Topic: "remote_entity", Key: 101, Version: 3, Data: []byte("payload"), FromSid: 12}
+	expectedMsgID := "sync:remote_entity:101:3:12:0"
+	messageID := reflect.ValueOf(msg).Elem().FieldByName("MessageID")
+	if messageID.IsValid() && messageID.CanSet() {
+		messageID.SetString("delivery-1")
+		expectedMsgID = "delivery-1"
+	}
+	err = bus.Publish(msg)
+	if err != nil {
+		t.Fatalf("Publish error=%v", err)
 	}
 	if len(js.publishes) != 1 {
 		t.Fatalf("publish count=%d, want 1", len(js.publishes))
@@ -62,8 +64,11 @@ func TestJetStreamSyncBusPublishesAndPropagatesHandlerError(t *testing.T) {
 	if js.publishes[0].subject != "cube.sync.remote_entity" {
 		t.Fatalf("publish subject=%q", js.publishes[0].subject)
 	}
-	if js.publishes[0].opts.MsgID != "sync:remote_entity:101:3:12:0" {
+	if js.publishes[0].opts.MsgID != expectedMsgID {
 		t.Fatalf("publish msg id=%q", js.publishes[0].opts.MsgID)
+	}
+	if err := js.deliver("cube.sync.remote_entity", js.publishes[0].data); err != nil {
+		t.Fatalf("sync handler errors must be acknowledged, got %v", err)
 	}
 }
 
@@ -88,8 +93,47 @@ func TestJetStreamSyncBusSkipsSelfMessages(t *testing.T) {
 	if err := bus.Publish(&fsync.SyncMsg{Topic: "player.public", Key: 44, Version: 1}); err != nil {
 		t.Fatalf("Publish error: %v", err)
 	}
+	if err := js.deliver("cube.sync.player.public", js.publishes[0].data); err != nil {
+		t.Fatal(err)
+	}
 	if called {
 		t.Fatal("handler called for self message")
+	}
+}
+
+func TestJetStreamSyncPublishHonorsCanceledContext(t *testing.T) {
+	js := newFakeJetStream()
+	bus, err := NewJetStreamSyncBus(context.Background(), js, JetStreamSyncConfig{LocalSid: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = bus.PublishContext(ctx, &fsync.SyncMsg{Topic: "player", Key: 1, Version: 1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("PublishContext error=%v, want context.Canceled", err)
+	}
+	if len(js.publishes) != 0 {
+		t.Fatal("canceled publish reached transport")
+	}
+}
+
+func TestJetStreamSyncUnsubscribeRemovesTrackedSubscription(t *testing.T) {
+	js := newFakeJetStream()
+	bus, err := NewJetStreamSyncBus(context.Background(), js, JetStreamSyncConfig{LocalSid: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsub, err := bus.Subscribe("player", func(*fsync.SyncMsg) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bus.subs) != 1 {
+		t.Fatalf("tracked subscriptions=%d, want 1", len(bus.subs))
+	}
+	unsub()
+	if len(bus.subs) != 0 {
+		t.Fatalf("tracked subscriptions=%d, want 0", len(bus.subs))
 	}
 }
 
@@ -117,15 +161,19 @@ func (f *fakeJetStream) EnsureStream(_ context.Context, cfg fnats.JetStreamConfi
 
 func (f *fakeJetStream) Publish(ctx context.Context, subject string, data []byte, opts fnats.JetStreamPublishOptions) (fnats.JetStreamPublishAck, error) {
 	f.publishes = append(f.publishes, fakeJetStreamPublish{subject: subject, data: append([]byte(nil), data...), opts: opts})
+	return fnats.JetStreamPublishAck{Stream: "fake", Sequence: uint64(len(f.publishes))}, nil
+}
+
+func (f *fakeJetStream) deliver(subject string, data []byte) error {
 	handler := f.handlers[subject]
 	if handler == nil {
-		return fnats.JetStreamPublishAck{Stream: "fake", Sequence: uint64(len(f.publishes))}, nil
+		return nil
 	}
 	var msg fsync.SyncMsg
 	if err := json.Unmarshal(data, &msg); err != nil {
-		return fnats.JetStreamPublishAck{}, err
+		return err
 	}
-	return fnats.JetStreamPublishAck{Stream: "fake", Sequence: uint64(len(f.publishes))}, handler(ctx, &fnats.JetStreamMsg{
+	return handler(context.Background(), &fnats.JetStreamMsg{
 		Subject:      subject,
 		Data:         data,
 		Stream:       "fake",
@@ -134,6 +182,14 @@ func (f *fakeJetStream) Publish(ctx context.Context, subject string, data []byte
 		ConsumerSeq:  uint64(len(f.publishes)),
 		NumDelivered: 1,
 	})
+}
+
+func TestDurableSyncNameAvoidsSanitizationCollision(t *testing.T) {
+	left := durableSyncName("player.public", 7)
+	right := durableSyncName("player/public", 7)
+	if left == right {
+		t.Fatalf("durable names collide: %q", left)
+	}
 }
 
 func (f *fakeJetStream) Subscribe(_ context.Context, cfg fnats.JetStreamConsumerConfig, handler fnats.JetStreamHandler) (fnats.IJetStreamSubscription, error) {

@@ -15,6 +15,13 @@ require (
 	golang.org/x/sys v0.47.0
 )
 
+// The legacy monolithic module overlaps the modern googleapis/api and
+// googleapis/rpc split modules when cube-core and cube-kit share a go.work.
+exclude (
+	google.golang.org/genproto v0.0.0-20180817151627-c66870c02cf8
+	google.golang.org/genproto v0.0.0-20190819201941-24fa4b261c55
+)
+
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect

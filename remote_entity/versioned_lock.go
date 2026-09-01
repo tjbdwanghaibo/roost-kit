@@ -48,7 +48,6 @@ func newVersionedLock(redis fredis.IRedis, id int64, opts fredis.VersionedLockOp
 	l := &versionedLock{
 		redis: redis,
 		key:   key,
-		token: generateToken(),
 		ttl:   opts.TTL,
 		opts:  opts,
 	}
@@ -103,7 +102,8 @@ func (l *versionedLock) TryLock(ctx context.Context) error {
 	}
 
 	ttlMs := l.ttl.Milliseconds()
-	result, err := l.redis.Eval(ctx, versionedTryLockLua, []string{l.key, l.key + ":fence"}, l.token, ttlMs)
+	token := generateToken()
+	result, err := l.redis.Eval(ctx, versionedTryLockLua, []string{l.key, l.key + ":fence"}, token, ttlMs)
 	if err != nil {
 		return fmt.Errorf("versioned lock redis error: %w", err)
 	}
@@ -117,6 +117,7 @@ func (l *versionedLock) TryLock(ctx context.Context) error {
 	}
 
 	l.acquired = true
+	l.token = token
 	l.version = vals[1]
 	l.fence = uint64(vals[2])
 
@@ -189,6 +190,7 @@ func (l *versionedLock) UnlockWithRetry(ctx context.Context, newVersion int64, v
 		l.mu.Unlock()
 		return ErrVersionedLockNotOwned
 	}
+	token := l.token
 	l.mu.Unlock()
 
 	if versionTTL <= 0 {
@@ -199,6 +201,7 @@ func (l *versionedLock) UnlockWithRetry(ctx context.Context, newVersion int64, v
 	}
 
 	verTTLMs := versionTTL.Milliseconds()
+	unlockID := generateToken()
 	var lastErr error
 	for i := 0; i <= retryCount; i++ {
 		select {
@@ -207,7 +210,7 @@ func (l *versionedLock) UnlockWithRetry(ctx context.Context, newVersion int64, v
 		default:
 		}
 
-		result, err := l.redis.Eval(ctx, versionedUnlockLua, []string{l.key}, l.token, newVersion, verTTLMs)
+		result, err := l.redis.Eval(ctx, versionedUnlockLua, []string{l.key}, token, unlockID, newVersion, verTTLMs)
 		if err != nil {
 			lastErr = fmt.Errorf("versioned lock unlock error: %w", err)
 		} else {
@@ -285,11 +288,12 @@ func (l *versionedLock) Touch(ctx context.Context, duration time.Duration) error
 		l.mu.Unlock()
 		return ErrVersionedLockExpired
 	}
+	token := l.token
 	l.mu.Unlock()
 
 	addMs := duration.Milliseconds()
 	maxTTLMs := (2 * l.ttl).Milliseconds()
-	result, err := l.redis.Eval(ctx, versionedTouchLua, []string{l.key}, l.token, addMs, maxTTLMs)
+	result, err := l.redis.Eval(ctx, versionedTouchLua, []string{l.key}, token, addMs, maxTTLMs)
 	if err != nil {
 		return fmt.Errorf("versioned lock touch error: %w", err)
 	}
@@ -300,7 +304,9 @@ func (l *versionedLock) Touch(ctx context.Context, duration time.Duration) error
 	}
 	if val == -1 {
 		l.mu.Lock()
-		l.acquired = false
+		if l.token == token {
+			l.acquired = false
+		}
 		l.mu.Unlock()
 		return ErrVersionedLockExpired
 	}
@@ -319,10 +325,11 @@ func (l *versionedLock) Refresh(ctx context.Context) error {
 		l.mu.Unlock()
 		return ErrVersionedLockExpired
 	}
+	token := l.token
 	l.mu.Unlock()
 
 	ttlMs := l.ttl.Milliseconds()
-	result, err := l.redis.Eval(ctx, versionedRefreshLua, []string{l.key}, l.token, ttlMs)
+	result, err := l.redis.Eval(ctx, versionedRefreshLua, []string{l.key}, token, ttlMs)
 	if err != nil {
 		return fmt.Errorf("versioned lock refresh error: %w", err)
 	}
@@ -332,7 +339,9 @@ func (l *versionedLock) Refresh(ctx context.Context) error {
 	}
 	if ok == 0 {
 		l.mu.Lock()
-		l.acquired = false
+		if l.token == token {
+			l.acquired = false
+		}
 		l.mu.Unlock()
 		return ErrVersionedLockExpired
 	}
