@@ -61,7 +61,8 @@ bulk write；包含 Saga receipt、effect、remote mutation、migration 或多�
 
 - Mongo collection、index 和 transaction marker schema 不变。
 - 配置未设置新字节上限时必须使用安全默认值。
-- 现有只实现 `ProjectionStore` 的自定义 store 继续逐条投影。
+- 现有只实现 `ProjectionStore` 的自定义 store 继续逐条投影；planner 产生的多记录普通 segment
+  在执行阶段展开为 singleton `Project` + ticket/stat + ack 单元，前一条 ack 成功后才执行下一条。
 - 现有多条普通 replay batch 的一次 Mongo transaction + 一次 WAL ack 行为保持不变；单条普通
   segment 仍使用无 Mongo transaction 的单文档 fast path。
 
@@ -101,12 +102,14 @@ planner 只进行确定性分类，不执行 I/O：
 Projector 顺序执行 planner 输出：
 
 1. `batch=true`、记录数大于 1 且 store 支持 `BatchProjectionStore` 时调用 `ProjectBatch`。
-2. 单条普通 segment 与特殊 segment 调用 `Project`，保留现有单文档 fast path；特殊 segment
+2. store 不支持 `BatchProjectionStore` 时，多记录普通 segment 按输入 subslice 展开为 singleton
+   执行单元；每个单元独立 `Project`、完成 ticket/统计并 ack，ack 失败立即停止。
+3. 单条普通 segment 与特殊 segment 调用 `Project`，保留现有单文档 fast path；特殊 segment
    固定只有一条记录。
-3. Mongo 成功后完成该 segment 中的 system projection ticket，并增加 Mongo projection 成功统计。
-4. 调用 `WAL.Ack`，fence 为该 segment 最后一条记录的 fence。
-5. ack 成功后更新 admitted/WALUnacked 统计，再继续下一 segment。
-6. Mongo 或 ack 失败时立即返回，不执行后续 segment。
+4. Mongo 成功后完成该执行单元中的 system projection ticket，并增加 Mongo projection 成功统计。
+5. 调用 `WAL.Ack`，fence 为该执行单元最后一条记录的 fence。
+6. ack 成功后更新 admitted/WALUnacked 统计，再继续下一执行单元。
+7. Mongo 或 ack 失败时立即返回，不执行后续执行单元。
 
 如果 Mongo 成功而 ack 失败，当前 segment 会被重放：
 
@@ -173,6 +176,8 @@ planner 使用包内私有类型，避免为了当前唯一 Mongo 后端扩张�
 - 第一个 segment 成功、第二个失败，下一次 replay 不重新读取已 ack 的第一段。
 - batch classifier 与 MongoStore 支持条件一致，规则漂移立即失败。
 - system projection ticket 只在 Mongo 成功后完成；WALUnacked 只在 ack 成功后减少。
+- 只实现 `ProjectionStore` 时，连续普通记录严格按 `Project(1) -> ack(1) -> Project(2) -> ack(2)`；
+  第一条 ack 失败不执行第二条，第二条 Project 失败时第一条已经从 WAL 前缀移除。
 
 ### 7.3 真实基础设施测试
 
@@ -182,7 +187,20 @@ planner 使用包内私有类型，避免为了当前唯一 Mongo 后端扩张�
 - 100k 热点 backlog 保持最终 version、marker 数和无未确认 WAL。
 - 新增多实体与混合比例压力矩阵，记录吞吐但不在开发机上设置不可靠的硬性能阈值。
 
-### 7.4 全量门禁
+### 7.4 最终故障恢复证据
+
+- **真实 Mongo + 真实文件 WAL：** `TestRealProjectionOnlyMongoAckFailureRestartPreservesSameEntityOrder`
+  用只暴露 `Project` 的 `MongoStore` wrapper 写同一实体的 version 1、2。第一条 Mongo 成功后注入 ack
+  失败，断开并重新打开同一 WAL，再由新 Projector 重放。最终 version=2、值顺序正确、WAL 为空，
+  `FatalProjectionConflicts=0`，证明不会因第二条提前覆盖 `_last_tx` 产生虚假 conflict。
+- **真实文件 WAL + fake store（不含 Mongo）：**
+  `TestProjectorTransientSpecialFailureRecoversFromAcknowledgedOrdinaryPrefix` 证明普通 batch 前缀已 ack，
+  临时失败的特殊记录及后缀仍可重放；清除临时错误后只处理该后缀并清空 WAL。
+- **真实文件 WAL + fake store（不含 Mongo）：**
+  `TestProjectorBatchUnsupportedDoesNotFallbackOrRunLaterSegment` 证明
+  `errProjectionBatchUnsupported` 不降级、不 ack，也不执行后续 segment。
+
+### 7.5 全量门禁
 
 - `go test ./...`。
 - `go test -race` 覆盖 `dataengine`、`nestwal`、`saga`。
@@ -213,46 +231,86 @@ append 446.917ms（223,755 records/s），projection 4.408s（22,688 records/s�
 21,360,637 bytes，98 个 ack batch；1,000 次 Saga receipt transaction 为 8.562s
 （117 records/s）。
 
-优化后以本设计的最终代码重新运行：
+最终修复代码重新运行：
 
 ```text
-100k backlog: append=473.874791ms (211026 records/s), projection=4.253007167s (23513 records/s), wal_bytes=21372621 ack_batches=98
-Saga receipt transactions: 9.679899667s (103 records/s)
+100k backlog: append=562.900709ms (177651 records/s), projection=4.146900375s (24114 records/s), wal_bytes=21327039 ack_batches=98
+Saga receipt transactions: 9.247436875s (108 records/s)
 ```
 
-按以上日志显示值计算，100k append 耗时增加 6.0319%，append 吞吐下降 5.6888%；projection
-耗时下降 3.5162%，projection 吞吐提高 3.6363%；WAL 增加 11,984 bytes（0.0561%），ack batch
-保持 98。Saga 耗时增加 13.0565%，显示吞吐下降 11.9658%。这些单次开发机结果受本机负载影响，
-只能作为本次变更的可复现参考。
+相对历史优化前单次基线，100k append 耗时增加 25.9520%，显示吞吐下降 20.6047%；projection
+耗时下降 5.9233%，显示吞吐提高 6.2853%；WAL 减少 33,598 bytes（0.1573%），ack batch 保持
+98。Saga 耗时增加 8.0056%，显示吞吐下降 7.6923%。相对 reviewed head `c99e06d` 的单次记录，
+projection 耗时下降 2.4949%、吞吐提高 2.5560%，Saga 耗时下降 4.4676%；append 单次抖动较大，
+耗时增加 18.7868%。这些开发机单样本受本机负载影响，只作为可复现参考，不是容量结论。
 
-Projection segment planner 的三次 `benchmem` 样本如下：
+特殊 singleton 改为输入 subslice 后，Projection segment planner 的三次有界 `benchmem` 样本如下。
+输入 `records/fences` 在整个同步 `replayPass` 中存活，segment 不越过该生命周期，因而 subslice 不改变
+ownership；与 reviewed head 相比，1% special 的 allocs/op 从 28 降到 6、10% 从 215 降到 9、
+all-special 从 2059 降到 11：
 
 ```text
+command: GOCACHE=/private/tmp/roost-go-cache-final go test ./dataengine -run '^$' -bench '^BenchmarkProjectionSegmentPlanner$' -benchmem -benchtime=100x -count=3
 goos: darwin
 goarch: arm64
 pkg: github.com/tjbdwanghaibo/cube-kit/dataengine
 cpu: Apple M5
-BenchmarkProjectionSegmentPlanner/special_every_0-10         	   96606	     11003 ns/op	      64 B/op	       1 allocs/op
-BenchmarkProjectionSegmentPlanner/special_every_0-10         	  106351	     11168 ns/op	      64 B/op	       1 allocs/op
-BenchmarkProjectionSegmentPlanner/special_every_0-10         	  104752	     11090 ns/op	      64 B/op	       1 allocs/op
-BenchmarkProjectionSegmentPlanner/special_every_100-10       	   92749	     12382 ns/op	    5856 B/op	      28 allocs/op
-BenchmarkProjectionSegmentPlanner/special_every_100-10       	   98698	     12480 ns/op	    5856 B/op	      28 allocs/op
-BenchmarkProjectionSegmentPlanner/special_every_100-10       	   97557	     12789 ns/op	    5856 B/op	      28 allocs/op
-BenchmarkProjectionSegmentPlanner/special_every_10-10        	   66260	     18725 ns/op	   50720 B/op	     215 allocs/op
-BenchmarkProjectionSegmentPlanner/special_every_10-10        	   67575	     18039 ns/op	   50720 B/op	     215 allocs/op
-BenchmarkProjectionSegmentPlanner/special_every_10-10        	   63913	     19679 ns/op	   50720 B/op	     215 allocs/op
-BenchmarkProjectionSegmentPlanner/special_every_1-10         	   20744	     50001 ns/op	  302929 B/op	    2059 allocs/op
-BenchmarkProjectionSegmentPlanner/special_every_1-10         	   24508	     51490 ns/op	  302929 B/op	    2059 allocs/op
-BenchmarkProjectionSegmentPlanner/special_every_1-10         	   24112	     51486 ns/op	  302929 B/op	    2059 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_0-10         	     100	     27516 ns/op	      64 B/op	       1 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_0-10         	     100	     24296 ns/op	      64 B/op	       1 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_0-10         	     100	     21366 ns/op	      64 B/op	       1 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_100-10       	     100	     20030 ns/op	    3920 B/op	       6 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_100-10       	     100	     20418 ns/op	    3920 B/op	       6 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_100-10       	     100	     17365 ns/op	    3920 B/op	       6 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_10-10        	     100	     22595 ns/op	   32592 B/op	       9 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_10-10        	     100	     18806 ns/op	   32592 B/op	       9 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_10-10        	     100	     18981 ns/op	   32592 B/op	       9 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_1-10         	     100	     17123 ns/op	  122762 B/op	      11 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_1-10         	     100	     18326 ns/op	  122705 B/op	      11 allocs/op
+BenchmarkProjectionSegmentPlanner/special_every_1-10         	     100	     18630 ns/op	  122705 B/op	      11 allocs/op
 PASS
-ok  	github.com/tjbdwanghaibo/cube-kit/dataengine	17.690s
+ok  	github.com/tjbdwanghaibo/cube-kit/dataengine	0.343s
 ```
+
+### 8.2 文件 WAL replay/ack 有界工作负载（不含 Mongo）
+
+该 benchmark 使用真实 `nestwal` 文件、真实 replay/checkpoint ack，以及内存
+`BatchProjectionStore`；store 不执行 Mongo I/O，因此这些数字**不是 Mongo 吞吐**。每个 workload
+含 256 条记录、32 个 entity ID；命令用 `-benchtime=5x` 显式限制运行次数：
+
+```text
+command: GOCACHE=/private/tmp/roost-go-cache-final go test ./dataengine -run '^$' -bench '^BenchmarkProjectorWALReplayAckMatrix$' -benchmem -benchtime=5x -count=1
+BenchmarkProjectorWALReplayAckMatrix/ordinary_only-10         	       5	  10646517 ns/op	         1.000 acks/op	         1.000 batch_calls/op	         0 project_calls/op	  325910 B/op	    9204 allocs/op
+BenchmarkProjectorWALReplayAckMatrix/special_1_percent-10     	       5	  44892583 ns/op	         5.000 acks/op	         3.000 batch_calls/op	         2.000 project_calls/op	  333796 B/op	    9285 allocs/op
+BenchmarkProjectorWALReplayAckMatrix/special_10_percent-10    	       5	 437464683 ns/op	        51.00 acks/op	        26.00 batch_calls/op	        25.00 project_calls/op	  411782 B/op	   10171 allocs/op
+BenchmarkProjectorWALReplayAckMatrix/all_special-10           	       5	2250236659 ns/op	       256.0 acks/op	         0 batch_calls/op	       256.0 project_calls/op	  773654 B/op	   15445 allocs/op
+PASS
+ok  	github.com/tjbdwanghaibo/cube-kit/dataengine	42.524s
+```
+
+ack 次数与 segment 形状一致，并且每次 iteration 在计时后重新 `WAL.Replay` 验证剩余记录为 0；
+all-special 的 checkpoint 固定成本是这个 WAL-only/fake-store benchmark 的主要耗时。
+
+### 8.3 真实 Mongo + 文件 WAL 多实体混合比例
+
+`TestRealMongoMixedRatioWALReplayAckThroughput` 使用真实三节点 Mongo replica set、真实文件 WAL 和
+真实 `MongoStore`，同样覆盖 256 条记录、16 个 entity ID；特殊记录使用 receipt，测试不设置容量
+阈值。以下数字只属于这台本机隔离环境，且与 8.2 的 fake-store 数字不可混用：
+
+```text
+backend=real MongoDB + file WAL workload=ordinary_only records=256 entities=16 special=0 checkpoint_acks=1 elapsed=66.53875ms throughput=3847 records/s
+backend=real MongoDB + file WAL workload=special_1_percent records=256 entities=16 special=2 checkpoint_acks=5 elapsed=166.984417ms throughput=1533 records/s
+backend=real MongoDB + file WAL workload=special_10_percent records=256 entities=16 special=25 checkpoint_acks=51 elapsed=1.312427s throughput=195 records/s
+backend=real MongoDB + file WAL workload=all_special records=256 entities=16 special=256 checkpoint_acks=256 elapsed=6.176983709s throughput=41 records/s
+```
+
+每个 shape 均验证 16 个实体的最终 version=16、receipt 数、`Projected=256` 和 WAL 为空。
 
 ## 9. 验收标准
 
 - 持久化格式、Saga 原子性、Outbox 语义和 WAL durability 均未改变。
-- 混合 batch 按连续 segment 投影并逐 segment ack。
-- 任一 segment 失败后，后续 segment 没有 Mongo 写入且 WAL ack 不越过失败点。
+- 混合 batch 按连续 segment 投影；无 batch 能力的多记录普通 segment 展开为 singleton 执行单元，
+  两种路径都逐执行单元 ack。
+- 任一执行单元失败后，后续执行单元没有 Mongo 写入且 WAL ack 不越过失败点。
 - 普通单文档 fast path 在部分失败和重放场景下不会因 `_last_tx` 被覆盖而产生虚假 fatal conflict。
 - 记录数与逻辑字节双上限均有单元测试。
 - 单元、race、vet、真实 Mongo/JetStream 集成和故障测试全部通过。

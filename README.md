@@ -259,7 +259,7 @@ dataengine:
     group_commit_interval: 10ms
   projection:
     batch_records: 256             # 每次重放最多记录数
-    batch_bytes: 4194304           # 每次重放最多逻辑字节数，缺省 4 MiB
+    batch_bytes: 4194304           # 普通批投影 segment 的逻辑字节上限，缺省 4 MiB
   outbox:
     max_pending: 1000000
     max_oldest_age: 30m
@@ -275,10 +275,11 @@ projection 完成后推进 WAL ACK，effect 由独立 outbox worker 投递，因
 阻塞 Entity 落库。旧 Checkpoint 数据导入说明见 cube-core
 `docs/DATA_ENGINE_MIGRATION.md`；运行时不存在回切到第二写引擎的路径。
 
-projection 重放同时受 `dataengine.projection.batch_records` 与
-`dataengine.projection.batch_bytes` 两个上限约束：任一上限达到即切分。混合普通记录与
-事务记录时，切分严格保持 WAL 顺序；每个 segment 成功后才推进对应 ACK，ACK 绝不会跨过
-失败的 segment。只有一条普通记录时仍走原有的单记录快速路径。
+`dataengine.projection.batch_records` 限制一次 WAL 重放读取的记录数，也限制普通批投影
+segment 的记录数；`dataengine.projection.batch_bytes` 只限制普通批投影 segment 的保守逻辑
+字节数。特殊记录固定为 singleton，超过字节上限的单条普通记录也会作为 singleton 前进，二者
+都不会被字节上限拒绝。混合普通记录与事务记录时，切分严格保持 WAL 顺序；每个执行单元成功后
+才推进对应 ACK，ACK 绝不会跨过失败的执行单元。只有一条普通记录时仍走原有的单记录快速路径。
 
 ---
 
