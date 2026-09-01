@@ -15,6 +15,8 @@
 - Legacy checkpoint/NestWAL Mod 在 Data Engine 模式下 inactive，保留只为生产观察期内的旧服务迁移，不允许双写。
 
 ### Fixed
+- Data Engine：修复部分重放时的 segment ACK 正确性；重放按 WAL 顺序切分，失败 segment
+  不会被后续 ACK 跨越。Mongo marker 与 WAL 存储格式保持不变。
 - NATS async RPC 增加 started/completed/pending、callback latency、duplicate completion 和 callback queue rejected 指标，并加入 10 万 pending 取消守恒验收，确保 exactly-once completion 不仅被实现，也能被监控和规模验证。
 - NATS async RPC 将 reply、timeout、publish error 和 Stop 收敛到唯一 `LoadAndDelete` 终态入口；callback worker 队列关闭/满载时同步兜底，并以 once 防止正常执行与释放路径重复回调，实现 exactly-once completion。
 - NATS 同步 RPC 使用 `RequestWithContext`，调用方取消可立即中断正在等待的请求；默认重试策略随 core 收敛为单次发送，避免未知幂等性的业务调用被框架静默重复执行。

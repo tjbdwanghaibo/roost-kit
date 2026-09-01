@@ -257,6 +257,9 @@ dataengine:
     dir: "data/wal/dataengine/1" # 缺省为 data/wal/dataengine/<sid>
     writer_version: 2
     group_commit_interval: 10ms
+  projection:
+    batch_records: 256             # 每次重放最多记录数
+    batch_bytes: 4194304           # 每次重放最多逻辑字节数，缺省 4 MiB
   outbox:
     max_pending: 1000000
     max_oldest_age: 30m
@@ -271,6 +274,11 @@ handler 侧通过 `HandlerMeta{Durability: corenest.DurabilityStrict}`（或
 projection 完成后推进 WAL ACK，effect 由独立 outbox worker 投递，因此 NATS 故障不会
 阻塞 Entity 落库。旧 Checkpoint 数据导入说明见 cube-core
 `docs/DATA_ENGINE_MIGRATION.md`；运行时不存在回切到第二写引擎的路径。
+
+projection 重放同时受 `dataengine.projection.batch_records` 与
+`dataengine.projection.batch_bytes` 两个上限约束：任一上限达到即切分。混合普通记录与
+事务记录时，切分严格保持 WAL 顺序；每个 segment 成功后才推进对应 ACK，ACK 绝不会跨过
+失败的 segment。只有一条普通记录时仍走原有的单记录快速路径。
 
 ---
 
