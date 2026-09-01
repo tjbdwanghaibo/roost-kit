@@ -26,9 +26,7 @@ const (
 	ModEtcdElection app.ModName = "etcd.election"
 
 	ModSync                    app.ModName = "sync"
-	ModCheckpoint              app.ModName = "checkpoint"
 	ModDataEngine              app.ModName = "dataengine"
-	ModNestWAL                 app.ModName = "nest.wal"
 	ModRemoteEntity            app.ModName = "remote_entity"
 	ModRemoteEntityAtomicStore app.ModName = "remote_entity.atomic_store"
 	ModLock                    app.ModName = "lock"

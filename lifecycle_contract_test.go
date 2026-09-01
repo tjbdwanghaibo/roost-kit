@@ -4,14 +4,13 @@ import (
 	"testing"
 
 	"github.com/tjbdwanghaibo/cube-core/app"
-	kitcheckpoint "github.com/tjbdwanghaibo/cube-kit/checkpoint"
 	kitconfigdata "github.com/tjbdwanghaibo/cube-kit/configdata"
+	kitdataengine "github.com/tjbdwanghaibo/cube-kit/dataengine"
 	kitetcd "github.com/tjbdwanghaibo/cube-kit/etcd"
 	kitlock "github.com/tjbdwanghaibo/cube-kit/lock"
 	kitmongo "github.com/tjbdwanghaibo/cube-kit/mongo"
 	kitnats "github.com/tjbdwanghaibo/cube-kit/nats"
 	kitnest "github.com/tjbdwanghaibo/cube-kit/nest"
-	kitnestwal "github.com/tjbdwanghaibo/cube-kit/nestwal"
 	kitops "github.com/tjbdwanghaibo/cube-kit/ops"
 	kitredis "github.com/tjbdwanghaibo/cube-kit/redis"
 	kitremoteentity "github.com/tjbdwanghaibo/cube-kit/remote_entity"
@@ -25,14 +24,13 @@ import (
 // legacy unbounded Stop fallback.
 func TestBuiltInModsImplementContextStop(t *testing.T) {
 	implementations := []app.ModStopperWithContext{
-		(*kitcheckpoint.Mod)(nil),
+		(*kitdataengine.Mod)(nil),
 		(*kitconfigdata.Mod)(nil),
 		(*kitetcd.EtcdMod)(nil),
 		(*kitlock.LockMod)(nil),
 		(*kitmongo.MongoMod)(nil),
 		(*kitnats.NatsMod)(nil),
 		(*kitnest.Mod)(nil),
-		(*kitnestwal.Mod)(nil),
 		(*kitops.OpsMod)(nil),
 		(*kitredis.RedisMod)(nil),
 		(*kitremoteentity.RemoteEntityMod)(nil),
@@ -40,7 +38,7 @@ func TestBuiltInModsImplementContextStop(t *testing.T) {
 		(*kitstatslog.StatsLogMod)(nil),
 		(*kitsync.SyncMod)(nil),
 	}
-	if len(implementations) != 14 {
-		t.Fatalf("lifecycle contract list = %d, want 14", len(implementations))
+	if len(implementations) != 13 {
+		t.Fatalf("lifecycle contract list = %d, want 13", len(implementations))
 	}
 }

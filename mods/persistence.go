@@ -9,15 +9,13 @@ import (
 )
 
 const (
-	PersistenceCheckpoint = "checkpoint"
 	PersistenceDataEngine = "dataengine"
 )
 
-var ErrPersistenceEngineSelection = errors.New("persistence: exactly one engine must be enabled")
+var ErrPersistenceEngineSelection = errors.New("persistence: dataengine is the only supported engine")
 
 type PersistenceSelection struct {
 	Engine            string
-	CheckpointEnabled bool
 	DataEngineEnabled bool
 }
 
@@ -27,27 +25,16 @@ func ResolvePersistenceEngine(cfg *viper.Viper) (PersistenceSelection, error) {
 	}
 	engine := strings.ToLower(strings.TrimSpace(cfg.GetString("persistence.engine")))
 	if engine == "" {
-		engine = PersistenceCheckpoint
+		engine = PersistenceDataEngine
 	}
-	if engine != PersistenceCheckpoint && engine != PersistenceDataEngine {
+	if engine != PersistenceDataEngine {
 		return PersistenceSelection{}, fmt.Errorf("%w: unsupported engine %q", ErrPersistenceEngineSelection, engine)
 	}
-	selection := PersistenceSelection{
-		Engine: engine, CheckpointEnabled: engine == PersistenceCheckpoint, DataEngineEnabled: engine == PersistenceDataEngine,
-	}
 	if cfg.IsSet("checkpoint.enabled") {
-		selection.CheckpointEnabled = cfg.GetBool("checkpoint.enabled")
+		return PersistenceSelection{}, fmt.Errorf("%w: checkpoint.enabled was removed", ErrPersistenceEngineSelection)
 	}
-	if cfg.IsSet("dataengine.enabled") {
-		selection.DataEngineEnabled = cfg.GetBool("dataengine.enabled")
+	if cfg.IsSet("dataengine.enabled") && !cfg.GetBool("dataengine.enabled") {
+		return PersistenceSelection{}, fmt.Errorf("%w: dataengine.enabled=false", ErrPersistenceEngineSelection)
 	}
-	if selection.CheckpointEnabled == selection.DataEngineEnabled {
-		return PersistenceSelection{}, fmt.Errorf("%w: checkpoint=%t dataengine=%t", ErrPersistenceEngineSelection, selection.CheckpointEnabled, selection.DataEngineEnabled)
-	}
-	if selection.DataEngineEnabled {
-		selection.Engine = PersistenceDataEngine
-	} else {
-		selection.Engine = PersistenceCheckpoint
-	}
-	return selection, nil
+	return PersistenceSelection{Engine: PersistenceDataEngine, DataEngineEnabled: true}, nil
 }

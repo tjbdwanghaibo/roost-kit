@@ -17,15 +17,14 @@
 | 组件 | 解决什么问题 | 外部设施 | 何时用 |
 | --- | --- | --- | --- |
 | `dataengine/` | 统一的 Nest 事务持久化：本地 WAL、Put/Patch/Delete Mongo CAS projection、receipt/effect outbox、聚合 load、schema migration、Saga native step 与 Remote commit | 本地独占磁盘 + MongoDB replica set + NATS JetStream | 新服务与完成迁移的 Entity 服务 |
-| `nestwal/` | WAL frame、group commit 与 v1/v2 reader/writer；Data Engine 复用其物理 WAL，legacy Mod 仅服务 checkpoint 引擎 | 本地磁盘 | WAL 底层与迁移期旧引擎 |
-| `checkpoint/` | legacy 实体快照写引擎；迁移期只允许作为 `persistence.engine=checkpoint` 的独占旧路径 | MongoDB + Redis（7.2+，强制 AOF） | 尚未完成 Data Engine 切换的旧服务 |
-| `nest/` | 装配实例级 core Nest 引擎，并根据 `persistence.engine` 从 Data Engine 或 legacy NestWAL 选择唯一 committer | 无 | 所有 Nest 服务 |
-| `redis/` | Redis 客户端、pipeline、pub/sub、分布式锁（`SetNX`）与 `AutoExtendLock` 自动续期包装；**`EvalDurable`/`EvalBatchDurable`（Lua + `WAITAOF` 同连接管线）是 checkpoint 快照 WAL 的底座**——它拒绝 Cluster 拓扑，因此 `redis.cluster_addrs` 与 checkpoint 互斥 | Redis | 缓存、去重、可容忍双写的互斥 |
+| `nestwal/` | WAL frame、group commit、v1/v2 reader/writer 与 ack watermark；作为 Data Engine 的物理日志库，不再独立装配为应用 Mod | 本地磁盘 | Data Engine WAL 底层 |
+| `nest/` | 装配实例级 core Nest 引擎，并从 Data Engine 取得唯一 transaction committer | 无 | 所有 Nest 服务 |
+| `redis/` | Redis 客户端、pipeline、pub/sub、分布式锁（`SetNX`）与 `AutoExtendLock` 自动续期包装；`EvalDurable`/`EvalBatchDurable` 保留为通用 durable Lua 能力 | Redis | 缓存、去重、可容忍双写的互斥 |
 | `mongo/` | MongoDB 客户端、collection、session/事务封装。写关注硬编码 majority+journal、事务读关注 snapshot；**启动预检拒绝无逻辑会话的部署（单机 mongod 起不来），`require_replica_set` 可再收紧**；索引冲突重建需全局与单索引双开关 | MongoDB（副本集或分片集） | 一切持久化 |
 | `nats/` | NATS 连接、RPC（同步 Call 带 jitter 退避 / CallAsync 固定 5s）、JetStream（消费端 Nak 指数退避、Drain 与 Stop 语义分离）、可靠 Bus（inbox 去重 + 死信，**需 redis Mod 且装配顺序在前**）；`nats.rpc.transport=jetstream` 可切 JetStream RPC | NATS/JetStream（Provide 硬依赖 admin registry） | 服务间消息 |
 | `etcd/` | 服务注册/发现（租约丢失自动重注册、停机静默注销）、`IFencedElection` 选主（CreateRevision 栅栏）、prefix 本地镜像（一致性快照锚点 + CAS 写 + 订阅隔离：慢订阅者单独踢除、handler panic 容器化） | etcd | 多实例部署的发现、选主与配置镜像 |
 | `remote_entity/` | 跨服务实体的原子事务（Mongo 单事务提交 + digest 幂等收据）、不可变快照分发（进程内 L1 + Redis L2，(marker,route,version) 三元 CAS）、local/shared 所有权状态机（Redis Lua CAS）、`IVersionedLock`（栅栏 + 版本）——**全应用的 `ModRedisVLock` capability 由本 Mod 注册** | Redis + NATS（sync）+ MongoDB | 跨服实体所有权与远程提交 |
-| `saga/` | 跨事务域长事务：Mongo 状态机 + outbox + lease fencing + 幂等步骤 inbox（先占位再执行）；**依赖 nestwal**——Nest 事务里声明一条 start effect 即可拉起 saga | MongoDB + NATS JetStream | 跨服务多步业务流程 |
+| `saga/` | 跨事务域长事务：Mongo 状态机 + outbox + lease fencing + 幂等步骤 inbox（先占位再执行）；通过 Data Engine effect outbox 从 Nest 事务拉起 saga | MongoDB + NATS JetStream | 跨服务多步业务流程 |
 | `sync/` | 状态帧同步的房间侧：`SyncMod`（只提供 `ISyncBus`，NATS 或 JetStream 二选一）、`RoomManager`（多房间宿主：两级容量预算 + 空闲 GC）、`RoomReplication`（50ms 合帧）、`RoomTransportSink`（编码到 replication 线格式：snapshot 走可靠、delta 走 latest-only datagram，慢消费者驱逐）。**房间组件是库类型，需业务自行装配，装 SyncMod 不等于有房间同步** | NATS/JetStream（bus）+ `replication` transport（房间帧） | 实时房间状态同步 |
 | `syncstream/` | observer 维度的包流（跑在 `ISyncBus` 上，服务↔服务）：分片重组（有界 + TTL）、阈值压缩（checksum 算在压缩前）、发布确认能力探测（JetStream 有 / 纯 NATS 故意没有）、`BufferedPublisher`（准入 ≠ 确认）、5 个 `cube_sync_*` gauge | NATS/JetStream | 跨服务的有序状态流 |
 | `replication/` | 帧复制网络层：**`AsyncTransport`（每 session 双 worker、latest-only 合帧、原子批准入）是心脏**；QUIC/KCP/UDP 三个 transport（能力矩阵见 §4）、`CompositeTransport` 拼装异构双通道、`ControlPlane` 终结 ACK/resync 控制报文；UDP 为 per-session AEAD 加密 + 防重放 | 无（自带网络协议栈） | 实时帧下发（客户端连接） |
@@ -39,7 +38,7 @@
 | `ops/` | 运维 HTTP：`/healthz`（存活，恒 200）、`/readyz`（ready 位 + 依赖健康，503 语义）、`/metrics`（Prometheus 文本，**不鉴权**）、`/admin/*`（token 双通道鉴权，关闭时 404 隐藏）。**默认关闭（`ops.enabled`），默认只监听 127.0.0.1** | HTTP | 探针、指标抓取与运维命令 |
 | `configdata/` | 配置快照热更：首次 Load 失败即启动失败；reload 带 rollback 语义并打 `configdata.reload.total{result}` 指标。依赖 cube-core `configdata.DefaultRegistry()` 全局注册表（业务表类型须先注册） | 本地文件 | 配置表热更 |
 | `statslog/` | 周期统计 JSONL（每行一个 `StatsRecord`，每次 flush 都 fsync）：runtime + 自动富化 nest/entity 统计（装了对应 Mod 才有）、业务 provider 扩展点（panic 被捕获成记录）、窗口增量 + 累计双报。**默认关闭（`stats_log.enabled`）；entity 统计是 O(N) 全量扫描，interval 勿设太小** | 本地文件 | 周期运行时统计 |
-| `mods/` | 全部 capability 名称常量（`mods.ModRedis`、`mods.ModNestWAL`…），含对 core `app.*` 常量的再导出；常量 → 注册者 → 实际类型见 §3.3 | 无 | 业务从 Registry 取依赖时使用 |
+| `mods/` | 全部 capability 名称常量（`mods.ModRedis`、`mods.ModDataEngine`…），含对 core `app.*` 常量的再导出；常量 → 注册者 → 实际类型见 §3.3 | 无 | 业务从 Registry 取依赖时使用 |
 
 ---
 
@@ -205,12 +204,12 @@ records after ack: 0 (expect 0)
 ticket lsn=1 durable, watermark DurableLSN=1
 ```
 
-> 生产环境不要直接使用裸 `WAL`：应通过 `nestwal.NewMod` / `nestwal.OpenRuntime` 拿到 `Committer`，由它实现 `corenest.TransactionCommitter` 并负责后台重放、落库、outbox 投递与 ack。
+> 生产环境不要直接使用裸 `WAL` 或独立 `nestwal.Runtime`：应用应装配 `dataengine.Mod`，由统一引擎负责 WAL、Mongo projection、outbox 与 ack。
 
 ### 2.2 作为 committer 接入 cube-core Nest（生产装配）
 
-生产装配走 Mod 体系。新服务使用 Data Engine；下列骨架中的 `entity.Getter/ManagerAccess`
-由业务提供。Checkpoint/NestWAL 的旧装配只用于迁移，不得与 Data Engine 同时 active。
+生产装配走 Mod 体系，Data Engine 是唯一持久化引擎；下列骨架中的
+`entity.Getter/ManagerAccess` 由业务提供。
 
 ```go
 import (
@@ -270,7 +269,8 @@ nest:
 handler 侧通过 `HandlerMeta{Durability: corenest.DurabilityStrict}`（或
 `DurabilityPipelined`）声明持久化级别；成功回包时事务已进入 Data Engine WAL。Mongo
 projection 完成后推进 WAL ACK，effect 由独立 outbox worker 投递，因此 NATS 故障不会
-阻塞 Entity 落库。完整迁移和回滚边界见 cube-core `docs/DATA_ENGINE_MIGRATION.md`。
+阻塞 Entity 落库。旧 Checkpoint 数据导入说明见 cube-core
+`docs/DATA_ENGINE_MIGRATION.md`；运行时不存在回切到第二写引擎的路径。
 
 ---
 
@@ -289,20 +289,18 @@ Stop()      停后台任务、flush、关连接（保证停服收敛）
 
 - **依赖声明**：硬要求使用 `DependsOn()`，缺失立即失败；可选集成使用 `OptionalDependsOn()`，依赖存在时自动排到当前 Mod 之前、缺失时忽略。框架统一做拓扑排序和环检测。NATS→Redis（reliable 开启时使用）与 Nest→Remote Entity 已使用可选依赖契约，业务不再依靠 `Mods(...)` 书写顺序碰运气。
 - **capability 查询**：业务永远通过 `app.Lookup[接口类型](registry, mods.ModXxx)` 取依赖，只依赖 `cube-core` 接口，不触碰 Mod 私有实现。名称常量集中在 `mods/name.go`；泛型参数容易写错的常量见 §3.3 的对照表。
-- **配置**：每个 Mod 在 `Init` 中读取自己的配置命名空间（`nest.wal.*`、`checkpoint.*`、`nest.pipelined.*`…），零配置时使用可运行的默认值。`nestwal/mod.go` 的 `Init` 是完整样例：所有 `nest.wal.*` 键逐个覆盖 `DefaultOptions`。
+- **配置**：每个 Mod 在 `Init` 中读取自己的配置命名空间（`dataengine.*`、`nest.pipelined.*`…），零配置时使用可运行的默认值。`persistence.engine` 省略或设为 `dataengine`；其他值会在 Init 阶段被拒绝。
 
 ### 3.2 配置命名空间与跨键不变量
 
-各 Mod 的配置命名空间（键的完整清单以各 `Init` 为准）：`redis.*`（含 `cluster_addrs`，逗号分隔即切 Cluster）、`mongo.*`（含 `require_replica_set`、`mongo.index.allow_recreate`）、`nats.*` + `nats.rpc.*`（JetStream RPC）+ `nats.reliable.*`（可靠 bus）、`etcd.*`（含 `advertise_addr` 的 server_type 感知回退）、`checkpoint.*`（19 键，含 `checkpoint.wal.*` Redis 快照 WAL 一组）、`saga.*`（约 30 键，`saga.owner` 缺省自动生成）、`nest.*`（7 个引擎键）+ `nest.wal.*` + `nest.pipelined.*`（`allowlist`/`async`/`async_workers`/`async_queue_capacity`）、`sync.*`（`transport=nats|jetstream` 及 JetStream 流参数）、`remote_entity.*`（27 键）、`ops.*`、`stats_log.*`、`config_data.dir`。
+各 Mod 的配置命名空间（键的完整清单以各 `Init` 为准）：`redis.*`（含 `cluster_addrs`，逗号分隔即切 Cluster）、`mongo.*`（含 `require_replica_set`、`mongo.index.allow_recreate`）、`nats.*` + `nats.rpc.*`（JetStream RPC）+ `nats.reliable.*`（可靠 bus）、`etcd.*`（含 `advertise_addr` 的 server_type 感知回退）、`dataengine.*`（WAL、projection、outbox、effect stream）、`saga.*`、`nest.*` + `nest.pipelined.*`（`allowlist`/`async`/`async_workers`/`async_queue_capacity`）、`sync.*`、`remote_entity.*`、`ops.*`、`stats_log.*`、`config_data.dir`。
 
 **跨键不变量（违反即启动失败或语义破坏）**：
 
 | 不变量 | 后果 |
 | --- | --- |
-| `checkpoint.wal.durable_timeout > checkpoint.wal.aof_timeout` | Init 期拒绝 |
 | `saga.completion_receipt_ttl > saga.stream_max_age` | Init 期拒绝（收据先于流过期会破坏去重） |
 | saga 消费者 `ProcessTimeout < AckWait`（jetstream/step/start 三处） | 启动拒绝（否则处理未完 ack 先过期 → 重投风暴） |
-| `redis.cluster_addrs` 与 checkpoint 互斥 | `EvalDurable` 拒绝 Cluster，checkpoint 启动 AOF 探针失败 |
 | mongo 部署必须有逻辑会话（副本集/分片集） | 启动预检失败；`require_replica_set=true` 额外拒绝 mongos 之外的无副本集名部署 |
 | ops `admin_enabled` 必须配非 `dev-` token（或显式 `allow_dev_token`） | Init 期拒绝 |
 
@@ -313,10 +311,9 @@ Stop()      停后台任务、flush、关连接（保证停服收敛）
 | 常量（字符串值） | 注册者 | 实际类型 |
 | --- | --- | --- |
 | `ModNest`（`nest`） | nest Mod | `*corenest.NestMgr` |
-| `ModCheckpoint`（`checkpoint`） | checkpoint Mod | **`*checkpoint.Mod`**（非内层 Checkpoint：`Mod.Flush` 会先排空 admission 重试再 flush，直接暴露内层会误报成功） |
-| `ModNestWAL`（`nest.wal`） | nestwal Mod | `*nestwal.Runtime` |
+| `ModDataEngine`（`dataengine`） | dataengine Mod | `*dataengine.Mod`（同时提供 lazy Nest committer） |
 | `ModRedisVLock`（`redis.versioned_lock`） | **remote_entity Mod**（不是 redis Mod） | `fredis.IVersionedLockFactory` |
-| `ModRemoteEntityAtomicStore`（`remote_entity.atomic_store`） | remote_entity Mod | `AtomicCommitStore`（nestwal 消费） |
+| `ModRemoteEntityAtomicStore`（`remote_entity.atomic_store`） | remote_entity Mod | `AtomicCommitStore`（Data Engine projection 消费） |
 | `ModEntityRuntime`（`entity.runtime`） | nest Mod 顺带注册（已存在则不覆盖） | entity getter（statslog 消费） |
 | `ModSaga`（`saga`） | saga Mod | `*coresaga.Engine` |
 | `ModConfigData`（`config_data`） | configdata Mod | `*fconfigdata.Store` |
@@ -328,8 +325,7 @@ Stop()      停后台任务、flush、关连接（保证停服收敛）
 
 | Mod | StopWithContext | 预算 |
 | --- | --- | --- |
-| checkpoint | ✅（声明了 `app.ModStopperWithContext`） | 默认 30s（WAL 熔断后水位线永远追不上，无界 flush 会挂死停服） |
-| nestwal | ✅（同上） | 有界 drain |
+| dataengine | ✅（声明了 `app.ModStopperWithContext`） | 默认 30s；先收敛 projection，再停止 outbox claim |
 | ops / etcd | ✅ | 默认 5s |
 | nats | ✅ | bus → rpc → Drain，超时强制 Close |
 | statslog | ✅ | 有界：卡住的 provider 不会挂死停服（文件留给后台关闭） |
@@ -385,23 +381,17 @@ publisher 再按 EffectID 至少一次投递。NATS 停机只增加 outbox backl
 - **为什么 watermark 必须先于唤醒发布**（`wal.go` `resolveDurableLocked`）：ticket resolve 是一个承诺——“`DurableLSN` 已覆盖你的记录”。外化闸门在 `Done()` 触发后立刻读水位线，若先 `close(done)` 再推水位线，等待者会读到旧水位线而再次阻塞甚至误判未持久化。因此先 `durableLSN.Store(upto)`，再逐个 `close(ticket.done)`。
 - **ack fence 是合法扫描起点**（`wal.go` `Replay`）：ack fence 记录的是某个 frame 的**结束偏移**，天然落在 frame 边界上，所以重放可以跳过已确认的 segment 和 fence 所在 segment 的已确认前缀（`scanFramesFrom(file, segment, ack.Offset, ...)`），不必每轮从头读全量并重新校验 CRC。
 - **ack 检查点：双 slot + generation + 目录 fsync**（`nestwal/checkpoint.go`）：`ack-0.chk`/`ack-1.chk` 按 `generation & 1` 交替写，写入走 tmp 文件 → fsync → rename → `syncDirectory`。加载时取 CRC 合法者中 generation 最大的一个：任何时刻允许一个 slot 是 torn 的，另一个 slot 在替换者持久化前不会被碰。ack 丢失最多导致重复重放（幂等吸收），绝不会跳过记录。
-- **fsync 不确定 ⇒ 熔断而非重试**（`wal.go` `Options.OnFatal` 注释、`setTerminal`；`nestwal/mod.go` `onFatal`）：fsync 报错后，内核可能已经丢弃了 dirty page 却清掉了错误标记，重试的 fsync 会“成功”但数据并没有落盘——写入结果从此不可知。所以任何物理写/fsync 失败都被包装为 `corenest.ErrCommitIndeterminate` 并置 terminal：拒绝一切后续写入、以该错误 resolve 所有 pending ticket，并经 `OnFatal` 熔断进程（Mod 会 `NestMgr.Fence` + `app.RuntimeFailure.Fail`）。重启后由重放从最后一个 ack 恢复出唯一可信的历史。
+- **fsync 不确定 ⇒ 熔断而非重试**（`wal.go` `Options.OnFatal` 注释、`setTerminal`；`dataengine/mod.go` `onFatal`）：fsync 报错后，内核可能已经丢弃了 dirty page 却清掉了错误标记，重试的 fsync 会“成功”但数据并没有落盘——写入结果从此不可知。所以任何物理写/fsync 失败都被包装为 `corenest.ErrCommitIndeterminate` 并置 terminal：拒绝一切后续写入、以该错误 resolve 所有 pending ticket，并经 `OnFatal` 熔断进程（Data Engine Mod 会 `NestMgr.Fence` + `app.RuntimeFailure.Fail`）。重启后由重放从最后一个 ack 恢复出唯一可信的历史。
 - **单写者锁与容量健康**：`writer.lock` 文件锁防止双进程写同一目录（`lock_unix.go`）；`MaxDiskBytes`/`MaxUnackedAge` 超限时 `Healthy()` 报错，接入 health 后表现为实例不健康而不是静默膨胀。
 - **落库与 outbox**（`dataengine/projector.go`、`mongo_store.go`、`outbox_worker.go`）：重放循环在事务仍被 Entity 锁持有时让路（`TransactionReleased` 唤醒）；普通 mutation、Remote commit、receipt 和 effect staging 按需要进入同一个 Mongo session transaction。WAL ACK 在 projection 后推进，outbox publisher 独立 claim/lease/retry，JetStream MsgID 去重只是热路径优化。
 
-### checkpoint：legacy 迁移期写引擎
+### Data Engine：唯一数据引擎
 
-以下内容只描述 `persistence.engine=checkpoint` 的旧服务，不能与 Data Engine 同时
-active。新生成 DAO 已无 persistence dirty/Snapshot 写协议；完成 patch-only 切换后不
-允许回切。删除旧包前的生产门禁见 core `docs/DATA_ENGINE_MIGRATION.md`。
-
-- **durable watermark gate**（`checkpoint/mod.go` `entityDurable`/`onEntityRelease`）：实体释放时若 `base.LastCommitLSN() > DurableLSN()`，说明它最后一笔 pipelined 提交还没落盘——此时**先不做快照**（保住 dirty 位），放进 `pendingReleases`，由 admission 重试循环在水位线追上后再快照提交。闸门由 `nestwal/mod.go` 的 `cp.SetDurableWatermark(runtime.Committer.DurableLSN)` 自动接线；未用 pipelined 的实体 LSN 为 0 恒通过，代价只是一次原子读。
-- **pendingReleases / pendingSaves 与熔断**：重试集合有容量上限（`checkpoint.admission_pending_capacity`），超限触发 `fenceAdmission` → `RuntimeFailure`——宁可停服也不静默丢快照。
-- **Stop 有 30s 上界**（`mod.go` `Stop`）：若 WAL 已被熔断，水位线永远追不上，无界 flush 会让停服挂死；带 deadline 的 `StopWithContext` 保证停服收敛。
-- **Redis 快照 WAL 强制 AOF**（`mod.go` `validateRedisWALDurability`）：启动时用同一物理连接做探针写 + `WAITAOF`，阈值不满足直接启动失败；要求 Redis 7.2+ 开 AOF，拒绝无法保证 Lua 与 `WAITAOF` 同连接同分片的 Redis Cluster。`RequireAOF` 是硬编码不可配置的（`wal.aof_replicas` 可配，默认 0）。
-- **EntityRepository 是唯一冷加载路径**（`checkpoint/entity_repository.go`）：按 full entity ID single-flight（并发 miss 只打一次库）；整个实体聚合在**一个 Mongo snapshot 事务**里读（不同 collection 的 DAO 不会来自不同已提交时点）；缺任一 DAO / 文档数不为 1 / `_id` 不匹配都拒绝加载；remote-managed 实体必须带版本信封。
-- **Mongo 侧删除是墓碑而非物理删除**（`mongo_backend.go`）：`BulkRemove` upsert `_deleted:true`，所有读路径过滤墓碑；保存路径主动清墓碑字段——**更高版本的写入是唯一的显式复活路径**。直接查库或估算磁盘时必须知道这点。CAS 过滤器同时含版本与 fence（`_fence` 单调 + owner sid 匹配），这就是"下游按 fence 单调性拒旧"在存储层的落地。
-- **BulkSave 两阶段**：先按 (db, scope, collection) 分组并发 BulkWrite（快路径，`mongo_max_concurrent_groups` 限并发）；`MatchedCount` 不齐时逐条 upsert 精确区分"文档不存在"与"存储版本更新"。原子事务内的写入按 (db, scope, collection, id) 排序，降低跨事务死锁概率。
+原 Checkpoint 的聚合冷加载、schema migration 和字段级 patch 已由 Data Engine 的
+`EntityRepository`、`MigrationRunner`、`Tracker`/`MutationParticipant` 接管。所有业务
+修改都进入 Nest transaction；低隔离调用也通过 detached transaction 进入相同 WAL。
+Mongo projection 以 version CAS 保证幂等，Saga receipt/effect staging 与业务 mutation
+按需要位于同一 Mongo transaction。旧 Checkpoint 包和 Redis 快照 WAL 不再是运行时路径。
 
 ### 分布式锁与选主
 
@@ -510,9 +500,9 @@ active。新生成 DAO 已无 persistence dirty/Snapshot 写协议；完成 patc
 1. **框架心智模型**：`cube-core` 仓库 `README.md` + `RUNTIME_EXECUTION_MODEL.md`，然后读本仓库 `mods/name.go` 和任意一个小 Mod（如 `lock/lock_mod.go`）理解四阶段生命周期。
 2. **WAL 设计文档**：`cube-core/NEST_TRANSACTION_WAL.md` → `NEST_PIPELINED_COMMIT.md`（中文，含 Strict/Pipelined 语义对比与正确性论证）。
 3. **nestwal 主线**（本仓库核心，建议精读）：
-   - `nestwal/wal.go`（帧格式、group commit、Enqueue/ticket、terminal 熔断）→ `nestwal/checkpoint.go`（双 slot ack）→ `nestwal/committer.go`（重放循环）→ `nestwal/runtime.go` + `nestwal/mod.go`（装配与 watermark 接线）。
-   - 测试按价值排序：**`crash_test.go`**（`TestNestWALCrashChildProcess` 用真实子进程 `SIGKILL` 验证崩溃后 durable 前缀完整——最值得读）、`pipelined_test.go`（ticket 语义、同步拒绝、terminal 时 fail 所有 ticket）、`wal_test.go`（torn tail、ack、rotate）、`fatal_fence_test.go`（熔断到 Nest/RuntimeFailure 的传导）、**`pilot_test.go`**（`NESTWAL_PILOT=1 go test -run TestPipelinedPilot -v ./nestwal/`：真实引擎 + 真实磁盘的 strict vs pipelined 压测，理解为什么需要 pipelined）。
-4. **checkpoint 闸门**：`checkpoint/mod.go` + `checkpoint/pipelined_gate_test.go`（`TestReleaseGateDefersSnapshotUntilDurable`）+ `admission_limit_test.go`。
+   - `nestwal/wal.go`（帧格式、group commit、Enqueue/ticket、terminal 熔断）→ `nestwal/checkpoint.go`（双 slot ack）→ `dataengine/projector.go`（事务 projection 与 ack）。
+   - 测试按价值排序：**`crash_test.go`**（真实子进程 `SIGKILL` 验证崩溃后 durable 前缀完整）、`pipelined_test.go`（ticket 语义）、`wal_test.go`（torn tail、ack、rotate）、`dataengine/fatal_fence_test.go`（熔断到 Nest/RuntimeFailure 的传导）、`nestwal/backlog_integration_test.go`（100k backlog 恢复）。
+4. **Data Engine 主线**：`dataengine/projector.go` → `mongo_store.go` → `entity_repository.go` → `migration.go` → `outbox_worker.go`。
 5. **锁与选主**：`redis/lock.go` + `lock_test.go` → `remote_entity/versioned_lock.go`、`versioned_lock_lua.go` + `versioned_lock_unlock_test.go` → `etcd/election.go` + `election_test.go`（含"campaign ctx 取消不丢领导权"这条反直觉不变量）。
 6. **横向扩展**：`saga/mongo_store.go`（lease CAS）+ **`saga/command_consumer_test.go`**（重投只执行一次 = exactly-once step 的规格）→ `remote_entity/transaction_manager.go`（跨服事务追踪）→ `replication/udp_crypto.go`、`udp_transport.go` → `sync/room_replication.go`（状态帧）→ `lockstep/room.go` + `room_test.go`（输入帧：追帧限速、断线重连、裁决回调的用例即文档）→ `spatial/`、`ai/`、`taskflow/action_runner_test.go`（抢占/队列/重入检测）。
 7. **语义即测试的推荐清单**：`etcd/local_mirror_test.go`（原子快照、慢订阅隔离、panic 隔离、CAS）、`nats/jetstream_test.go`（Drain 与 Stop 的语义差）、`gateway/middleware_test.go`（带回归原因注释的鉴权兜底）、`ops/ops_mod_test.go`（5 个测试 = 该包完整规格）、`mongo/collection_test.go`（"默认绝不 drop 生产索引"）。
@@ -543,7 +533,7 @@ active。新生成 DAO 已无 persistence dirty/Snapshot 写协议；完成 patc
   ```bash
   go build ./... && go test ./...
   # 单独跑核心持久化链路：
-  go test ./nestwal/ ./checkpoint/
+  go test ./nestwal/ ./dataengine/
   ```
 
 新增 Mod 时请同时提供：配置读取、Registry capability、health 检查、确定的 Stop 行为，以及不依赖真实外部服务的测试替身。

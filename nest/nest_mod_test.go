@@ -10,7 +10,6 @@ import (
 	"github.com/tjbdwanghaibo/cube-core/health"
 	corenest "github.com/tjbdwanghaibo/cube-core/nest"
 	"github.com/tjbdwanghaibo/cube-kit/mods"
-	"github.com/tjbdwanghaibo/cube-kit/nestwal"
 )
 
 type emptyGetter struct{}
@@ -39,12 +38,7 @@ func TestModProvidesInstanceClientAndHealth(t *testing.T) {
 	cfg.Set("nest.worker_num", 1)
 	cfg.Set("nest.queue_capacity", 8)
 	registry := app.NewRegistry(cfg)
-	runtime, err := nestwal.OpenRuntime(nestwal.DefaultOptions(t.TempDir()), nil, nil, nestwal.DefaultCommitterOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runtime.Shutdown(context.Background()) })
-	if err := registry.Register(mods.ModNestWAL, runtime); err != nil {
+	if err := registry.Register(mods.ModDataEngine, dataEngineNestProvider{committer: noOpCommitter{}}); err != nil {
 		t.Fatal(err)
 	}
 	mod := NewMod(emptyGetter{})
