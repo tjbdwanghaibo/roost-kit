@@ -39,6 +39,6 @@ func TestBuiltInModsImplementContextStop(t *testing.T) {
 		(*kitsync.SyncMod)(nil),
 	}
 	if len(implementations) != 13 {
-		t.Fatalf("lifecycle contract list = %d, want 13", len(implementations))
+		t.Fatalf("lifecycle gate list = %d, want 13", len(implementations))
 	}
 }

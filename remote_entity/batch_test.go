@@ -82,9 +82,16 @@ func newRemoteTestLoader() *remoteTestLoader {
 	return &remoteTestLoader{mockLoader: newMockLoader(), commits: make(map[entity.RemoteTransactionID][]entity.RemoteCommitReceipt), versions: make(map[int64]uint64)}
 }
 
-func (e *testRemoteEntity) BuildRemoteCommitLocked(lease entity.RemoteWriteLease, _ entity.RemoteTransactionOutcome) (entity.RemoteCommit, error) {
+func (e *testRemoteEntity) BuildRemoteCommitLocked(lease entity.RemoteWriteLease, outcome entity.RemoteTransactionOutcome) (entity.RemoteCommit, error) {
 	if e.buildErr != nil {
 		return entity.RemoteCommit{}, e.buildErr
+	}
+	if outcome.DeleteIntents != nil && outcome.DeleteIntents.RemoteDeleteRequested(e.GUId()) {
+		return entity.RemoteCommit{
+			Delete: true, Schema: 1, Codec: 1,
+			Deletes:       []entity.RemoteDataDelete{{Collection: "remote", ID: e.GUId()}},
+			Invalidations: []entity.RemoteSnapshotKey{{EntityID: e.GUId(), Kind: e.GetEntityKind(), Scope: 1}},
+		}, nil
 	}
 	e.dirty.dirty = false
 	return entity.RemoteCommit{
@@ -95,6 +102,41 @@ func (e *testRemoteEntity) BuildRemoteCommitLocked(lease entity.RemoteWriteLease
 			Schema: 1, Codec: 1, Full: true, Data: []byte("snapshot"),
 		}},
 	}, nil
+}
+
+type batchDeleteIntent int64
+
+func (intent batchDeleteIntent) RemoteDeleteRequested(id int64) bool { return int64(intent) == id }
+
+func TestRemoteWriteBatchUsesExplicitDeleteIntentBeforeEntityRemoval(t *testing.T) {
+	const kind entity.EntityKind = 119
+	entity.MustRegisterEntityKindDefs(entity.EntityKindDef{Kind: kind, Category: 1, RemotePolicy: entity.RemotePolicyManaged})
+	mgr := newRemoteEntityManager(newMockVersionedLockFactory(), DefaultConfig(), 1000)
+	loader := newRemoteTestLoader()
+	mgr.SetBackend(loader)
+	mgr.SetOwnershipStore(newMockMarkerStore())
+	live := newTestRemoteEntity(1399, 1, kind)
+	loader.add(live)
+
+	batch, err := mgr.PrepareRemoteWriteBatch(context.Background(), []int64{live.GUId()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome := entity.NewRemoteTransactionOutcome(remoteTestTxID(19), "delete", "", true, 2)
+	outcome.DeleteIntents = batchDeleteIntent(live.GUId())
+	if err := batch.FinalizeLocked(outcome); err != nil {
+		t.Fatal(err)
+	}
+	commits := batch.Commits()
+	if len(commits) != 1 || !commits[0].Delete || len(commits[0].Deletes) != 1 || live.IsRemoved() {
+		t.Fatalf("commits=%+v removed=%t", commits, live.IsRemoved())
+	}
+	if err := batch.Abort(context.Background(), errors.New("test complete")); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (l *remoteTestLoader) CommitRemoteBatch(ctx context.Context, commits []entity.RemoteCommit) ([]entity.RemoteCommitReceipt, error) {

@@ -282,7 +282,8 @@ func (b *remoteWriteBatch) FinalizeLocked(outcome entity.RemoteTransactionOutcom
 			b.rollbackFinalizedLocked()
 			return fmt.Errorf("%w: entity %d has no generated remote commit participant", entity.ErrRemoteWriteCapabilityDisabled, entry.lease.EntityID)
 		}
-		if !entry.entity.IsRemoved() {
+		deleteRequested := outcome.DeleteIntents != nil && outcome.DeleteIntents.RemoteDeleteRequested(entry.lease.EntityID)
+		if !deleteRequested {
 			if transactional, ok := participant.(entity.IRemoteCommitChangeParticipant); ok {
 				if !transactional.HasRemoteCommitLocked(outcome) {
 					continue
@@ -299,7 +300,11 @@ func (b *remoteWriteBatch) FinalizeLocked(outcome entity.RemoteTransactionOutcom
 		commit.TransactionID = outcome.TransactionID
 		commit.EntityID = entry.lease.EntityID
 		commit.Kind = entry.entity.GetEntityKind()
-		commit.Delete = entry.entity.IsRemoved()
+		if commit.Delete != deleteRequested {
+			participant.RollbackRemoteCommit(commit)
+			b.rollbackFinalizedLocked()
+			return fmt.Errorf("remote_entity: delete intent mismatch for entity %d", entry.lease.EntityID)
+		}
 		commit.BaseVersion = entry.lease.BaseVersion
 		commit.NextVersion = entry.lease.BaseVersion + 1
 		commit.MarkerEpoch = entry.lease.MarkerEpoch

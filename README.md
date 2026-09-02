@@ -402,6 +402,11 @@ publisher 再按 EffectID 至少一次投递。NATS 停机只增加 outbox backl
 Mongo projection 以 version CAS 保证幂等，Saga receipt/effect staging 与业务 mutation
 按需要位于同一 Mongo transaction。旧 Checkpoint 包和 Redis 快照 WAL 不再是运行时路径。
 
+`EntityManager.Destroy(deleteFromDB=true)` 由 Data Engine Runtime 注册的唯一 delete
+admitter 接管。本地与 Remote Entity 都先把删除写入当前/隔离的 strict transaction；
+Remote 路径使用显式 delete intent，并继续经过 ownership marker、lock fence、route epoch。
+只有 admission 成功才完成内存移除；rollback 保持实体存活，结果不确定则触发 fail-stop。
+
 ### 分布式锁与选主
 
 **先做二选一**（两套锁并存是刻意的分层，不是重复实现）：
@@ -466,6 +471,7 @@ Mongo projection 以 version CAS 保证幂等，Saga receipt/effect staging 与�
 
 - **Mongo store 的 lease fencing**（`saga/mongo_store.go`）：任务领取用 `FindOneAndUpdate` 带 `version` + `lease_until <= now` 的 CAS，`$inc lease_token` 使过期实例的后续提交被 owner+token 过滤。状态落库走 `Apply(ctx, ApplyRequest)`：无 outbox/收据时是不开事务的快路径（一次 CAS ReplaceOne）；事务路径在**一个 Mongo 事务**里同落 saga 状态、outbox 命令、completion 收据与 `CloseOperation`（driver 可能重跑事务回调，outcome 在回调开头重置）。重复完成通过收据 digest 幂等判定。
 - **`MongoCommandInbox` 先占位再执行**（`saga/command_consumer.go`）：在同一个 Mongo 事务里先 `InsertOne` 收据占住 `_id = command.ID`——**用唯一索引把并发重投序列化在业务写之前**；handler 失败与占位一起回滚；撞 duplicate-key 时等对方提交后读回收据重放，**绝不重跑 handler**。命令过 `DeadlineAt` 后不开始新业务，只补发已提交的完成。
+- **`DataEngineStepInbox` 的显式 reservation fence**：`SubscribeDataEngineStep` 只在同步 handler context 中附加 reservation；业务必须用 `ReservationFromContext(ctx)` 取出后作为 Nest 参数显式传递，并在 Nest handler 内调用 `inbox.Bind(command, reservation)`。Mongo projection 在同一事务中校验 owner、lease token、command digest、`pending` 和 `lease_until > now`；旧 worker 晚到时写 skipped marker 并 ACK，不应用业务/Remote mutation 或 effect。异步任务不得依赖该 context。
 - **`StepHandler` 契约**：只能通过传入的事务 ctx 改 Mongo；网络调用等不可逆副作用必须走事务性 outbox（driver 允许重跑事务回调）。
 - **nest-effect 启动通道**（`saga/nest_start_consumer.go`）：业务在 Nest 事务里 `EmitStart` 一条 start effect，nestwal 重放投递到 `ROOST_EFFECTS` 流，saga 协调者的 durable 消费者解码后 `StartSaga`——"事务里声明一句 effect 就拉起 saga"。所有协调者副本必须共用同一个 Durable。envelope 带 wire version（未知版本拒收）与 8MiB 上限；subject 校验拒绝通配符注入。
 
@@ -520,22 +526,25 @@ Mongo projection 以 version CAS 保证幂等，Saga receipt/effect staging 与�
 
 ## 6. 版本与仓库关系
 
-- **与 cube-core 的版本对应**：以本仓库 `go.mod` 为准——`cube-kit v1.8.0` 要求 `cube-core v1.8.0`。升级 cube-kit 时同步升级 core 到 go.mod 声明的最低版本；发布版 `go.mod` 不允许包含本地 `replace`。
+- **与 cube-core 的版本对应**：研发 source-head 由 `go.work` 选择本地 Core；正式发布则以本仓库 `go.mod` 为准。发布 Kit 前必须先发布它依赖的 Core tag；发布版 `go.mod` 不允许本地 `replace` 或 pseudo-version。
 - **仓库分工**：
 
   | 仓库 | 模块路径 | 角色 |
   | --- | --- | --- |
-  | roost-core | `github.com/tjbdwanghaibo/cube-core` | 生命周期、Registry、Nest 引擎、稳定接口与设计文档 |
-  | roost-kit（本仓库） | `github.com/tjbdwanghaibo/cube-kit` | 基础设施 Mod 与中间件实现 |
-  | roost-codegen | `github.com/tjbdwanghaibo/roost-codegen` | DAO/Sender 等代码生成 |
-  | roost-skill | — | 技能/战斗玩法组件 |
+  | cube-core | `github.com/tjbdwanghaibo/cube-core` | 生命周期、Registry、Nest 引擎、稳定接口与设计文档 |
+  | cube-kit（本仓库） | `github.com/tjbdwanghaibo/cube-kit` | 基础设施 Mod 与中间件实现 |
+  | cube-codegen | `github.com/tjbdwanghaibo/roost-codegen` | DAO/Sender 等代码生成 |
+  | cube-skill | `github.com/tjbdwanghaibo/roost-skill` | 技能/战斗玩法组件 |
 
 - **本地联调**：在共同父目录建 workspace，勿把 `go.work` 提交进任何仓库：
 
   ```bash
   cd /path/to/workspace
-  go work init ./roost-core ./roost-kit ./your-service
+  go work init ./cube-core ./cube-kit ./cube-skill ./cube-codegen
   ```
+
+  需要业务工程时再执行 `go work use ./your-service`。发布/standalone 验证必须使用
+  `GOWORK=off`；workspace 绿灯不代表正式 tag 已形成依赖闭包。
 
 - **开发验证**：
 

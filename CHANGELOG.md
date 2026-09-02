@@ -10,11 +10,14 @@
 - 新增 WAL/投影/Saga benchmark 矩阵及 NATS outage backlog 恢复测试，脚本位于 `scripts/perf/dataengine.sh`。
 
 ### Changed — Data Engine
-- `persistence.engine=checkpoint|dataengine` 强制二选一；Nest Mod 按所选引擎获取 committer，Data Engine 通过 lazy proxy 保证 recovery 完成后 Nest 才接流量。
-- WAL reader 同时支持 v1/v2，writer 显式选择版本；Data Engine 默认迁移阶段保持 v1，patch-only 生成代码要求 reader-first 后切 writer v2。
-- Legacy checkpoint/NestWAL Mod 在 Data Engine 模式下 inactive，保留只为生产观察期内的旧服务迁移，不允许双写。
+- `persistence.engine` 只接受 `dataengine`；Nest 通过 Data Engine lazy proxy 获取 committer，recovery 完成后才接流量。
+- WAL reader 同时支持 v1/v2；新配置默认写 v2，只有显式 `dataengine.wal.writer_version=1` 才为历史 reader 保留兼容写入。
+- 旧 Checkpoint Mod 与 standalone NestWAL Mod 已物理删除；`nestwal` 仅作为 Data Engine 内部 WAL 库存在，不再参与业务 Mod 装配。
 
 ### Fixed
+- Data Engine Runtime 现在为 EntityManager 注册唯一 delete admitter。本地删除用隔离 strict transaction 或当前 Nest transaction 写 tombstone；Remote 删除先准备完整 RemoteWriteBatch 并携带显式 delete intent，只有 durable admission 后才从内存移除，rollback 保持实体可用，结果不确定时 fail-stop。
+- Saga Data Engine step 的 reservation 必须显式传给 `inbox.Bind(command, reservation)`。Mongo 投影在应用任何 mutation/effect 前原子校验 claim owner、lease token、command digest、`pending` 状态与未过期租约；陈旧记录只写 skipped transaction marker 后 ACK，防止旧 worker 晚到提交，也避免 poison WAL。skipped 状态在重放时同样阻断事务外 Remote publish。
+- Data Engine 默认 WAL writer 修正为支持 Patch/Receipt 的 v2；聚合加载先绑定 DAO ID，并把“部分缺失/部分 tombstone”判为损坏而不是整个实体不存在；绝对 `expires_at` 索引不再重复叠加一轮 TTL。
 - Data Engine：修复部分重放时的 segment ACK 正确性；重放按 WAL 顺序切分，失败 segment
   不会被后续 ACK 跨越。Mongo marker 与 WAL 存储格式保持不变。
 - NATS async RPC 增加 started/completed/pending、callback latency、duplicate completion 和 callback queue rejected 指标，并加入 10 万 pending 取消守恒验收，确保 exactly-once completion 不仅被实现，也能被监控和规模验证。
