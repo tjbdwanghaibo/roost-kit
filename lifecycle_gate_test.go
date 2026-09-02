@@ -13,10 +13,10 @@ import (
 	kitnest "github.com/tjbdwanghaibo/cube-kit/nest"
 	kitops "github.com/tjbdwanghaibo/cube-kit/ops"
 	kitredis "github.com/tjbdwanghaibo/cube-kit/redis"
-	kitremoteentity "github.com/tjbdwanghaibo/cube-kit/remote_entity"
+	kitremoteentity "github.com/tjbdwanghaibo/cube-kit/remoteentity"
+	kitroom "github.com/tjbdwanghaibo/cube-kit/room"
 	kitsaga "github.com/tjbdwanghaibo/cube-kit/saga"
 	kitstatslog "github.com/tjbdwanghaibo/cube-kit/statslog"
-	kitsync "github.com/tjbdwanghaibo/cube-kit/sync"
 )
 
 // This compile-time list is the lifecycle gate for every infrastructure Mod
@@ -36,7 +36,7 @@ func TestBuiltInModsImplementContextStop(t *testing.T) {
 		(*kitremoteentity.RemoteEntityMod)(nil),
 		(*kitsaga.Mod)(nil),
 		(*kitstatslog.StatsLogMod)(nil),
-		(*kitsync.SyncMod)(nil),
+		(*kitroom.RoomMod)(nil),
 	}
 	if len(implementations) != 13 {
 		t.Fatalf("lifecycle gate list = %d, want 13", len(implementations))

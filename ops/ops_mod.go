@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,7 @@ import (
 	"github.com/tjbdwanghaibo/cube-core/health"
 	"github.com/tjbdwanghaibo/cube-core/httpserver"
 	"github.com/tjbdwanghaibo/cube-core/lifecycle"
-	"github.com/tjbdwanghaibo/cube-core/obs"
+	"github.com/tjbdwanghaibo/cube-core/metrics"
 	"github.com/tjbdwanghaibo/cube-kit/mods"
 
 	"github.com/spf13/viper"
@@ -34,7 +35,7 @@ type OpsMod struct {
 	sid           int32
 	service       string
 	health        *health.Registry
-	metrics       *obs.Registry
+	metrics       *metrics.Registry
 	commands      *admin.Registry
 	lifecycle     *lifecycle.Registry
 	server        *http.Server
@@ -78,8 +79,8 @@ func (m *OpsMod) Provide(r *app.Registry) error {
 	if m.health, ok = app.Lookup[*health.Registry](r, mods.ModHealth); !ok || m.health == nil {
 		return fmt.Errorf("ops: capability %q not found", mods.ModHealth)
 	}
-	if m.metrics, ok = app.Lookup[*obs.Registry](r, mods.ModObs); !ok || m.metrics == nil {
-		return fmt.Errorf("ops: capability %q not found", mods.ModObs)
+	if m.metrics, ok = app.Lookup[*metrics.Registry](r, mods.ModMetrics); !ok || m.metrics == nil {
+		return fmt.Errorf("ops: capability %q not found", mods.ModMetrics)
 	}
 	if m.commands, ok = app.Lookup[*admin.Registry](r, mods.ModAdmin); !ok || m.commands == nil {
 		return fmt.Errorf("ops: capability %q not found", mods.ModAdmin)
@@ -184,11 +185,11 @@ func (m *OpsMod) handleReady(w http.ResponseWriter, r *http.Request) {
 
 func (m *OpsMod) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	var metrics []obs.Metric
+	var snapshot []metrics.Metric
 	if m.metrics != nil {
-		metrics = m.metrics.Snapshot()
+		snapshot = m.metrics.Snapshot()
 	}
-	_, _ = w.Write(obs.PrometheusText(metrics))
+	_, _ = w.Write(metrics.PrometheusText(snapshot))
 }
 
 func (m *OpsMod) handleAdminCommands(w http.ResponseWriter, r *http.Request) {
@@ -254,13 +255,44 @@ func (m *OpsMod) metricCount() int {
 	return len(m.metrics.Snapshot())
 }
 
+// authorized compares the presented admin token in constant time. This
+// endpoint can execute every registered admin command (plugin loading, DLQ
+// replay, load-test control), so the token is a credential of the same class
+// as the session tokens and payload signatures in cube-core's security
+// package — and those are compared with hmac.Equal. A plain `==` short-circuits
+// at the first differing byte, which is exactly the signal a timing attack
+// needs.
+//
+// An empty configured token authorizes nothing. Init already refuses
+// admin_enabled without a token, so this is defence in depth for an OpsMod
+// assembled directly rather than through Init.
 func (m *OpsMod) authorized(r *http.Request) bool {
-	if r.Header.Get("X-Admin-Token") == m.adminToken {
+	if m.adminToken == "" {
+		return false
+	}
+	if secretEqual(r.Header.Get("X-Admin-Token"), m.adminToken) {
 		return true
 	}
-	token := strings.TrimSpace(r.Header.Get("Authorization"))
-	token = strings.TrimPrefix(token, "Bearer ")
-	return token == m.adminToken
+	return secretEqual(bearerToken(r.Header.Get("Authorization")), m.adminToken)
+}
+
+// bearerToken extracts the credential from an Authorization header. The scheme
+// is case-insensitive per RFC 7235, so `bearer x` must work as well as
+// `Bearer x`.
+func bearerToken(header string) string {
+	header = strings.TrimSpace(header)
+	if len(header) >= 7 && strings.EqualFold(header[:7], "bearer ") {
+		return strings.TrimSpace(header[7:])
+	}
+	return header
+}
+
+// secretEqual reports whether presented equals want without leaking where
+// they first differ. Length is still observable — ConstantTimeCompare returns
+// early on a length mismatch, as does hmac.Equal — which is the accepted
+// trade-off: the token's length is not the secret, its contents are.
+func secretEqual(presented, want string) bool {
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(want)) == 1
 }
 
 func (m *OpsMod) setReady(ok bool, msg string) {

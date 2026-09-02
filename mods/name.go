@@ -6,7 +6,7 @@ import "github.com/tjbdwanghaibo/cube-core/app"
 const (
 	ModMongo          app.ModName = "mongo"
 	ModHealth         app.ModName = app.ModHealth
-	ModObs            app.ModName = app.ModObs
+	ModMetrics        app.ModName = app.ModMetrics
 	ModAdmin          app.ModName = app.ModAdmin
 	ModAdminMetadata  app.ModName = app.ModAdminMetadata
 	ModLifecycle      app.ModName = app.ModLifecycle
@@ -25,7 +25,7 @@ const (
 	ModEtcdDiscov   app.ModName = "etcd.discovery"
 	ModEtcdElection app.ModName = "etcd.election"
 
-	ModSync                    app.ModName = "sync"
+	ModRoom                    app.ModName = "room"
 	ModDataEngine              app.ModName = "dataengine"
 	ModRemoteEntity            app.ModName = "remote_entity"
 	ModRemoteEntityAtomicStore app.ModName = "remote_entity.atomic_store"
@@ -36,4 +36,5 @@ const (
 	ModNest                    app.ModName = "nest"
 	ModSaga                    app.ModName = "saga"
 	ModEntityRuntime           app.ModName = "entity.runtime"
+	ModManager                 app.ModName = "manager"
 )

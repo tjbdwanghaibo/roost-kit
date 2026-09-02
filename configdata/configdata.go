@@ -6,9 +6,9 @@ import (
 
 	"github.com/tjbdwanghaibo/cube-core/app"
 	fconfigdata "github.com/tjbdwanghaibo/cube-core/configdata"
-	fctx "github.com/tjbdwanghaibo/cube-core/ctx"
+	fctx "github.com/tjbdwanghaibo/cube-core/fctx"
 	"github.com/tjbdwanghaibo/cube-core/lifecycle"
-	"github.com/tjbdwanghaibo/cube-core/obs"
+	"github.com/tjbdwanghaibo/cube-core/metrics"
 	"github.com/tjbdwanghaibo/cube-kit/mods"
 
 	"github.com/spf13/viper"
@@ -22,7 +22,7 @@ const (
 type Mod struct {
 	store       *fconfigdata.Store
 	dir         string
-	metrics     *obs.Registry
+	metrics     *metrics.Registry
 	lifecycle   *lifecycle.Registry
 	unregisters []func()
 }
@@ -47,8 +47,8 @@ func (m *Mod) Provide(r *app.Registry) error {
 		return nil
 	}
 	var ok bool
-	if m.metrics, ok = app.Lookup[*obs.Registry](r, mods.ModObs); !ok || m.metrics == nil {
-		return fmt.Errorf("configdata mod: capability %q not found", mods.ModObs)
+	if m.metrics, ok = app.Lookup[*metrics.Registry](r, mods.ModMetrics); !ok || m.metrics == nil {
+		return fmt.Errorf("configdata mod: capability %q not found", mods.ModMetrics)
 	}
 	if m.lifecycle, ok = app.Lookup[*lifecycle.Registry](r, mods.ModLifecycle); !ok || m.lifecycle == nil {
 		return fmt.Errorf("configdata mod: capability %q not found", mods.ModLifecycle)
@@ -57,12 +57,12 @@ func (m *Mod) Provide(r *app.Registry) error {
 	m.unregisters = append(m.unregisters, m.store.AddReloadListener(fconfigdata.ReloadHook{
 		HookName: "configdata.metrics",
 		AfterApply: func(_ context.Context, event fconfigdata.ReloadEvent) error {
-			m.metrics.IncCounter("configdata.reload.total", obs.Labels{"result": "ok", "reason": event.Reason}, 1)
+			m.metrics.IncCounter("configdata.reload.total", metrics.Labels{"result": "ok", "reason": event.Reason}, 1)
 			m.metrics.SetGauge("configdata.version", nil, int64(event.New.Version))
 			return nil
 		},
 		Rollback: func(_ context.Context, event fconfigdata.ReloadEvent, _ error) {
-			m.metrics.IncCounter("configdata.reload.total", obs.Labels{"result": "rollback", "reason": event.Reason}, 1)
+			m.metrics.IncCounter("configdata.reload.total", metrics.Labels{"result": "rollback", "reason": event.Reason}, 1)
 			// The gauge was set to New.Version in AfterApply (or the apply
 			// was aborted before ours ran); the store is back on Old — the
 			// gauge must not keep advertising a rolled-back generation.

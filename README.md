@@ -25,16 +25,17 @@
 | `etcd/` | 服务注册/发现（租约丢失自动重注册、停机静默注销）、`IFencedElection` 选主（CreateRevision 栅栏）、prefix 本地镜像（一致性快照锚点 + CAS 写 + 订阅隔离：慢订阅者单独踢除、handler panic 容器化） | etcd | 多实例部署的发现、选主与配置镜像 |
 | `remote_entity/` | 跨服务实体的原子事务（Mongo 单事务提交 + digest 幂等收据）、不可变快照分发（进程内 L1 + Redis L2，(marker,route,version) 三元 CAS）、local/shared 所有权状态机（Redis Lua CAS）、`IVersionedLock`（栅栏 + 版本）——**全应用的 `ModRedisVLock` capability 由本 Mod 注册** | Redis + NATS（sync）+ MongoDB | 跨服实体所有权与远程提交 |
 | `saga/` | 跨事务域长事务：Mongo 状态机 + outbox + lease fencing + 幂等步骤 inbox（先占位再执行）；通过 Data Engine effect outbox 从 Nest 事务拉起 saga | MongoDB + NATS JetStream | 跨服务多步业务流程 |
-| `sync/` | 状态帧同步的房间侧：`SyncMod`（只提供 `ISyncBus`，NATS 或 JetStream 二选一）、`RoomManager`（多房间宿主：两级容量预算 + 空闲 GC）、`RoomReplication`（50ms 合帧）、`RoomTransportSink`（编码到 replication 线格式：snapshot 走可靠、delta 走 latest-only datagram，慢消费者驱逐）。**房间组件是库类型，需业务自行装配，装 SyncMod 不等于有房间同步** | NATS/JetStream（bus）+ `replication` transport（房间帧） | 实时房间状态同步 |
+| `room/` | 状态帧同步的房间侧：`RoomMod`（只提供 `ISyncBus`，NATS 或 JetStream 二选一）、`RoomManager`（多房间宿主：两级容量预算 + 空闲 GC）、`RoomFrame` 合帧（50ms）、`RoomTransportSink`（编码到 statesync 线格式：snapshot 走可靠、delta 走 latest-only datagram，慢消费者驱逐）。**房间组件是库类型，需业务自行装配，装 RoomMod 不等于有房间同步** | NATS/JetStream（bus）+ `nettransport`（房间帧传输） | 实时房间状态同步 |
 | `syncstream/` | observer 维度的包流（跑在 `ISyncBus` 上，服务↔服务）：分片重组（有界 + TTL）、阈值压缩（checksum 算在压缩前）、发布确认能力探测（JetStream 有 / 纯 NATS 故意没有）、`BufferedPublisher`（准入 ≠ 确认）、5 个 `cube_sync_*` gauge | NATS/JetStream | 跨服务的有序状态流 |
 | `replication/` | 帧复制网络层：**`AsyncTransport`（每 session 双 worker、latest-only 合帧、原子批准入）是心脏**；QUIC/KCP/UDP 三个 transport（能力矩阵见 §4）、`CompositeTransport` 拼装异构双通道、`ControlPlane` 终结 ACK/resync 控制报文；UDP 为 per-session AEAD 加密 + 防重放 | 无（自带网络协议栈） | 实时帧下发（客户端连接） |
-| `lockstep/` | 帧同步（输入帧）房间层：`Room` 绑定 cube-core/lockstep 的 Sequencer/历史/冗余编码/裁决器到传输——切帧经 datagram 通道冗余广播（丢包不重传）、追帧经可靠通道按 tick 限速分页、关键帧哈希裁决回调 + 全套指标。**non-goals：不跑模拟（客户端确定性执行）、不做帧内容校验（输入 payload 对框架不透明）** | 无（注入 `replication` 的 Datagram/Reliable sender） | 客户端确定性模拟的实时对战房间（与 `sync/` 状态帧二选一） |
+| `lockstep/` | 帧同步（输入帧）房间层：`Room` 绑定 cube-core/lockstep 的 Sequencer/历史/冗余编码/裁决器到传输——切帧经 datagram 通道冗余广播（丢包不重传）、追帧经可靠通道按 tick 限速分页、关键帧哈希裁决回调 + 全套指标。**non-goals：不跑模拟（客户端确定性执行）、不做帧内容校验（输入 payload 对框架不透明）** | 无（注入 `nettransport` 的 Datagram/Reliable sender） | 客户端确定性模拟的实时对战房间（与 `room/` 状态帧二选一） |
 | `gateway/` | 接入层中间件：限流、超时、panic 隔离 | 无 | 玩家接入链路 |
 | `spatial/` | 整数网格地形、四方向 A*、ID-only 块索引，以及**增量兴趣管理**：`InterestManager`（进出滞回、距离带 LOD、可见上限）与 `InterestCluster`（共享坐标平面上的多房间无缝拼接：边界镜像、跨界迁移零闪断）。**non-goals：无 Z 轴/navmesh；跨进程 handover 不在此层**（见包注释） | 无 | 场景服的寻路、AOI 与可见性增量（下游接 entitysync 订阅） |
 | `ai/` | 行为树：节点库（组合/装饰/确定性 tick 计时/注入式随机）、`BehaviorStrategy`（树 → cube-core Strategy 桥）、`TaskflowAction`（树驱动 taskflow 动作的标准叶子）、`ParseTree`（严格 JSON 树装配，fail-fast + path 诊断）。**non-goals：无编辑器格式/utility/GOAP/跨 agent 调度** | 无 | 怪物/NPC 决策层，配表驱动行为 |
 | `taskflow/` | cube-core taskflow 契约的执行器：`ActionRunner`（按 ActionGroup 分槽的"当前 + 队列"执行、组冻结、重入检测一等错误、钩子全 panic-safe）、`MissionRunner`（单任务 + `CanReplaceBy` 仲裁替换）、`PlanMission`（配表式步骤机）、可封存的实例级 `Registry`。**刻意无锁：所有调用须由实体锁串行化** | 无 | 实体内的动作/任务状态机（AI 与玩法的执行层） |
+| `manager/` | `ManagerMod`：一个 Service 的内存单例 manager 的生命周期。按 `DependsOn` 依赖序启动、逆序停止；启动失败回滚已启动的（**失败的那个不 Stop**——它没启动完，Stop 得处理半构造对象，清理是 `Start` 自己的责任）；启动中收到 shutdown 会**中止**启动而不是与之赛跑；`Start` 后 `Register` 直接报错。无依赖 manager 之间保持注册序，**每次进程一致** | 无 | 场景注册表、路由表、缓存这类进程内单例逻辑 |
 | `lock/` | 进程内锁管理器（per-id 可重入互斥，同 id 同实例）——与 `redis.IDistLock`/`IVersionedLock` 是进程内 vs 跨进程的不同层，不参与"分布式锁二选一" | 无 | 进程内互斥 |
-| `robot/` | core `robot` 机器人框架的 kit 侧：KCP/QUIC 客户端拨号（`RegisterKCPDialer`/`RegisterQUICDialer`，经 core `transport.RegisterDialer` 挂载，复用 `replication.DialKCP/DialQUIC`）；`LockstepBot`（帧装配 + 输入提交 + 关键帧哈希上报 + 每 gap 一次追帧请求，出站经业务注入的 `LockstepSink`）——desync 回归测试与 lockstep 压测的客户端半场 | 无（网络栈复用 `replication`） | 模拟客户端逻辑、压测（尤其 lockstep 房间） |
+| `robot/` | core `robot` 机器人框架的 kit 侧：KCP/QUIC 客户端拨号（`RegisterKCPDialer`/`RegisterQUICDialer`，经 core `transport.RegisterDialer` 挂载，复用 `nettransport.DialKCP/DialQUIC`）；`LockstepBot`（帧装配 + 输入提交 + 关键帧哈希上报 + 每 gap 一次追帧请求，出站经业务注入的 `LockstepSink`）——desync 回归测试与 lockstep 压测的客户端半场 | 无（网络栈复用 `nettransport`） | 模拟客户端逻辑、压测（尤其 lockstep 房间） |
 | `ops/` | 运维 HTTP：`/healthz`（存活，恒 200）、`/readyz`（ready 位 + 依赖健康，503 语义）、`/metrics`（Prometheus 文本，**不鉴权**）、`/admin/*`（token 双通道鉴权，关闭时 404 隐藏）。**默认关闭（`ops.enabled`），默认只监听 127.0.0.1** | HTTP | 探针、指标抓取与运维命令 |
 | `configdata/` | 配置快照热更：首次 Load 失败即启动失败；reload 带 rollback 语义并打 `configdata.reload.total{result}` 指标。依赖 cube-core `configdata.DefaultRegistry()` 全局注册表（业务表类型须先注册） | 本地文件 | 配置表热更 |
 | `statslog/` | 周期统计 JSONL（每行一个 `StatsRecord`，每次 flush 都 fsync）：runtime + 自动富化 nest/entity 统计（装了对应 Mod 才有）、业务 provider 扩展点（panic 被捕获成记录）、窗口增量 + 累计双报。**默认关闭（`stats_log.enabled`）；entity 统计是 O(N) 全量扫描，interval 勿设太小** | 本地文件 | 周期运行时统计 |
@@ -326,7 +327,8 @@ Stop()      停后台任务、flush、关连接（保证停服收敛）
 | `ModEntityRuntime`（`entity.runtime`） | nest Mod 顺带注册（已存在则不覆盖） | entity getter（statslog 消费） |
 | `ModSaga`（`saga`） | saga Mod | `*coresaga.Engine` |
 | `ModConfigData`（`config_data`） | configdata Mod | `*fconfigdata.Store` |
-| `ModSync`（`sync`） | sync Mod | `fsync.ISyncBus` |
+| `ModManager`（`manager`） | manager Mod | `*manager.ManagerMod` |
+| `ModRoom`（`room`） | room Mod | `fsyncbus.ISyncBus` |
 
 其余（`ModRedis`/`ModRedisLock`/`ModMongo`/`ModNats`/`ModNatsJetStream`/`ModNatsRpc`/`ModBus`/`ModEtcd`/`ModEtcdDiscov`/`ModEtcdElection`/`ModLock`/`ModOps`/`ModStatsLog`/`ModRemoteEntity`）与直觉一致，注册者即同名 Mod。
 
@@ -414,7 +416,7 @@ Remote 路径使用显式 delete intent，并继续经过 ownership marker、loc
 | 需求 | 用哪个 | 原因 |
 | --- | --- | --- |
 | 可容忍偶发双执行的互斥（缓存预热、可去重任务、优化性串行化） | `redis.IDistLock`（可套 `AutoExtendLock`） | 轻量；但**无栅栏**——TTL 过期后旧持有者不自知，存在双执行窗口 |
-| 正确性互斥（实体所有权、存储必须能拒绝旧持有者的写） | `remote_entity` 的 `versionedLock` / `etcd.IFencedElection` | fence 计数器独立于 TTL 永不回退，下游按 fence 单调性 CAS 拒旧 |
+| 正确性互斥（实体所有权、存储必须能拒绝旧持有者的写） | `remoteentity` 的 `versionedLock` / `etcd.IFencedElection` | fence 计数器独立于 TTL 永不回退，下游按 fence 单调性 CAS 拒旧 |
 
 判据一句话：**如果"锁过期后旧持有者又写了一笔"会造成数据损坏，就必须用带 fence 的那套**；`redis/lock.go` 的包注释里写有同样的契约边界。
 
@@ -443,12 +445,12 @@ Remote 路径使用显式 delete intent，并继续经过 ownership marker、loc
 
 ### sync：状态帧的房间链路（四个角色）
 
-装配关系：`RoomManager`（多房间宿主）→ `RoomReplication`（50ms 合帧）→ `RoomTransportSink`（编码 + 原子下发）→ `replication.AsyncTransport`。**`SyncMod` 只提供 `ISyncBus`（服务间消息面），房间组件是库类型需业务自行装配。**
+装配关系：`RoomManager`（多房间宿主）→ `RoomFrame` 合帧（50ms）→ `RoomTransportSink`（编码 + 原子下发）→ `nettransport.Channel`。**`RoomMod` 只提供 `ISyncBus`（服务间消息面），房间组件是库类型需业务自行装配。**
 
-- **NATS vs JetStream 的持久性不同，但 Sync handler 契约一致**（`sync/nats_sync.go`、`jetstream_sync.go`）：纯 NATS 是至多一次、无确认、**故意不实现 `PublishConfirmed`**；JetStream 有 durable 与发布确认。`ISyncBus` 的 handler error 只记录、**不重试**，因此 JetStream 适配器也会 ACK handler error 和坏 wire，避免同一 handler 在两种 transport 下产生不同外部语义。去重优先使用独立 `MessageID`；旧 core 滚动升级期间才回退到 Topic/Key/Version/FromSid/Part 元组。durable 名称带原 topic 的稳定 hash，规避清洗/截断碰撞。
-- **`RoomManager`**（`sync/room_manager.go`）：每房 + 全局两级容量预算（原子 CAS 预约）；空闲房间 GC 只回收"零主体、零订阅者、零未完成 retire"且超 `IdleTTL` 的房间——**有未完成 retire 的房间永不被 GC**；关闭超时会回滚 closing 标记下轮重试。
-- **`RoomTransportSink`**（`sync/room_transport_sink.go`）：**snapshot/leave 帧走可靠有序通道；纯 delta 走分片 latest-only datagram**。每 (room, session) 维护紧凑 ObjectRef 分配器（带 generation 复用）；**delta 必须在 snapshot 之后**（无 baseline 直接报 `ErrRoomSubjectBaseline`）。会改 ObjectRef 的帧在克隆上计算、`AdmitBatch` 成功后才写回——传输失败不污染 ref 表。慢消费者策略两档：`SlowConsumerEvict` 只在可靠通道背压时驱逐该 session 并重试其余（回调走有界 worker 池 + 按 (room,session) 合并 + panic 计数），其他错误一律整批失败。公开线格式（`RRF1`/`RSU1` 魔数）与 `DecodeRoomWireFrame` 等解码 API 供客户端使用；线上序号会回绕，接收端按 epoch 判续。
-- **`RoomReplication`**（`sync/room_replication.go`）：`ReliableRoomFrameSink` 的契约是**原子接受整个 slice**——返回 nil 即责任移交，返回 error 则一帧都不能留。帧号与 per-(room,subscriber) session sequence **只在下游接受整批后才推进**（丢包检测/重放的实现依据）。单 subject 的 prepare 失败不拖垮整批（错误累计 + 重新入脏）。若下游实现了慢消费者回调注册，房间层自动接线：被驱逐的 session 自动清订阅。
+- **NATS vs JetStream 的持久性不同，但 Sync handler 契约一致**（`room/nats_syncbus.go`、`jetstream_syncbus.go`）：纯 NATS 是至多一次、无确认、**故意不实现 `PublishConfirmed`**；JetStream 有 durable 与发布确认。`ISyncBus` 的 handler error 只记录、**不重试**，因此 JetStream 适配器也会 ACK handler error 和坏 wire，避免同一 handler 在两种 transport 下产生不同外部语义。去重优先使用独立 `MessageID`；旧 core 滚动升级期间才回退到 Topic/Key/Version/FromSid/Part 元组。durable 名称带原 topic 的稳定 hash，规避清洗/截断碰撞。
+- **`RoomManager`**（`room/room_manager.go`）：每房 + 全局两级容量预算（原子 CAS 预约）；空闲房间 GC 只回收"零主体、零订阅者、零未完成 retire"且超 `IdleTTL` 的房间——**有未完成 retire 的房间永不被 GC**；关闭超时会回滚 closing 标记下轮重试。
+- **`RoomTransportSink`**（`room/room_transport_sink.go`）：**snapshot/leave 帧走可靠有序通道；纯 delta 走分片 latest-only datagram**。每 (room, session) 维护紧凑 ObjectRef 分配器（带 generation 复用）；**delta 必须在 snapshot 之后**（无 baseline 直接报 `ErrRoomSubjectBaseline`）。会改 ObjectRef 的帧在克隆上计算、`AdmitBatch` 成功后才写回——传输失败不污染 ref 表。慢消费者策略两档：`SlowConsumerEvict` 只在可靠通道背压时驱逐该 session 并重试其余（回调走有界 worker 池 + 按 (room,session) 合并 + panic 计数），其他错误一律整批失败。公开线格式（`RRF1`/`RSU1` 魔数）与 `DecodeRoomWireFrame` 等解码 API 供客户端使用；线上序号会回绕，接收端按 epoch 判续。
+- **`RoomBroadcaster`**（`room/room_broadcast.go`）：`ReliableRoomFrameSink` 的契约是**原子接受整个 slice**——返回 nil 即责任移交，返回 error 则一帧都不能留。帧号与 per-(room,subscriber) session sequence **只在下游接受整批后才推进**（丢包检测/重放的实现依据）。单 subject 的 prepare 失败不拖垮整批（错误累计 + 重新入脏）。若下游实现了慢消费者回调注册，房间层自动接线：被驱逐的 session 自动清订阅。
 
 ### syncstream：observer 维度的包流
 
@@ -497,7 +499,7 @@ Remote 路径使用显式 delete intent，并继续经过 ownership marker、loc
 | `spatial.InterestCluster` | 单锁并发安全（多房间 handler 并行 tick） |
 | `replication.AsyncTransport` | 每 session 双 worker；AdmitBatch 按 session id 升序加锁 |
 | `sync.RoomTransportSink` | 256 条 room 锁条带（升序获取） |
-| `sync.RoomReplication` | 64 条 subject flush 锁条带 + 独立脏集合锁；准入由 `admitMu` 串行 |
+| `room.RoomBroadcaster` | 64 条 subject flush 锁条带 + 独立脏集合锁；准入由 `admitMu` 串行 |
 
 ### 玩法与实时组件
 
@@ -519,7 +521,7 @@ Remote 路径使用显式 delete intent，并继续经过 ownership marker、loc
    - 测试按价值排序：**`crash_test.go`**（真实子进程 `SIGKILL` 验证崩溃后 durable 前缀完整）、`pipelined_test.go`（ticket 语义）、`wal_test.go`（torn tail、ack、rotate）、`dataengine/fatal_fence_test.go`（熔断到 Nest/RuntimeFailure 的传导）、`nestwal/backlog_integration_test.go`（100k backlog 恢复）。
 4. **Data Engine 主线**：`dataengine/projector.go` → `mongo_store.go` → `entity_repository.go` → `migration.go` → `outbox_worker.go`。
 5. **锁与选主**：`redis/lock.go` + `lock_test.go` → `remote_entity/versioned_lock.go`、`versioned_lock_lua.go` + `versioned_lock_unlock_test.go` → `etcd/election.go` + `election_test.go`（含"campaign ctx 取消不丢领导权"这条反直觉不变量）。
-6. **横向扩展**：`saga/mongo_store.go`（lease CAS）+ **`saga/command_consumer_test.go`**（重投只执行一次 = exactly-once step 的规格）→ `remote_entity/transaction_manager.go`（跨服事务追踪）→ `replication/udp_crypto.go`、`udp_transport.go` → `sync/room_replication.go`（状态帧）→ `lockstep/room.go` + `room_test.go`（输入帧：追帧限速、断线重连、裁决回调的用例即文档）→ `spatial/`、`ai/`、`taskflow/action_runner_test.go`（抢占/队列/重入检测）。
+6. **横向扩展**：`saga/mongo_store.go`（lease CAS）+ **`saga/command_consumer_test.go`**（重投只执行一次 = exactly-once step 的规格）→ `remote_entity/transaction_manager.go`（跨服事务追踪）→ `replication/udp_crypto.go`、`udp_transport.go` → `room/room_broadcast.go`（状态帧）→ `lockstep/room.go` + `room_test.go`（输入帧：追帧限速、断线重连、裁决回调的用例即文档）→ `spatial/`、`ai/`、`taskflow/action_runner_test.go`（抢占/队列/重入检测）。
 7. **语义即测试的推荐清单**：`etcd/local_mirror_test.go`（原子快照、慢订阅隔离、panic 隔离、CAS）、`nats/jetstream_test.go`（Drain 与 Stop 的语义差）、`gateway/middleware_test.go`（带回归原因注释的鉴权兜底）、`ops/ops_mod_test.go`（5 个测试 = 该包完整规格）、`mongo/collection_test.go`（"默认绝不 drop 生产索引"）。
 
 ---

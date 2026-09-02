@@ -42,6 +42,14 @@ jobs:
       - run: go test ./...
       - if: runner.os == 'Linux'
         run: go vet ./...
+        # The integration suite (dataengine/nestwal/saga crash + failover) is
+        # build-tagged, so it is excluded from `go vet ./...`, `go build ./...`
+        # and `go test ./...` alike — it can rot silently. Vetting it keeps it
+        # compiling; running it needs real Mongo/NATS and lives in
+        # scripts/integration/dataengine-env.sh.
+      - if: runner.os == 'Linux'
+        name: vet integration-tagged tests
+        run: go vet -tags integration ./...
       - if: runner.os == 'Linux'
         run: go run github.com/tjbdwanghaibo/cube-core/cmd/glsvet ./...
       - if: runner.os == 'Linux'

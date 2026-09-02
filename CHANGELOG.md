@@ -4,6 +4,66 @@
 
 ## [Unreleased]
 
+### Added
+- **`manager`：`ManagerMod`**，一个 Service 的内存单例 manager（场景注册表、路由表、缓存这类有 Start/Stop 但没有自己持久状态的逻辑）的生命周期拥有者。cube-core 早就声明了契约——`app.IManager`、`app.ManagerDependencyProvider`、`app.IManagerStopperWithContext` 的注释都写着"managed by ManagerMod"——但实现一直缺失，各业务仓各写一份。行为：
+  - 按 `DependsOn` 拓扑序启动、**严格逆序**停止（manager 绝不比它依赖的东西活得久）；
+  - 无依赖关系的 manager 之间保持**注册序，且每次进程一致**。这里没有复用 core 的 `container.TopologicalSortCache`：它的队列由 map 播种，独立节点的顺序每进程不同，而启动顺序是可观察行为——顺序漂移会把一个必现的顺序 bug 变成偶发的；它报告环的方式也是打日志返回 nil，而启动门禁必须说出是哪个 manager 成环；
+  - 启动失败回滚已启动的，**失败的那个不 Stop**——它没有启动完，Stop 就得处理半构造对象；清理是 `Start` 自己的责任。这条契约写在代码注释里并由测试钉住；
+  - **启动中收到 shutdown 会中止启动**，而不是和它赛跑。否则 `Stop` 排空已启动的之后，`Start` 会继续把后面的 manager 启起来，于是 shutdown 报告成功而仍有 manager 在跑；
+  - `Start` 之后 `Register` 返回 `ErrManagerRegisterAfterStart`。接受它等于加进一个永不启动也永不停止的 manager，唯一症状是很远处的一个 nil；
+  - `Start` 之前没有 `Provide` 直接报错，而不是把 nil registry 发给每个 manager；
+  - `Stop` 幂等，逐个 manager 都给停止机会并**汇总全部失败**（首个失败就中断会漏掉其余的）；优先使用 `IManagerStopperWithContext` 并把调用方 ctx 透传进去。
+  - 指标：`manager.start.duration{manager}`（histogram）、`manager.started`（gauge）。
+  - 20 条测试，含 `-race`；确定性排序、启动中止、失败不回滚失败者、`Register` 拦截四条都做过变异验证（破坏实现 → 断言精确打红）。
+
+### Changed（测试质量）
+- `spatial` 与 `ai` 的两条并发测试此前丢弃全部返回值，只靠 race 检测器——一个
+  拒绝每次写入的 terrain 或一个丢写的 Blackboard 都能通过。现断言并发写后每格/
+  每键保留最后一次写入（期望值由测试自己的写入计划推导，不硬编码），并断言
+  `Blackboard.Snapshot()` 返回**拷贝**而非活状态别名。两条都用变异测试验证过。
+- `etcd/local_mirror_test.go` 的 11 处裸通道接收改为有界的 `awaitWatchStarted`；
+  `dataengine` 与 `remoteentity` 的裸接收改为 `awaitChan(t, ch, what)`。此前
+  watcher 不启动会表现为挂 10 分钟后一份堆栈，现在是 5 秒内一句
+  "mirror never started its etcd watch"。
+
+### Changed（破坏性：包与标识符重命名，无行为变化）
+
+跟随 cube-core 的命名整理，把只描述"机制"的名字换成描述"职责"的名字：
+
+| 旧 | 新 | 说明 |
+| --- | --- | --- |
+| 包 `sync` | 包 `room` | 它是房间状态同步的房间侧，不是同步原语 |
+| 包 `replication` | 包 `nettransport` | 它是 KCP/QUIC/UDP 网络传输，不是复制 |
+| 包 `remote_entity` | 包 `remoteentity` | Go 包名不用下划线 |
+| 包 `taskflow` | 包 `actionflow` | 与 core 对齐 |
+| `SyncMod` | `RoomMod` | |
+| `RoomReplication`（及 `New*`/`*Config`/`*Stats`/`Default*Interval`/`Err*Stopped`） | `RoomBroadcaster`（`DefaultRoomBroadcastInterval`、`ErrRoomBroadcasterStopped`） | 它每 50ms 把脏 subject 聚合成帧广播给订阅者 |
+| `mods.ModSync` = `"sync"` | `mods.ModRoom` = `"room"` | |
+| `mods.ModObs` = `"obs"` | `mods.ModMetrics` = `"metrics"` | 随 core |
+
+文件重命名：`room/jetstream_sync.go` → `jetstream_syncbus.go`、`room/nats_sync.go` →
+`nats_syncbus.go`、`room/room_replication.go` → `room_broadcast.go`、
+`nettransport/async_transport.go` → `channel.go`、`nettransport/transport.go` →
+`sender.go`、`nettransport/control.go` → `control_plane.go`、`syncstream/adapter.go` →
+`publisher.go`、`ai/wire.go` → `tree_parser.go`。
+
+**配置段兼容**：room mod 优先读 `room.*` 配置段，读不到才回退到旧的 `sync.*` 并打印
+一条弃用告警，因此既有部署配置无需在升级同一时刻修改。JetStream 去重用的
+MessageID 前缀 `"sync:"` **故意保持不变**——它是线上状态，改了会让滚动升级期间新旧
+节点对同一条消息算出不同 ID，从而产生去重本要防止的重复投递。
+
+
+### Fixed（独立复审 F1/F2/F3/F4/F6/F8，均带"无修复即红"验证过的回归测试）
+- **`dataengine` outbox backlog 探针不再随积压等比变慢**：补 `created_at` 索引（原先 oldest 查询按未索引字段排序，探针会随它所要度量的积压一起变慢），并把探针从"每次 `RunOnce` 末尾无条件执行"（默认 2 workers × 100ms = 每秒 20 次全量计数）改为按 `dataengine.outbox.backlog_interval`（默认 1s，跨 worker 用 CAS 抢样）限流；新增 `OutboxWorker.RefreshBacklog` 供健康检查即时取样，`Mod.checkHealth` 已改用它，避免读到最多落后一个间隔的陈旧 gauge。
+- **`nats`：删除 `nats.rpc.duplicate_completion` 指标与那条永不失败的断言**。实施中发现它在原理上无法有意义——`worker.Worker.safeHandle` 是 `handler(task)` **加** `defer task.OnRelease()`，所以每个任务必然两次到达 `complete()`，"二次到达"是普通路径而非异常（改成计数器后，10 万 pending 取消测试立刻报出 10 万次"重复完成"）。改为把 `sync.Once` 换成到达计数（同一保证、更直白），并用直接测试覆盖真正的属性：handler→release、仅 release（拒绝准入的路径）、16 goroutine 并发到达、nil 回调。pool 的"handler + OnRelease"所有权协议已写入注释。
+- **CI 新增 `go vet -tags integration ./...`**：4 个 `//go:build integration` 文件（约 1000 行崩溃/故障切换测试）被 build tag 同时排除在 `vet`/`build`/`test ./...` 之外，可以静默腐烂而无人察觉。真正运行仍需 Mongo/NATS，入口是既有的 `scripts/integration/dataengine-env.sh`。
+- **lease fence 改用 core 的共享谓词，并为未命中加上可见计数**：`leaseFencesMatch` 不再手拼 filter，改用 `coredata.LeaseFence.Predicate(now)`；`saga` 的 `claimStatusPending` 取自 `coredata.LeaseFenceStatusPending`。原先同一份 claim schema 被 `dataengine` 与 `saga` 两侧各自拼写、无任何编译期耦合，任一侧改名都会让**每个被 fence 的事务静默变成 no-op**（谓词不可满足与"租约确实过期"从内部无法区分，两者都被当作 skipped 正常提交）。新增跨包耦合测试：在 `saga` 包内用 `Reserve`/`Bind` 真实写出 claim 与 fence，再拿生产谓词查生产文档，并逐字段偏移验证谓词确实在拒绝——已验证把 `bson:"lease_token"` 改名即变红。fence 未命中现在计 `dataengine.fence.skipped.total{resource}`。
+- **`dataengine` 投影批路径不再把良性重放判成致命冲突**（原缺陷会导致服务永久起不来）：单变更记录走快路径时**有意不写** transaction marker（省一次往返正是快路径的意义），但一旦 WAL ACK 丢失（Mongo 提交与 checkpoint fsync 之间崩溃，或任何 `Ack` 报错），该记录会在多记录批中重放——此时"无 marker + 精确版本 CAS 打空"与真实冲突无法区分，而 `ProjectBatch` 原先直接返回致命的 `ErrProjectionConflict`，令 projector 停摆；由于同一批每次重启都会重放，服务从此无法启动。现在批路径改为返回新的 `ErrProjectionBatchNeedsPerRecord`**延后判定**，由 `Projector.replayPass` 回退到逐条投影——单记录路径比对存储版本与 `_last_tx`，能区分"已应用的幂等重放"与"真实冲突"。真实冲突仍然致命（语义不变，只是改由有能力判定的一方来判）。
+- **`dataengine` 实体聚合加载在事务重试下不再误报"数据损坏"**：`readAggregate` 的 `loaded` 累加器声明在 `ReadConsistent` 回调**之外**（`missing`/`tombstones` 却正确地在回调内重置）。`ISession.WithTransaction` 的契约明示会自动重试回调（副本集切主、snapshot 不可用、网络抖动），第二次进入时重名守卫立刻命中上一轮条目，健康数据被报成 `ErrEntityAggregateCorrupt: duplicate DAO resource`——恰好发生在最需要平稳降级的故障切换时刻。现已将 `loaded`/`remoteVector` 的重置移入回调首行。
+
+### Changed
+- 测试基建重构：新增 `internal/mongofake`——**真正求值** filter/update/唯一索引/事务回滚的内存 Mongo，取代此前 5 份各自手写的 `ICollection` 桩（约 80 个方法）。旧桩把存储建模成"返回测试预置的东西"，无法分辨正确查询与错误查询，因此投影版本 CAS、saga step 租约 CAS、command 收据去重、remote_entity 版本 CAS、effect inbox 幂等这些**靠查询条件承载正确性**的机制全部不在测试覆盖内（F1 正是其中从未被走到的一条路径）。迁移过程即刻暴露两处真实差异（`uint8` 字段的数值加宽、bson 日期的毫秒精度）。不支持的构造一律显式报错而非静默匹配。
+
 ### Added — Data Engine
 - 新增统一 Data Engine runtime：WAL recovery barrier、Mongo Put/Patch/Delete 版本 CAS、transaction receipt/effect outbox、聚合 snapshot load、system-transaction migration、tombstone、健康/积压硬限制和有界 shutdown。
 - Saga 新增 Data Engine step inbox（claim lease + 权威 receipt replay），Remote mutation 与普通 mutation 可在同一 Mongo transaction 投影；NATS publisher 与 WAL ACK 解耦。
@@ -85,10 +145,10 @@
 - CI 增加 `release-hygiene` 门禁（module 路径可解析 + tag 与 major 匹配）。
 
 ### Changed
-- 锁双轨契约边界正式化：`redis.IDistLock` 包注释与 README 写明"无栅栏、仅限可容忍双执行的场景"，正确性互斥指向 `remote_entity` versionedLock / `etcd.IFencedElection`（含二选一判据表）。
+- 锁双轨契约边界正式化：`redis.IDistLock` 包注释与 README 写明"无栅栏、仅限可容忍双执行的场景"，正确性互斥指向 `remoteentity` versionedLock / `etcd.IFencedElection`（含二选一判据表）。
 - `spatial`/`ai`/`gateway` 各自的包注释补 non-goals 定位声明（无 Z 轴/navmesh/兴趣管理；行为树骨架而非 AI 中间件；中间件集合而非网关服务器）。
 
 ## [1.6.1] - 2026-08
 
 - 对接 cube-core v1.6.x `DurabilityPipelined`：nestwal Enqueue ticket、durable watermark 先于唤醒发布、从 ack fence 起扫描重放、`NestOptions` 配置接线（`nest.pipelined.allowlist/async`）与 checkpoint 外化闸门（`SetDurableWatermark`）。
-- `remote_entity` versionedLock 幂等 unlock；`etcd` 选主暴露 fence（`IFencedElection`）；`spatial` 寻路预算错误与半径查询饱和防护。
+- `remoteentity` versionedLock 幂等 unlock；`etcd` 选主暴露 fence（`IFencedElection`）；`spatial` 寻路预算错误与半径查询饱和防护。

@@ -104,3 +104,58 @@ func TestOpsModStopWithContextUsesCallerContext(t *testing.T) {
 		t.Fatalf("StopWithContext err = %v, want context canceled", err)
 	}
 }
+
+// The admin endpoint executes every registered admin command, so its token is
+// a credential — compared in constant time, accepted from either header form,
+// and never satisfied by an empty configured token.
+func TestOpsAdminAuthorizationAcceptsOnlyTheExactToken(t *testing.T) {
+	mod := &OpsMod{adminToken: "s3cret-token"}
+	for name, header := range map[string]map[string]string{
+		"dedicated header":    {"X-Admin-Token": "s3cret-token"},
+		"bearer":              {"Authorization": "Bearer s3cret-token"},
+		"lowercase bearer":    {"Authorization": "bearer s3cret-token"},
+		"bearer with padding": {"Authorization": "  Bearer   s3cret-token  "},
+		"bare authorization":  {"Authorization": "s3cret-token"},
+	} {
+		if !mod.authorized(requestWithHeaders(header)) {
+			t.Fatalf("%s: valid token rejected", name)
+		}
+	}
+	for name, header := range map[string]map[string]string{
+		"no header":         {},
+		"empty header":      {"X-Admin-Token": ""},
+		"wrong token":       {"X-Admin-Token": "s3cret-tokeN"},
+		"prefix of token":   {"X-Admin-Token": "s3cret"},
+		"token plus suffix": {"X-Admin-Token": "s3cret-token-extra"},
+		"wrong scheme":      {"Authorization": "Basic s3cret-token"},
+		"bearer no token":   {"Authorization": "Bearer "},
+	} {
+		if mod.authorized(requestWithHeaders(header)) {
+			t.Fatalf("%s: authorized when it must not be", name)
+		}
+	}
+}
+
+// Init refuses admin_enabled without a token, but an OpsMod assembled
+// directly must not authorize a request that simply omits the header.
+func TestOpsAdminAuthorizationRejectsEverythingWithoutAConfiguredToken(t *testing.T) {
+	mod := &OpsMod{}
+	for _, header := range []map[string]string{
+		{},
+		{"X-Admin-Token": ""},
+		{"Authorization": "Bearer "},
+		{"Authorization": ""},
+	} {
+		if mod.authorized(requestWithHeaders(header)) {
+			t.Fatalf("empty configured token authorized %v", header)
+		}
+	}
+}
+
+func requestWithHeaders(headers map[string]string) *http.Request {
+	request := httptest.NewRequest(http.MethodPost, "/admin/execute", nil)
+	for key, value := range headers {
+		request.Header.Set(key, value)
+	}
+	return request
+}
