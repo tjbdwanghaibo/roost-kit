@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
 	"time"
 )
 
@@ -480,5 +482,77 @@ func TestPageReportsAMalformedMemberInsteadOfSkippingIt(t *testing.T) {
 	}
 	if size != 3 {
 		t.Fatalf("size = %d, want 3", size)
+	}
+}
+
+// The reporting seam has to be actually reached, or it is the kind of thing
+// this repository exists to avoid: a mechanism that looks present and emits
+// nothing. Each of these paths was silent in the implementation being
+// replaced, which is why its submit-reported-as-failure and its truncating
+// archive both survived a release.
+//
+// The recorder is the shared one rather than a local reimplementation: six
+// near-identical hand-written doubles is six places for one to quietly stop
+// asserting.
+func TestSubmitAndPageReportWhatTheyDid(t *testing.T) {
+	sink := servicemetrics.NewRecorder()
+	fake := newFakeRedis()
+	now := time.Unix(1_700_000_000, 0)
+	store, err := NewRedisStore(fake, RedisConfig{
+		Prefix: "test:rank", Now: func() time.Time { return now }, Metrics: sink,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if _, err := store.Submit(ctx, arena(), Score{OwnerID: 1, Value: 10}, UpdateAdd, "req-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.Count("accepted:submit"); got != 1 {
+		t.Fatalf("an accepted submit reported %d, want 1; %s", got, sink.Events())
+	}
+
+	// A replay must be distinguishable from a first submit: a rising replay
+	// rate is how an operator learns the transport is redelivering.
+	if _, err := store.Submit(ctx, arena(), Score{OwnerID: 1, Value: 10}, UpdateAdd, "req-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.Count("replayed:submit"); got != 1 {
+		t.Fatalf("a replayed submit reported %d replays, want 1; %s", got, sink.Events())
+	}
+	if got := sink.Count("accepted:submit"); got != 1 {
+		t.Fatalf("a replayed submit was also counted as accepted (%d); %s", got, sink.Events())
+	}
+
+	// Board size is the gauge.
+	if _, err := store.Page(ctx, arena(), 0, 10); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.Count("depth:board.arena"); got != 1 {
+		t.Fatalf("board depth reported %d, want 1; %s", got, sink.Events())
+	}
+
+	// Contention is reported rather than left as an opaque internal error.
+	fake.swapAlwaysLoses = true
+	if _, err := store.Submit(ctx, arena(), Score{OwnerID: 2, Value: 1}, UpdateSet, ""); err == nil {
+		t.Fatal("the submit succeeded despite never winning the swap")
+	}
+	if got := sink.Count("conflict:submit"); got != 1 {
+		t.Fatalf("compare-and-swap exhaustion reported %d conflicts, want 1; %s", got, sink.Events())
+	}
+}
+
+// A nil reporter must never fail an operation: every call site is
+// unconditional so a report cannot be forgotten, which only works if nil is
+// safe.
+func TestANilReporterDoesNotAffectBehaviour(t *testing.T) {
+	store, _ := newStore(t)
+	ctx := context.Background()
+	if _, err := store.Submit(ctx, arena(), Score{OwnerID: 1, Value: 5}, UpdateSet, ""); err != nil {
+		t.Fatalf("a store with no reporter failed to submit: %v", err)
+	}
+	if _, err := store.Page(ctx, arena(), 0, 5); err != nil {
+		t.Fatal(err)
 	}
 }

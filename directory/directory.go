@@ -121,6 +121,13 @@ type Directory interface {
 	// is held by anyone else, and is idempotent for the same owner: a repeat
 	// Reserve returns the existing claim rather than a second one, so a
 	// retried request does not consume two reservations.
+	//
+	// That idempotency means **a directory is not a mutex**. One owner
+	// racing itself gets one shared claim and every racer proceeds, which is
+	// correct for a name a caller may legitimately re-request and wrong for
+	// anything that must admit exactly one attempt. Use insert-only versioned
+	// state for the latter: versionstore.Create refuses a second creator
+	// regardless of who it is.
 	Reserve(ctx context.Context, raw string, owner Owner, ttl time.Duration) (Claim, error)
 
 	// Commit makes a reservation permanent. It requires the claim's token, so

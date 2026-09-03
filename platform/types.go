@@ -1,0 +1,215 @@
+// Package platform is the channel-facing edge: it turns a channel credential
+// into a session, and a payment provider's callback into exactly one delivery.
+//
+// It is a small package guarding two of the highest-consequence paths in a
+// game service, and the implementation it replaces got both wrong:
+//
+//   - Session minting had no authentication at all. `AuthSession` took a
+//     player id out of the request body and signed a token for it. Anyone who
+//     could reach the endpoint could obtain a valid session for any player.
+//     There was no credential, no channel check, nothing to verify — so this
+//     package requires a Verifier with no default, the same way account does:
+//     the absence of a check must not be able to look like a default.
+//
+//   - Recharge delivery was stateless and not idempotent. The callback was
+//     signature-verified and then handed straight to the deliverer. The
+//     `RequestID` field was accepted, forwarded, and never used — not for
+//     dedupe, not for correlation, not even in a log line. A signature proves
+//     the payload came from the provider; it does not prove this is the first
+//     time it arrived. So replaying a captured callback, or a redelivery from
+//     the at-least-once transport in front of it, delivered the goods again.
+//     The only dedupe was in the game process three hops away, keyed on an
+//     order id it happened to also receive.
+//
+//     Here an order is a durable, insert-only record, and delivery is
+//     reserve-before-deliver: the reservation is what makes the second arrival
+//     a replay instead of a second grant. A signature that verifies is
+//     necessary and not sufficient.
+//
+// And two smaller ones: the error from a failed delivery was discarded and
+// replaced with a constant string, so a payment that failed to deliver left no
+// trace on the server at all; and the callback response was the deliverer's
+// response passed through unchanged, so a caller could not tell a platform
+// refusal from a game refusal.
+package platform
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
+
+// Error codes.
+const (
+	CodeOK int32 = 0
+
+	CodeRequestInvalid   int32 = 600101
+	CodeSignatureInvalid int32 = 600102
+	CodeIdentityDenied   int32 = 600103
+	CodeVerifierDown     int32 = 600104
+	CodeOrderInvalid     int32 = 600105
+	CodeOrderMismatch    int32 = 600106
+	CodeDeliveryHeld     int32 = 600107
+	CodeDeliveryFailed   int32 = 600108
+	CodeDeliveryExpired  int32 = 600109
+	CodeConflict         int32 = 600110
+	CodeStoreFailed      int32 = 600111
+)
+
+var (
+	ErrRequestInvalid = errors.New("platform: request is invalid")
+	// ErrSignatureInvalid reports that the payload's signature did not verify.
+	// It is deliberately indistinguishable to the caller from a malformed
+	// payload of the right shape: a provider integration that is misconfigured
+	// and an attacker probing the endpoint should not get different answers.
+	ErrSignatureInvalid = errors.New("platform: payload signature is invalid")
+	ErrIdentityDenied   = errors.New("platform: identity was denied by the channel")
+	// ErrVerifierDown reports that the channel could not be reached. It is
+	// distinct from ErrIdentityDenied on purpose: telling a player their
+	// credential is bad when the channel is merely unreachable is a support
+	// ticket, and it is the answer a service gives when it collapses the two.
+	ErrVerifierDown = errors.New("platform: identity channel is unavailable")
+
+	ErrOrderInvalid = errors.New("platform: order is invalid")
+	// ErrOrderMismatch reports that one order id arrived twice with different
+	// contents. Neither answer is right and delivering both is the double
+	// grant, so it is refused.
+	ErrOrderMismatch = errors.New("platform: order id was reserved for different contents")
+	// ErrDeliveryHeld reports that a delivery for this order is in flight.
+	ErrDeliveryHeld    = errors.New("platform: a delivery is in flight")
+	ErrDeliveryFailed  = errors.New("platform: delivery failed")
+	ErrDeliveryExpired = errors.New("platform: delivery attempts are exhausted")
+	ErrConflict        = errors.New("platform: conflict")
+)
+
+// Bounds.
+const (
+	// MaxPayloadBytes bounds a callback payload. A provider callback arrives
+	// over HTTP from outside, so its size is not the caller's to decide.
+	MaxPayloadBytes = 16 * 1024
+	// MaxProductIDBytes and MaxOrderIDBytes bound the provider-supplied
+	// identifiers, which become storage keys.
+	MaxProductIDBytes = 128
+	MaxOrderIDBytes   = 128
+	// MaxOpenIDBytes bounds a channel account identifier.
+	MaxOpenIDBytes = 256
+	// MaxDeliveryAttempts is the default ceiling on delivery attempts per
+	// order. An unbounded retry queue is a queue that never drains and never
+	// reports that it is not draining.
+	MaxDeliveryAttempts = 8
+)
+
+// DeliveryState is where one order's delivery stands.
+//
+//	reserved ──> delivered
+//	    │
+//	    └──────> exhausted
+//
+// There is no "failed" state that a retry moves out of: a failed attempt
+// leaves the order reserved with a later deadline, so the only terminal states
+// are the two that need no further action.
+type DeliveryState string
+
+const (
+	// DeliveryReserved means the order is recorded and delivery has not
+	// succeeded yet. This is the state that makes a second callback a replay:
+	// it exists before the deliverer is called, not after it returns.
+	DeliveryReserved DeliveryState = "reserved"
+	// DeliveryDelivered is terminal and is what a replay is answered from.
+	DeliveryDelivered DeliveryState = "delivered"
+	// DeliveryExhausted means the attempt budget is spent. It is terminal and
+	// needs an operator: the player paid and did not receive the goods.
+	DeliveryExhausted DeliveryState = "exhausted"
+)
+
+// Order is one paid purchase and its delivery state.
+//
+// It is the durable record whose absence made the replaced implementation
+// stateless. Everything a replay needs to be answered without delivering
+// again is in here.
+type Order struct {
+	// OrderID is the provider's order identifier and this record's key.
+	OrderID string `json:"order_id"`
+	// PlayerID is who the goods go to. It comes from the callback payload,
+	// which the signature covers — this is the one place a request field is
+	// authoritative, and it is authoritative because the provider signed it,
+	// not because the client sent it.
+	PlayerID int64 `json:"player_id"`
+	// Channel and ProductID identify what was bought where.
+	Channel   string `json:"channel"`
+	ProductID string `json:"product_id"`
+	// AmountMinor is the paid amount in the currency's minor unit, as an
+	// integer. Money is never a float here.
+	AmountMinor int64  `json:"amount_minor"`
+	Currency    string `json:"currency,omitempty"`
+
+	// PayloadDigest is a digest of what this order MEANS — who, what, how
+	// much — not of the bytes it arrived as. A second callback for the same
+	// order id whose digest differs is refused rather than delivered: one
+	// order id with two contents is either a provider bug or an attack, and
+	// picking one is how a service delivers the wrong goods.
+	//
+	// It digests meaning rather than bytes so that a provider which
+	// re-serializes between retries is still recognized as retrying. See
+	// contentDigest.
+	PayloadDigest string `json:"payload_digest"`
+
+	State DeliveryState `json:"state"`
+	// Attempts counts delivery attempts. It bounds the retry queue and is the
+	// signal that a payment is not getting through.
+	Attempts int32 `json:"attempts"`
+	// MaxAttempts is the ceiling this order was created under, so raising the
+	// configured ceiling does not silently revive orders that already gave up.
+	MaxAttempts int32 `json:"max_attempts"`
+	// NextAttemptAtUnix is when the next attempt may run.
+	NextAttemptAtUnix int64 `json:"next_attempt_at_unix,omitempty"`
+	// LastError is the last delivery failure's message, kept because the
+	// replaced implementation discarded it and substituted a constant, which
+	// is how a payment that never delivered left no trace on the server.
+	LastError string `json:"last_error,omitempty"`
+
+	PaidAtUnix      int64 `json:"paid_at_unix"`
+	CreatedAtUnix   int64 `json:"created_at_unix"`
+	DeliveredAtUnix int64 `json:"delivered_at_unix,omitempty"`
+	UpdatedAtUnix   int64 `json:"updated_at_unix"`
+}
+
+// Terminal reports whether the order needs no further delivery work.
+func (o Order) Terminal() bool {
+	return o.State == DeliveryDelivered || o.State == DeliveryExhausted
+}
+
+// Due reports whether a delivery attempt may run now.
+func (o Order) Due(nowUnix int64) bool {
+	if o.Terminal() {
+		return false
+	}
+	return o.NextAttemptAtUnix == 0 || nowUnix >= o.NextAttemptAtUnix
+}
+
+func (o Order) Validate() error {
+	if strings.TrimSpace(o.OrderID) == "" {
+		return fmt.Errorf("%w: order id is empty", ErrOrderInvalid)
+	}
+	if len(o.OrderID) > MaxOrderIDBytes {
+		return fmt.Errorf("%w: order id is %d bytes, limit %d", ErrOrderInvalid, len(o.OrderID), MaxOrderIDBytes)
+	}
+	if o.PlayerID <= 0 {
+		return fmt.Errorf("%w: player id must be positive", ErrOrderInvalid)
+	}
+	if strings.TrimSpace(o.ProductID) == "" {
+		return fmt.Errorf("%w: product id is empty", ErrOrderInvalid)
+	}
+	if len(o.ProductID) > MaxProductIDBytes {
+		return fmt.Errorf("%w: product id is %d bytes, limit %d", ErrOrderInvalid, len(o.ProductID), MaxProductIDBytes)
+	}
+	if o.AmountMinor <= 0 {
+		// A zero-amount paid order is either a test payload that reached
+		// production or a provider bug. Delivering goods for it is free money.
+		return fmt.Errorf("%w: paid amount must be positive, got %d", ErrOrderInvalid, o.AmountMinor)
+	}
+	if o.MaxAttempts <= 0 {
+		return fmt.Errorf("%w: max attempts must be positive", ErrOrderInvalid)
+	}
+	return nil
+}

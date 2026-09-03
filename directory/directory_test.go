@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+
+	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
 )
 
 type clock struct {
@@ -367,5 +369,105 @@ func TestEmptyKeyAndOwnerAreRejected(t *testing.T) {
 	}
 	if _, err := dir.Reserve(ctx, "alice", "", 0); !errors.Is(err, ErrOwnerEmpty) {
 		t.Fatalf("an empty owner returned %v, want ErrOwnerEmpty", err)
+	}
+}
+
+// Cancel and Release answer nil for a claim that is no longer the caller's.
+// That is correct — deleting there is the race this primitive prevents — but
+// it means a rollback can do nothing while reporting success, which is the
+// defect pattern this repository was built to remove. It is only acceptable
+// because it is counted, so the count is asserted rather than assumed.
+func TestReportsWhatEachOutcomeWas(t *testing.T) {
+	sink := servicemetrics.NewRecorder()
+	c := &clock{now: time.Unix(1_700_000_000, 0)}
+	dir, err := New(versionstore.NewMemoryStore[string, Entry](), Config{
+		Normalize: NormalizeLower, DefaultTTL: time.Minute, Now: c.Now, Metrics: sink,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	claim, err := dir.Reserve(ctx, "Alice", "acct-1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.Count("accepted:reserve"); got != 1 {
+		t.Fatalf("a fresh reservation reported %d accepts; %s", got, sink.Events())
+	}
+
+	// The same owner asking again gets its existing claim back. That is a
+	// replay, not a second reservation, and conflating the two hides a client
+	// that is retrying every request.
+	if _, err := dir.Reserve(ctx, "Alice", "acct-1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.Count("replayed:reserve"); got != 1 {
+		t.Fatalf("a retried reservation reported %d replays; %s", got, sink.Events())
+	}
+	if got := sink.Count("accepted:reserve"); got != 1 {
+		t.Fatalf("a retried reservation was also counted as accepted (%d); %s", got, sink.Events())
+	}
+
+	if _, err := dir.Reserve(ctx, "alice", "acct-2", 0); !errors.Is(err, ErrKeyTaken) {
+		t.Fatalf("a second owner reserved the same key: %v", err)
+	}
+	if got := sink.Count("refused:reserve:taken"); got != 1 {
+		t.Fatalf("a refused reservation reported %d refusals; %s", got, sink.Events())
+	}
+
+	if _, err := dir.Commit(ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.Count("accepted:commit"); got != 1 {
+		t.Fatalf("a commit reported %d accepts; %s", got, sink.Events())
+	}
+
+	// The silent no-op: cancelling a claim that is not ours. It answers nil,
+	// so the counter is the only way anyone learns it happened.
+	stale := Claim{Key: "alice", Owner: "acct-9", Token: "not-the-token"}
+	if err := dir.Cancel(ctx, stale); err != nil {
+		t.Fatalf("cancelling a foreign claim failed instead of no-opping: %v", err)
+	}
+	if got := sink.Count("dropped:cancel.not_ours"); got != 1 {
+		t.Fatalf("a cancel that did nothing reported %d drops; %s", got, sink.Events())
+	}
+
+	// Reserving a key we already hold permanently is also a replay. This is a
+	// second branch from the still-reserved one above, and it reports through
+	// its own call — so it needs its own assertion, or one of the two can stop
+	// reporting without any test noticing.
+	if _, err := dir.Reserve(ctx, "Alice", "acct-1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.Count("replayed:reserve"); got != 2 {
+		t.Fatalf("reserving an already-committed key reported %d replays total, want 2; %s", got, sink.Events())
+	}
+	if got := sink.Count("accepted:reserve"); got != 1 {
+		t.Fatalf("reserving an already-committed key was counted as accepted (%d); %s", got, sink.Events())
+	}
+
+	if err := dir.Release(ctx, "Alice", "acct-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sink.Count("accepted:release"); got != 1 {
+		t.Fatalf("a release reported %d accepts; %s", got, sink.Events())
+	}
+}
+
+// A nil reporter must never change behaviour: every call site is
+// unconditional so one cannot be forgotten, which only works if nil is safe.
+func TestANilReporterChangesNothing(t *testing.T) {
+	dir, _ := newDirectory(t)
+	ctx := context.Background()
+	claim, err := dir.Reserve(ctx, "Alice", "acct-1", 0)
+	if err != nil {
+		t.Fatalf("a directory with no reporter failed to reserve: %v", err)
+	}
+	if _, err := dir.Commit(ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+	if err := dir.Release(ctx, "Alice", "acct-1"); err != nil {
+		t.Fatal(err)
 	}
 }

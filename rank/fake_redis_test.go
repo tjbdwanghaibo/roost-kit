@@ -32,7 +32,10 @@ type fakeRedis struct {
 	// swapDelay, when set, runs before a swap commits so a test can interleave
 	// two submits deterministically.
 	swapDelay func()
-	evalCalls int
+	// swapAlwaysLoses makes every swap report a lost compare-and-swap, which
+	// is how a test reaches the exhausted-retry path without racing.
+	swapAlwaysLoses bool
+	evalCalls       int
 }
 
 func newFakeRedis() *fakeRedis {
@@ -153,6 +156,9 @@ func (f *fakeRedis) Eval(_ context.Context, script string, keys []string, args .
 		zkey, okey := keys[0], keys[1]
 		owner, expected, next, requestID, ring := strArgs[0], strArgs[1], strArgs[2], strArgs[3], strArgs[4]
 		stored, exists := f.hget(okey, owner)
+		if f.swapAlwaysLoses {
+			return []any{int64(0), stored}, nil
+		}
 		if expected == "" {
 			if exists {
 				return []any{int64(0), stored}, nil

@@ -9,7 +9,9 @@ import (
 	"time"
 
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
+
 	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
 )
 
 // RedisClient is the slice of redis.IRedis a RedisStore uses.
@@ -36,6 +38,11 @@ type RedisConfig struct {
 	RetryBackoff time.Duration
 	// Sleep is the delay function; nil means time.Sleep. Test seam.
 	Sleep func(time.Duration)
+	// Metrics receives reports. A nil reporter means no reporting and never
+	// fails an operation. Without it the paths below are invisible, which is
+	// how the implementation this replaces hid a submit that answered
+	// failure after a successful write.
+	Metrics servicemetrics.Reporter
 }
 
 // RedisStore keeps one sorted set per board, whose members carry everything a
@@ -45,6 +52,7 @@ type RedisConfig struct {
 type RedisStore struct {
 	client RedisClient
 	cfg    RedisConfig
+	report servicemetrics.Sink
 }
 
 func NewRedisStore(client RedisClient, cfg RedisConfig) (*RedisStore, error) {
@@ -57,7 +65,7 @@ func NewRedisStore(client RedisClient, cfg RedisConfig) (*RedisStore, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &RedisStore{client: client, cfg: cfg}, nil
+	return &RedisStore{client: client, cfg: cfg, report: servicemetrics.Wrap(cfg.Metrics)}, nil
 }
 
 func (s *RedisStore) boardKey(board Board) string {
@@ -134,6 +142,10 @@ func (s *RedisStore) Submit(ctx context.Context, board Board, score Score, mode 
 			return Entry{}, err
 		}
 		if requestID != "" && ringContains(ring, requestID) {
+			// A replay is the signal that the transport is redelivering, and
+			// it is the difference between a correct accumulating submit and
+			// a board that drifts on every redelivery.
+			s.report.Replayed("submit")
 			// Already applied. Return what is stored rather than applying the
 			// change again — the difference between a replay-safe
 			// accumulating submit and a leaderboard that drifts on every
@@ -159,6 +171,7 @@ func (s *RedisStore) Submit(ctx context.Context, board Board, score Score, mode 
 			return Entry{}, err
 		}
 		if applied {
+			s.report.Accepted("submit")
 			return s.entryFor(ctx, zkey, encodeEntry(next))
 		}
 		_ = current
@@ -169,6 +182,10 @@ func (s *RedisStore) Submit(ctx context.Context, board Board, score Score, mode 
 		// implementation of it, not one per compare-and-set loop.
 		versionstore.RetryBackoff(attempt, s.cfg.RetryBackoff, s.cfg.Sleep)
 	}
+	// Contention on one owner is the expected failure mode here, so it is
+	// reported rather than left as an opaque internal error the caller cannot
+	// distinguish from a Redis outage.
+	s.report.Conflict("submit")
 	return Entry{}, fmt.Errorf("%w: submit lost %d compare-and-swaps for owner %d", ErrConflictSentinel, maxSubmitAttempts, score.OwnerID)
 }
 
@@ -242,6 +259,7 @@ func (s *RedisStore) Page(ctx context.Context, board Board, offset, limit int) (
 	if err != nil {
 		return Page{}, err
 	}
+	s.report.Depth("board."+board.ID, total)
 	entries := make([]Entry, 0, len(members))
 	for index, member := range members {
 		score, err := decodeEntry(member)
