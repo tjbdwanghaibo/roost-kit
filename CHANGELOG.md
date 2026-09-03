@@ -5,6 +5,17 @@
 ## [Unreleased]
 
 ### Added
+- `versionstore.RetryBackoff`：把带全抖动的指数退避策略导出。不是每个
+  compare-and-set 都能用这个包的信封模型——同时维护 sorted set 与 hash 的存储需要
+  自己的脚本——但那些循环需要同一套策略。立即重试会让竞争看起来像故障：N 个写者
+  一起输、一起重试、同时耗尽预算，调用方得到一个与"后端不可达"无法区分的错误。
+  导出它是为了让这套策略只有一份实现，而不是每个 CAS 循环一份。
+- `redis.NewClient`：在 Mod 生命周期之外按配置构造客户端。生产接线仍走 `RedisMod`
+  （它负责配置解析、capability 注册与关闭）；这个入口给没有 registry 的场景：需要
+  真正执行 Lua、pipeline、WATCH 这类语义的集成测试（内存替身只能重新实现而非执行
+  它们），以及一次性运维工具。调用方负责 Close。
+
+### Added
 - `scripts/pretag.sh`：打 tag 之前的发布预检（tag major 与 module 路径后缀一致、
   tag 未存在、无 replace、工作区干净、`GOWORK=off` 下 build/vet/test 通过）。
   由 tag push 触发的 CI 运行在 tag 已存在之后，能报告但阻止不了。
