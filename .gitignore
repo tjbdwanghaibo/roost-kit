@@ -1,0 +1,9 @@
+bin/
+dist/
+log/
+.env
+*.local.yaml
+.idea/
+.vscode/
+go.work
+go.work.sum
