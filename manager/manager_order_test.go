@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tjbdwanghaibo/cube-core/app"
+	"github.com/tjbdwanghaibo/roost-core/app"
 )
 
 type orderManager struct {

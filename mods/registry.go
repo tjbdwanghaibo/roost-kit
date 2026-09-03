@@ -3,7 +3,7 @@ package mods
 import (
 	"fmt"
 
-	"github.com/tjbdwanghaibo/cube-core/app"
+	"github.com/tjbdwanghaibo/roost-core/app"
 )
 
 // Capability describes one startup-time Registry publication.

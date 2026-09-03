@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/tjbdwanghaibo/cube-core/app"
-	fconfigdata "github.com/tjbdwanghaibo/cube-core/configdata"
-	fctx "github.com/tjbdwanghaibo/cube-core/fctx"
-	"github.com/tjbdwanghaibo/cube-core/lifecycle"
-	"github.com/tjbdwanghaibo/cube-core/metrics"
-	"github.com/tjbdwanghaibo/cube-kit/mods"
+	"github.com/tjbdwanghaibo/roost-core/app"
+	fconfigdata "github.com/tjbdwanghaibo/roost-core/configdata"
+	fctx "github.com/tjbdwanghaibo/roost-core/fctx"
+	"github.com/tjbdwanghaibo/roost-core/lifecycle"
+	"github.com/tjbdwanghaibo/roost-core/metrics"
+	"github.com/tjbdwanghaibo/roost-kit/mods"
 
 	"github.com/spf13/viper"
 )

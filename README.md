@@ -1,13 +1,13 @@
-# cube-kit
+# roost-kit
 
-`cube-kit`（仓库目录名 `roost-kit`，Go 模块 `github.com/tjbdwanghaibo/cube-kit`）是 roost 框架的**中间件组件层**：它把 Redis、MongoDB、NATS/JetStream、etcd、本地磁盘 WAL 等具体基础设施实现为 `cube-core` 定义的稳定接口与 `app.Mod` 生命周期组件，业务服务只需按需装配。
+`roost-kit`（仓库目录名 `roost-kit`，Go 模块 `github.com/tjbdwanghaibo/roost-kit`）是 roost 框架的**中间件组件层**：它把 Redis、MongoDB、NATS/JetStream、etcd、本地磁盘 WAL 等具体基础设施实现为 `roost-core` 定义的稳定接口与 `app.Mod` 生命周期组件，业务服务只需按需装配。
 
-三级阅读路径：完全新手从 [Roost 五分钟快速开始](https://github.com/tjbdwanghaibo/cube-core/blob/main/docs/QUICKSTART.md) 开始；熟练开发者阅读 [完整使用说明](https://github.com/tjbdwanghaibo/cube-core/blob/main/docs/USER_GUIDE.md) 后按本 README 查具体 Mod；框架维护者阅读 [实现原理](https://github.com/tjbdwanghaibo/cube-core/blob/main/docs/INTERNALS.md)、[生产部署](https://github.com/tjbdwanghaibo/cube-core/blob/main/docs/DEPLOYMENT.md) 与本 README 的实现章节。
+三级阅读路径：完全新手从 [Roost 五分钟快速开始](https://github.com/tjbdwanghaibo/roost-core/blob/main/docs/QUICKSTART.md) 开始；熟练开发者阅读 [完整使用说明](https://github.com/tjbdwanghaibo/roost-core/blob/main/docs/USER_GUIDE.md) 后按本 README 查具体 Mod；框架维护者阅读 [实现原理](https://github.com/tjbdwanghaibo/roost-core/blob/main/docs/INTERNALS.md)、[生产部署](https://github.com/tjbdwanghaibo/roost-core/blob/main/docs/DEPLOYMENT.md) 与本 README 的实现章节。
 
 ```text
 业务服务（游戏服 / world 服 / 自定义服务）
-  └─> cube-kit   具体基础设施 Mod（本仓库）
-        └─> cube-core   Mod 生命周期、app.Registry、稳定接口与 Nest 执行引擎
+  └─> roost-kit   具体基础设施 Mod（本仓库）
+        └─> roost-core   Mod 生命周期、app.Registry、稳定接口与 Nest 执行引擎
 ```
 
 ---
@@ -26,18 +26,18 @@
 | `remote_entity/` | 跨服务实体的原子事务（Mongo 单事务提交 + digest 幂等收据）、不可变快照分发（进程内 L1 + Redis L2，(marker,route,version) 三元 CAS）、local/shared 所有权状态机（Redis Lua CAS）、`IVersionedLock`（栅栏 + 版本）——**全应用的 `ModRedisVLock` capability 由本 Mod 注册** | Redis + NATS（sync）+ MongoDB | 跨服实体所有权与远程提交 |
 | `saga/` | 跨事务域长事务：Mongo 状态机 + outbox + lease fencing + 幂等步骤 inbox（先占位再执行）；通过 Data Engine effect outbox 从 Nest 事务拉起 saga | MongoDB + NATS JetStream | 跨服务多步业务流程 |
 | `room/` | 状态帧同步的房间侧：`RoomMod`（只提供 `ISyncBus`，NATS 或 JetStream 二选一）、`RoomManager`（多房间宿主：两级容量预算 + 空闲 GC）、`RoomFrame` 合帧（50ms）、`RoomTransportSink`（编码到 statesync 线格式：snapshot 走可靠、delta 走 latest-only datagram，慢消费者驱逐）。**房间组件是库类型，需业务自行装配，装 RoomMod 不等于有房间同步** | NATS/JetStream（bus）+ `nettransport`（房间帧传输） | 实时房间状态同步 |
-| `syncstream/` | observer 维度的包流（跑在 `ISyncBus` 上，服务↔服务）：分片重组（有界 + TTL）、阈值压缩（checksum 算在压缩前）、发布确认能力探测（JetStream 有 / 纯 NATS 故意没有）、`BufferedPublisher`（准入 ≠ 确认）、5 个 `cube_sync_*` gauge | NATS/JetStream | 跨服务的有序状态流 |
+| `syncstream/` | observer 维度的包流（跑在 `ISyncBus` 上，服务↔服务）：分片重组（有界 + TTL）、阈值压缩（checksum 算在压缩前）、发布确认能力探测（JetStream 有 / 纯 NATS 故意没有）、`BufferedPublisher`（准入 ≠ 确认）、5 个 `roost_sync_*` gauge | NATS/JetStream | 跨服务的有序状态流 |
 | `replication/` | 帧复制网络层：**`AsyncTransport`（每 session 双 worker、latest-only 合帧、原子批准入）是心脏**；QUIC/KCP/UDP 三个 transport（能力矩阵见 §4）、`CompositeTransport` 拼装异构双通道、`ControlPlane` 终结 ACK/resync 控制报文；UDP 为 per-session AEAD 加密 + 防重放 | 无（自带网络协议栈） | 实时帧下发（客户端连接） |
-| `lockstep/` | 帧同步（输入帧）房间层：`Room` 绑定 cube-core/lockstep 的 Sequencer/历史/冗余编码/裁决器到传输——切帧经 datagram 通道冗余广播（丢包不重传）、追帧经可靠通道按 tick 限速分页、关键帧哈希裁决回调 + 全套指标。**non-goals：不跑模拟（客户端确定性执行）、不做帧内容校验（输入 payload 对框架不透明）** | 无（注入 `nettransport` 的 Datagram/Reliable sender） | 客户端确定性模拟的实时对战房间（与 `room/` 状态帧二选一） |
+| `lockstep/` | 帧同步（输入帧）房间层：`Room` 绑定 roost-core/lockstep 的 Sequencer/历史/冗余编码/裁决器到传输——切帧经 datagram 通道冗余广播（丢包不重传）、追帧经可靠通道按 tick 限速分页、关键帧哈希裁决回调 + 全套指标。**non-goals：不跑模拟（客户端确定性执行）、不做帧内容校验（输入 payload 对框架不透明）** | 无（注入 `nettransport` 的 Datagram/Reliable sender） | 客户端确定性模拟的实时对战房间（与 `room/` 状态帧二选一） |
 | `gateway/` | 接入层中间件：限流、超时、panic 隔离 | 无 | 玩家接入链路 |
 | `spatial/` | 整数网格地形、四方向 A*、ID-only 块索引，以及**增量兴趣管理**：`InterestManager`（进出滞回、距离带 LOD、可见上限）与 `InterestCluster`（共享坐标平面上的多房间无缝拼接：边界镜像、跨界迁移零闪断）。**non-goals：无 Z 轴/navmesh；跨进程 handover 不在此层**（见包注释） | 无 | 场景服的寻路、AOI 与可见性增量（下游接 entitysync 订阅） |
-| `ai/` | 行为树：节点库（组合/装饰/确定性 tick 计时/注入式随机）、`BehaviorStrategy`（树 → cube-core Strategy 桥）、`TaskflowAction`（树驱动 taskflow 动作的标准叶子）、`ParseTree`（严格 JSON 树装配，fail-fast + path 诊断）。**non-goals：无编辑器格式/utility/GOAP/跨 agent 调度** | 无 | 怪物/NPC 决策层，配表驱动行为 |
-| `taskflow/` | cube-core taskflow 契约的执行器：`ActionRunner`（按 ActionGroup 分槽的"当前 + 队列"执行、组冻结、重入检测一等错误、钩子全 panic-safe）、`MissionRunner`（单任务 + `CanReplaceBy` 仲裁替换）、`PlanMission`（配表式步骤机）、可封存的实例级 `Registry`。**刻意无锁：所有调用须由实体锁串行化** | 无 | 实体内的动作/任务状态机（AI 与玩法的执行层） |
+| `ai/` | 行为树：节点库（组合/装饰/确定性 tick 计时/注入式随机）、`BehaviorStrategy`（树 → roost-core Strategy 桥）、`TaskflowAction`（树驱动 taskflow 动作的标准叶子）、`ParseTree`（严格 JSON 树装配，fail-fast + path 诊断）。**non-goals：无编辑器格式/utility/GOAP/跨 agent 调度** | 无 | 怪物/NPC 决策层，配表驱动行为 |
+| `actionflow/` | roost-core actionflow 契约的执行器：`ActionRunner`（按 ActionGroup 分槽的"当前 + 队列"执行、组冻结、重入检测一等错误、钩子全 panic-safe）、`MissionRunner`（单任务 + `CanReplaceBy` 仲裁替换）、`PlanMission`（配表式步骤机）、可封存的实例级 `Registry`。**刻意无锁：所有调用须由实体锁串行化** | 无 | 实体内的动作/任务状态机（AI 与玩法的执行层） |
 | `manager/` | `ManagerMod`：一个 Service 的内存单例 manager 的生命周期。按 `DependsOn` 依赖序启动、逆序停止；启动失败回滚已启动的（**失败的那个不 Stop**——它没启动完，Stop 得处理半构造对象，清理是 `Start` 自己的责任）；启动中收到 shutdown 会**中止**启动而不是与之赛跑；`Start` 后 `Register` 直接报错。无依赖 manager 之间保持注册序，**每次进程一致** | 无 | 场景注册表、路由表、缓存这类进程内单例逻辑 |
 | `lock/` | 进程内锁管理器（per-id 可重入互斥，同 id 同实例）——与 `redis.IDistLock`/`IVersionedLock` 是进程内 vs 跨进程的不同层，不参与"分布式锁二选一" | 无 | 进程内互斥 |
 | `robot/` | core `robot` 机器人框架的 kit 侧：KCP/QUIC 客户端拨号（`RegisterKCPDialer`/`RegisterQUICDialer`，经 core `transport.RegisterDialer` 挂载，复用 `nettransport.DialKCP/DialQUIC`）；`LockstepBot`（帧装配 + 输入提交 + 关键帧哈希上报 + 每 gap 一次追帧请求，出站经业务注入的 `LockstepSink`）——desync 回归测试与 lockstep 压测的客户端半场 | 无（网络栈复用 `nettransport`） | 模拟客户端逻辑、压测（尤其 lockstep 房间） |
 | `ops/` | 运维 HTTP：`/healthz`（存活，恒 200）、`/readyz`（ready 位 + 依赖健康，503 语义）、`/metrics`（Prometheus 文本，**不鉴权**）、`/admin/*`（token 双通道鉴权，关闭时 404 隐藏）。**默认关闭（`ops.enabled`），默认只监听 127.0.0.1** | HTTP | 探针、指标抓取与运维命令 |
-| `configdata/` | 配置快照热更：首次 Load 失败即启动失败；reload 带 rollback 语义并打 `configdata.reload.total{result}` 指标。依赖 cube-core `configdata.DefaultRegistry()` 全局注册表（业务表类型须先注册） | 本地文件 | 配置表热更 |
+| `configdata/` | 配置快照热更：首次 Load 失败即启动失败；reload 带 rollback 语义并打 `configdata.reload.total{result}` 指标。依赖 roost-core `configdata.DefaultRegistry()` 全局注册表（业务表类型须先注册） | 本地文件 | 配置表热更 |
 | `statslog/` | 周期统计 JSONL（每行一个 `StatsRecord`，每次 flush 都 fsync）：runtime + 自动富化 nest/entity 统计（装了对应 Mod 才有）、业务 provider 扩展点（panic 被捕获成记录）、窗口增量 + 累计双报。**默认关闭（`stats_log.enabled`）；entity 统计是 O(N) 全量扫描，interval 勿设太小** | 本地文件 | 周期运行时统计 |
 | `mods/` | 全部 capability 名称常量（`mods.ModRedis`、`mods.ModDataEngine`…），含对 core `app.*` 常量的再导出；常量 → 注册者 → 实际类型见 §3.3 | 无 | 业务从 Registry 取依赖时使用 |
 
@@ -57,8 +57,8 @@ module nestwal-demo
 go 1.25.0
 
 require (
-	github.com/tjbdwanghaibo/cube-core v1.8.0
-	github.com/tjbdwanghaibo/cube-kit v1.8.0
+	github.com/tjbdwanghaibo/roost-core v1.10.0
+	github.com/tjbdwanghaibo/roost-kit v1.10.0
 )
 ```
 
@@ -79,8 +79,8 @@ import (
 	"path/filepath"
 	"time"
 
-	corenest "github.com/tjbdwanghaibo/cube-core/nest"
-	"github.com/tjbdwanghaibo/cube-kit/nestwal"
+	corenest "github.com/tjbdwanghaibo/roost-core/nest"
+	"github.com/tjbdwanghaibo/roost-kit/nestwal"
 )
 
 func record(id byte, entityID int64, payload string) corenest.CommitRecord {
@@ -207,20 +207,20 @@ ticket lsn=1 durable, watermark DurableLSN=1
 
 > 生产环境不要直接使用裸 `WAL` 或独立 `nestwal.Runtime`：应用应装配 `dataengine.Mod`，由统一引擎负责 WAL、Mongo projection、outbox 与 ack。
 
-### 2.2 作为 committer 接入 cube-core Nest（生产装配）
+### 2.2 作为 committer 接入 roost-core Nest（生产装配）
 
 生产装配走 Mod 体系，Data Engine 是唯一持久化引擎；下列骨架中的
 `entity.Getter/ManagerAccess` 由业务提供。
 
 ```go
 import (
-	"github.com/tjbdwanghaibo/cube-core/app"
-	"github.com/tjbdwanghaibo/cube-core/bus"
-	kitdata "github.com/tjbdwanghaibo/cube-kit/dataengine"
-	kitnest "github.com/tjbdwanghaibo/cube-kit/nest"
-	"github.com/tjbdwanghaibo/cube-kit/mongo"
-	"github.com/tjbdwanghaibo/cube-kit/nats"
-	"github.com/tjbdwanghaibo/cube-kit/ops"
+	"github.com/tjbdwanghaibo/roost-core/app"
+	"github.com/tjbdwanghaibo/roost-core/bus"
+	kitdata "github.com/tjbdwanghaibo/roost-kit/dataengine"
+	kitnest "github.com/tjbdwanghaibo/roost-kit/nest"
+	"github.com/tjbdwanghaibo/roost-kit/mongo"
+	"github.com/tjbdwanghaibo/roost-kit/nats"
+	"github.com/tjbdwanghaibo/roost-kit/ops"
 )
 
 dataMod := kitdata.NewMod(kitdata.WithEntityAccess(access))
@@ -273,7 +273,7 @@ nest:
 handler 侧通过 `HandlerMeta{Durability: corenest.DurabilityStrict}`（或
 `DurabilityPipelined`）声明持久化级别；成功回包时事务已进入 Data Engine WAL。Mongo
 projection 完成后推进 WAL ACK，effect 由独立 outbox worker 投递，因此 NATS 故障不会
-阻塞 Entity 落库。旧 Checkpoint 数据导入说明见 cube-core
+阻塞 Entity 落库。旧 Checkpoint 数据导入说明见 roost-core
 `docs/DATA_ENGINE_MIGRATION.md`；运行时不存在回切到第二写引擎的路径。
 
 `dataengine.projection.batch_records` 限制一次 WAL 重放读取的记录数，也限制普通批投影
@@ -288,7 +288,7 @@ segment 的记录数；`dataengine.projection.batch_bytes` 只限制普通批投
 
 ### 3.1 Mod 装配与配置体系
 
-所有组件实现 `cube-core/app.Mod` 四阶段生命周期：
+所有组件实现 `roost-core/app.Mod` 四阶段生命周期：
 
 ```text
 Init(cfg)   读取 viper 配置、构造参数（不启 goroutine、不访问远端）
@@ -298,7 +298,7 @@ Stop()      停后台任务、flush、关连接（保证停服收敛）
 ```
 
 - **依赖声明**：硬要求使用 `DependsOn()`，缺失立即失败；可选集成使用 `OptionalDependsOn()`，依赖存在时自动排到当前 Mod 之前、缺失时忽略。框架统一做拓扑排序和环检测。NATS→Redis（reliable 开启时使用）与 Nest→Remote Entity 已使用可选依赖契约，业务不再依靠 `Mods(...)` 书写顺序碰运气。
-- **capability 查询**：业务永远通过 `app.Lookup[接口类型](registry, mods.ModXxx)` 取依赖，只依赖 `cube-core` 接口，不触碰 Mod 私有实现。名称常量集中在 `mods/name.go`；泛型参数容易写错的常量见 §3.3 的对照表。
+- **capability 查询**：业务永远通过 `app.Lookup[接口类型](registry, mods.ModXxx)` 取依赖，只依赖 `roost-core` 接口，不触碰 Mod 私有实现。名称常量集中在 `mods/name.go`；泛型参数容易写错的常量见 §3.3 的对照表。
 - **配置**：每个 Mod 在 `Init` 中读取自己的配置命名空间（`dataengine.*`、`nest.pipelined.*`…），零配置时使用可运行的默认值。`persistence.engine` 省略或设为 `dataengine`；其他值会在 Init 阶段被拒绝。
 
 ### 3.2 配置命名空间与跨键不变量
@@ -375,7 +375,7 @@ ack 检查点推进（nestwal/checkpoint.go）
 publish 不是**。Mongo 事务先把 mutation、receipt 和 effect outbox 原子 staged；独立
 publisher 再按 EffectID 至少一次投递。NATS 停机只增加 outbox backlog，不阻塞 WAL ACK。
 
-设计文档：`cube-core` 仓库的 `NEST_TRANSACTION_WAL.md` 与 `NEST_PIPELINED_COMMIT.md`（中文，含正确性论证）。
+设计文档：`roost-core` 仓库的 `NEST_TRANSACTION_WAL.md` 与 `NEST_PIPELINED_COMMIT.md`（中文，含正确性论证）。
 
 ---
 
@@ -436,7 +436,7 @@ Remote 路径使用显式 delete intent，并继续经过 ownership marker、loc
   | --- | --- | --- | --- |
   | 可靠通道 | **无**（显式返回 `ErrProtocolConfig`，用 `CompositeTransport` 拼） | KCP 流 + 4B 长度前缀 | 每 session 一条惰性单向流 + 4B 长度前缀 |
   | 不可靠通道 | 原生 UDP + AEAD | kcp-go OOB（**构造强制 FEC + BlockCrypt**） | QUIC DATAGRAM（**必须双向协商**） |
-  | 加密 | 自带 per-session AES-GCM | kcp `BlockCrypt`（强制） | TLS 1.3（ALPN `cube-replication-v1`） |
+  | 加密 | 自带 per-session AES-GCM | kcp `BlockCrypt`（强制） | TLS 1.3（ALPN `roost-nettransport-v1`） |
   | 地址迁移 | 手工（仅 AEAD 验证通过后） | 无 | QUIC 原生连接迁移 |
   | 流控旋钮 | 仅包上限（默认 1232 = IPv6 最小 MTU 减头） | 窗口/nodelay/fastresend/限速/DSCP 全套 | 委托 quic-go |
 
@@ -460,7 +460,7 @@ Remote 路径使用显式 delete intent，并继续经过 ownership marker、loc
 - **压缩阈值触发**（默认走 gzip BestSpeed，编码器池化，>1MiB 的 buffer 不归还池）；**校验和算在压缩前的 JSON 上**，每个分片带同一 checksum 供重组后整体校验。
 - **分片非原子**：逐片发布，中途失败会留下已发布的前若干片——接收端靠有界重组 + `AssemblyTTL`（默认 30s）自然丢弃残片。重组 key 含 encoding 与 checksum，不同次发布不互相污染。边界默认：MaxChunks 256、MaxAssemblyBytes 8MiB、MaxDecodedBytes 同（防解压炸弹）。
 - **`BufferedPublisher` 的两个入口语义分离**：`Publish` = 同步 + 重试；`TryEnqueue` = 有界异步，满则 `ErrBackpressure`。**队列准入 ≠ broker 确认**。
-- `observability.go` 导出 5 个 `cube_sync_*` gauge + `Health()`。
+- `observability.go` 导出 5 个 `roost_sync_*` gauge + `Health()`。
 
 ### remote_entity：跨服实体（Mod 装配与所有权）
 
@@ -486,7 +486,7 @@ Remote 路径使用显式 delete intent，并继续经过 ownership marker、loc
 - **taskflow 的无锁契约**（`taskflow/action_runner.go`）：所有调用（含 Tick）必须由持实体锁的一方串行化——包内刻意无锁。钩子在回调里改动当前 action 会被检出为一等错误 `ErrReentrantMutation`（不是静默错乱）；钩子与 action 回调全部 panic-safe。`ActionContext` 走 `sync.Pool`，**action 内不得保留 ctx 指针**。`Start` 抢占当前 action、`Enqueue` 只入队；队列中某项启动失败不阻塞后续。`MissionRunner` 的任务替换先问 `CanReplaceBy`；start 失败做完整清理。`PlanMission` 会复制 steps 并回填默认跳转，入参 plan 不被修改。
 - **ops 的安全面**（`ops/ops_mod.go`）：`/healthz` 恒 200（liveness）、`/readyz` = ready 位 && 依赖健康（readiness，503 语义）——K8s 探针要分开配。**`/metrics` 不鉴权**，默认绑 127.0.0.1 是唯一防护，改 0.0.0.0 等于公开指标。admin 鉴权双通道（`X-Admin-Token` 或 Bearer），关闭时端点返回 404 隐藏存在性；`dev-` 前缀 token 未显式允许即启动失败；执行命令自动补 `Source = ops:<service>:<sid>` 供审计。
 - **statslog 的窗口语义**（`statslog/statslog.go`）：nest 处理量双报（本窗口增量 + 累计），计数器回退（进程重启）时返回当前值不产生负数；provider panic 被捕获成 `{"error":"panic:..."}` 记录而不是打断统计线程；同名 provider 覆盖后旧反注册闭包失效（ABA 防护）；`StopWithContext` 有界——卡住的 provider 不会挂死停服。
-- **configdata**（`configdata/configdata.go`）：依赖 cube-core `configdata.DefaultRegistry()` 全局注册表（业务表类型须在 Mod 装配前注册，Mod 无自定义 registry 注入点）；reload 指标 `configdata.reload.total{result=ok|rollback}` + gauge `configdata.version`；反注册按逆序执行。
+- **configdata**（`configdata/configdata.go`）：依赖 roost-core `configdata.DefaultRegistry()` 全局注册表（业务表类型须在 Mod 装配前注册，Mod 无自定义 registry 注入点）；reload 指标 `configdata.reload.total{result=ok|rollback}` + gauge `configdata.version`；反注册按逆序执行。
 - **gateway 中间件的三条硬契约**（`gateway/middleware.go`）：`RateLimit` 的鉴权兜底不可绕过——**limiter 为 nil 时仍检查 principal**（关掉限流不能扩大认证面；曾有此回归，见 `middleware_test.go` 注释），限流 key 是玩家 × 消息号；`Timeout` 只收紧不放松（调用方已有更严 deadline 时透传）；`Recover` 统一返回 `ErrEndpointPanic` 不泄漏 panic 细节（明细走 report 回调）。链式顺序：鉴权在 `RateLimit` 之前。
 
 ### 并发定位一览
@@ -514,8 +514,8 @@ Remote 路径使用显式 delete intent，并继续经过 ownership marker、loc
 
 按下面的顺序读源码与测试，每步都可 `go test ./<pkg>/` 验证认知：
 
-1. **框架心智模型**：`cube-core` 仓库 `README.md` + `RUNTIME_EXECUTION_MODEL.md`，然后读本仓库 `mods/name.go` 和任意一个小 Mod（如 `lock/lock_mod.go`）理解四阶段生命周期。
-2. **WAL 设计文档**：`cube-core/NEST_TRANSACTION_WAL.md` → `NEST_PIPELINED_COMMIT.md`（中文，含 Strict/Pipelined 语义对比与正确性论证）。
+1. **框架心智模型**：`roost-core` 仓库 `README.md` + `RUNTIME_EXECUTION_MODEL.md`，然后读本仓库 `mods/name.go` 和任意一个小 Mod（如 `lock/lock_mod.go`）理解四阶段生命周期。
+2. **WAL 设计文档**：`roost-core/NEST_TRANSACTION_WAL.md` → `NEST_PIPELINED_COMMIT.md`（中文，含 Strict/Pipelined 语义对比与正确性论证）。
 3. **nestwal 主线**（本仓库核心，建议精读）：
    - `nestwal/wal.go`（帧格式、group commit、Enqueue/ticket、terminal 熔断）→ `nestwal/checkpoint.go`（双 slot ack）→ `dataengine/projector.go`（事务 projection 与 ack）。
    - 测试按价值排序：**`crash_test.go`**（真实子进程 `SIGKILL` 验证崩溃后 durable 前缀完整）、`pipelined_test.go`（ticket 语义）、`wal_test.go`（torn tail、ack、rotate）、`dataengine/fatal_fence_test.go`（熔断到 Nest/RuntimeFailure 的传导）、`nestwal/backlog_integration_test.go`（100k backlog 恢复）。
@@ -528,21 +528,21 @@ Remote 路径使用显式 delete intent，并继续经过 ownership marker、loc
 
 ## 6. 版本与仓库关系
 
-- **与 cube-core 的版本对应**：研发 source-head 由 `go.work` 选择本地 Core；正式发布则以本仓库 `go.mod` 为准。发布 Kit 前必须先发布它依赖的 Core tag；发布版 `go.mod` 不允许本地 `replace` 或 pseudo-version。
+- **与 roost-core 的版本对应**：研发 source-head 由 `go.work` 选择本地 Core；正式发布则以本仓库 `go.mod` 为准。发布 Kit 前必须先发布它依赖的 Core tag；发布版 `go.mod` 不允许本地 `replace` 或 pseudo-version。
 - **仓库分工**：
 
   | 仓库 | 模块路径 | 角色 |
   | --- | --- | --- |
-  | cube-core | `github.com/tjbdwanghaibo/cube-core` | 生命周期、Registry、Nest 引擎、稳定接口与设计文档 |
-  | cube-kit（本仓库） | `github.com/tjbdwanghaibo/cube-kit` | 基础设施 Mod 与中间件实现 |
-  | cube-codegen | `github.com/tjbdwanghaibo/roost-codegen` | DAO/Sender 等代码生成 |
-  | cube-skill | `github.com/tjbdwanghaibo/roost-skill` | 技能/战斗玩法组件 |
+  | roost-core | `github.com/tjbdwanghaibo/roost-core` | 生命周期、Registry、Nest 引擎、稳定接口与设计文档 |
+  | roost-kit（本仓库） | `github.com/tjbdwanghaibo/roost-kit` | 基础设施 Mod 与中间件实现 |
+  | roost-codegen | `github.com/tjbdwanghaibo/roost-codegen` | DAO/Sender 等代码生成 |
+  | roost-skill | `github.com/tjbdwanghaibo/roost-skill` | 技能/战斗玩法组件 |
 
 - **本地联调**：在共同父目录建 workspace，勿把 `go.work` 提交进任何仓库：
 
   ```bash
   cd /path/to/workspace
-  go work init ./cube-core ./cube-kit ./cube-skill ./cube-codegen
+  go work init ./roost-core ./roost-kit ./roost-skill ./roost-codegen
   ```
 
   需要业务工程时再执行 `go work use ./your-service`。发布/standalone 验证必须使用

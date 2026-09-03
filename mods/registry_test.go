@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/spf13/viper"
-	"github.com/tjbdwanghaibo/cube-core/app"
+	"github.com/tjbdwanghaibo/roost-core/app"
 )
 
 func TestRegisterAllPreflightPreventsPartialPublication(t *testing.T) {

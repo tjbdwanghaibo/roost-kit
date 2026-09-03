@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### Changed（破坏性：Go 模块路径改为 roost-kit，协议前缀默认值改为 roost）
+
+- 模块路径 `github.com/tjbdwanghaibo/cube-kit` → `github.com/tjbdwanghaibo/roost-kit`，版本延续。
+- NATS 主题前缀默认值：`cube.sync`/`cube.room` → `roost.sync`/`roost.room`；`nats` mod 默认前缀
+  `cube` → `roost`；`statslog` 默认服务名 `cube` → `roost`。这些都是可配置默认值。
+  **滚动升级**期间新旧节点若都用默认值会互相听不见，请在升级前显式配置同一前缀。
+- JetStream 同步流默认名 `CUBE_SYNC` → `ROOST_SYNC`，与 `ROOST_EFFECTS`/`ROOST_SAGA` 对齐。
+  流名是 broker 侧持久状态，见 roost-core CHANGELOG 同条说明。
+- `syncstream` 指标名 `cube_sync_*` → `roost_sync_*`，仪表盘与告警规则需同步更新。
+- `ai` 行为树 JSON schema 标识 `cube.ai/v1` → `roost.ai/v1`，不做兼容；已有行为树定义把 `"schema"` 字段改名即可。
+- QUIC ALPN `cube-replication-v1` → `roost-nettransport-v1`；JetStream 去重 MessageID 前缀 `sync:` → `room:`
+  （跟随包名）。两者都是握手/去重时双端必须一致的值，**不做兼容**：滚动升级期间未升级的客户端会被
+  已升级服务端拒绝握手，新旧节点对同一条消息算出不同 MessageID 会各投递一次。请同批升级两端，
+  或在 TLS 配置里显式固定 ALPN。
+
 ### Added
 - **`manager`：`ManagerMod`**，一个 Service 的内存单例 manager（场景注册表、路由表、缓存这类有 Start/Stop 但没有自己持久状态的逻辑）的生命周期拥有者。cube-core 早就声明了契约——`app.IManager`、`app.ManagerDependencyProvider`、`app.IManagerStopperWithContext` 的注释都写着"managed by ManagerMod"——但实现一直缺失，各业务仓各写一份。行为：
   - 按 `DependsOn` 拓扑序启动、**严格逆序**停止（manager 绝不比它依赖的东西活得久）；
@@ -48,9 +63,7 @@
 `publisher.go`、`ai/wire.go` → `tree_parser.go`。
 
 **配置段兼容**：room mod 优先读 `room.*` 配置段，读不到才回退到旧的 `sync.*` 并打印
-一条弃用告警，因此既有部署配置无需在升级同一时刻修改。JetStream 去重用的
-MessageID 前缀 `"sync:"` **故意保持不变**——它是线上状态，改了会让滚动升级期间新旧
-节点对同一条消息算出不同 ID，从而产生去重本要防止的重复投递。
+一条弃用告警，因此既有部署配置无需在升级同一时刻修改。JetStream 去重 MessageID 前缀随包名改为 `room:`（见下）。
 
 
 ### Fixed（独立复审 F1/F2/F3/F4/F6/F8，均带"无修复即红"验证过的回归测试）

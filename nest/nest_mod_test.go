@@ -5,11 +5,11 @@ import (
 	"testing"
 
 	"github.com/spf13/viper"
-	"github.com/tjbdwanghaibo/cube-core/app"
-	"github.com/tjbdwanghaibo/cube-core/entity"
-	"github.com/tjbdwanghaibo/cube-core/health"
-	corenest "github.com/tjbdwanghaibo/cube-core/nest"
-	"github.com/tjbdwanghaibo/cube-kit/mods"
+	"github.com/tjbdwanghaibo/roost-core/app"
+	"github.com/tjbdwanghaibo/roost-core/entity"
+	"github.com/tjbdwanghaibo/roost-core/health"
+	corenest "github.com/tjbdwanghaibo/roost-core/nest"
+	"github.com/tjbdwanghaibo/roost-kit/mods"
 )
 
 type emptyGetter struct{}

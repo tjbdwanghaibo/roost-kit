@@ -1,6 +1,6 @@
 package mods
 
-import "github.com/tjbdwanghaibo/cube-core/app"
+import "github.com/tjbdwanghaibo/roost-core/app"
 
 // ModName constants for reusable service runtime mods.
 const (

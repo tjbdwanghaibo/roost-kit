@@ -3,9 +3,9 @@ package lock
 import (
 	"context"
 
-	"github.com/tjbdwanghaibo/cube-core/app"
-	flock "github.com/tjbdwanghaibo/cube-core/lock"
-	"github.com/tjbdwanghaibo/cube-kit/mods"
+	"github.com/tjbdwanghaibo/roost-core/app"
+	flock "github.com/tjbdwanghaibo/roost-core/lock"
+	"github.com/tjbdwanghaibo/roost-kit/mods"
 
 	"github.com/spf13/viper"
 )

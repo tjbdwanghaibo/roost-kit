@@ -1,4 +1,4 @@
-module github.com/tjbdwanghaibo/cube-kit
+module github.com/tjbdwanghaibo/roost-kit
 
 go 1.25.0
 
@@ -7,7 +7,7 @@ require (
 	github.com/quic-go/quic-go v0.59.1
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/spf13/viper v1.21.0
-	github.com/tjbdwanghaibo/cube-core v1.9.1
+	github.com/tjbdwanghaibo/roost-core v1.10.0
 	github.com/xtaci/kcp-go/v5 v5.6.72
 	go.etcd.io/etcd/api/v3 v3.6.11
 	go.etcd.io/etcd/client/v3 v3.6.11
@@ -64,7 +64,6 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
-	google.golang.org/genproto v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/grpc v1.79.3 // indirect

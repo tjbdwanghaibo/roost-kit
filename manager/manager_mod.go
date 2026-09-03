@@ -3,7 +3,7 @@
 //
 // A manager is process-wide singleton logic — a scene registry, a routing
 // table, a mail cache — with a Start/Stop lifecycle and no persistent state of
-// its own. cube-core declares the contract (app.IManager,
+// its own. roost-core declares the contract (app.IManager,
 // app.ManagerDependencyProvider, app.IManagerStopperWithContext) and names
 // ManagerMod as its owner; this package is that owner.
 //
@@ -20,10 +20,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tjbdwanghaibo/cube-core/app"
-	fctx "github.com/tjbdwanghaibo/cube-core/fctx"
-	"github.com/tjbdwanghaibo/cube-core/metrics"
-	"github.com/tjbdwanghaibo/cube-kit/mods"
+	"github.com/tjbdwanghaibo/roost-core/app"
+	fctx "github.com/tjbdwanghaibo/roost-core/fctx"
+	"github.com/tjbdwanghaibo/roost-core/metrics"
+	"github.com/tjbdwanghaibo/roost-kit/mods"
 
 	"github.com/spf13/viper"
 )

@@ -12,14 +12,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tjbdwanghaibo/cube-core/admin"
-	"github.com/tjbdwanghaibo/cube-core/app"
-	"github.com/tjbdwanghaibo/cube-core/clock"
-	"github.com/tjbdwanghaibo/cube-core/health"
-	"github.com/tjbdwanghaibo/cube-core/httpserver"
-	"github.com/tjbdwanghaibo/cube-core/lifecycle"
-	"github.com/tjbdwanghaibo/cube-core/metrics"
-	"github.com/tjbdwanghaibo/cube-kit/mods"
+	"github.com/tjbdwanghaibo/roost-core/admin"
+	"github.com/tjbdwanghaibo/roost-core/app"
+	"github.com/tjbdwanghaibo/roost-core/clock"
+	"github.com/tjbdwanghaibo/roost-core/health"
+	"github.com/tjbdwanghaibo/roost-core/httpserver"
+	"github.com/tjbdwanghaibo/roost-core/lifecycle"
+	"github.com/tjbdwanghaibo/roost-core/metrics"
+	"github.com/tjbdwanghaibo/roost-kit/mods"
 
 	"github.com/spf13/viper"
 )
@@ -258,7 +258,7 @@ func (m *OpsMod) metricCount() int {
 // authorized compares the presented admin token in constant time. This
 // endpoint can execute every registered admin command (plugin loading, DLQ
 // replay, load-test control), so the token is a credential of the same class
-// as the session tokens and payload signatures in cube-core's security
+// as the session tokens and payload signatures in roost-core's security
 // package — and those are compared with hmac.Equal. A plain `==` short-circuits
 // at the first differing byte, which is exactly the signal a timing attack
 // needs.

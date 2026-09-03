@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tjbdwanghaibo/cube-core/app"
-	"github.com/tjbdwanghaibo/cube-core/entity"
-	fctx "github.com/tjbdwanghaibo/cube-core/fctx"
-	"github.com/tjbdwanghaibo/cube-core/nest"
-	"github.com/tjbdwanghaibo/cube-core/worker"
-	"github.com/tjbdwanghaibo/cube-kit/mods"
+	"github.com/tjbdwanghaibo/roost-core/app"
+	"github.com/tjbdwanghaibo/roost-core/entity"
+	fctx "github.com/tjbdwanghaibo/roost-core/fctx"
+	"github.com/tjbdwanghaibo/roost-core/nest"
+	"github.com/tjbdwanghaibo/roost-core/worker"
+	"github.com/tjbdwanghaibo/roost-kit/mods"
 
 	"github.com/spf13/viper"
 )
@@ -122,7 +122,7 @@ func (m *StatsLogMod) Init(cfg *viper.Viper) error {
 	m.enabled = cfg.GetBool("stats_log.enabled")
 	m.service = cfg.GetString("server_type")
 	if m.service == "" {
-		m.service = "cube"
+		m.service = "roost"
 	}
 	m.sid = cfg.GetInt32("sid")
 	m.dir = cfg.GetString("stats_log.dir")

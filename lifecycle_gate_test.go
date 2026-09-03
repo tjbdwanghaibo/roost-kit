@@ -3,24 +3,24 @@ package kit_test
 import (
 	"testing"
 
-	"github.com/tjbdwanghaibo/cube-core/app"
-	kitconfigdata "github.com/tjbdwanghaibo/cube-kit/configdata"
-	kitdataengine "github.com/tjbdwanghaibo/cube-kit/dataengine"
-	kitetcd "github.com/tjbdwanghaibo/cube-kit/etcd"
-	kitlock "github.com/tjbdwanghaibo/cube-kit/lock"
-	kitmongo "github.com/tjbdwanghaibo/cube-kit/mongo"
-	kitnats "github.com/tjbdwanghaibo/cube-kit/nats"
-	kitnest "github.com/tjbdwanghaibo/cube-kit/nest"
-	kitops "github.com/tjbdwanghaibo/cube-kit/ops"
-	kitredis "github.com/tjbdwanghaibo/cube-kit/redis"
-	kitremoteentity "github.com/tjbdwanghaibo/cube-kit/remoteentity"
-	kitroom "github.com/tjbdwanghaibo/cube-kit/room"
-	kitsaga "github.com/tjbdwanghaibo/cube-kit/saga"
-	kitstatslog "github.com/tjbdwanghaibo/cube-kit/statslog"
+	"github.com/tjbdwanghaibo/roost-core/app"
+	kitconfigdata "github.com/tjbdwanghaibo/roost-kit/configdata"
+	kitdataengine "github.com/tjbdwanghaibo/roost-kit/dataengine"
+	kitetcd "github.com/tjbdwanghaibo/roost-kit/etcd"
+	kitlock "github.com/tjbdwanghaibo/roost-kit/lock"
+	kitmongo "github.com/tjbdwanghaibo/roost-kit/mongo"
+	kitnats "github.com/tjbdwanghaibo/roost-kit/nats"
+	kitnest "github.com/tjbdwanghaibo/roost-kit/nest"
+	kitops "github.com/tjbdwanghaibo/roost-kit/ops"
+	kitredis "github.com/tjbdwanghaibo/roost-kit/redis"
+	kitremoteentity "github.com/tjbdwanghaibo/roost-kit/remoteentity"
+	kitroom "github.com/tjbdwanghaibo/roost-kit/room"
+	kitsaga "github.com/tjbdwanghaibo/roost-kit/saga"
+	kitstatslog "github.com/tjbdwanghaibo/roost-kit/statslog"
 )
 
 // This compile-time list is the lifecycle gate for every infrastructure Mod
-// shipped by cube-kit. New built-ins must join it instead of relying on App's
+// shipped by roost-kit. New built-ins must join it instead of relying on App's
 // legacy unbounded Stop fallback.
 func TestBuiltInModsImplementContextStop(t *testing.T) {
 	implementations := []app.ModStopperWithContext{

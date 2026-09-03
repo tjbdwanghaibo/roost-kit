@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tjbdwanghaibo/cube-core/app"
-	"github.com/tjbdwanghaibo/cube-core/nest"
-	"github.com/tjbdwanghaibo/cube-core/worker"
+	"github.com/tjbdwanghaibo/roost-core/app"
+	"github.com/tjbdwanghaibo/roost-core/nest"
+	"github.com/tjbdwanghaibo/roost-core/worker"
 
 	"github.com/spf13/viper"
 )

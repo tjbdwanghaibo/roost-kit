@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       core_ref:
-        description: cube-core ref used by local-source integration
+        description: roost-core ref used by local-source integration
         required: false
         default: main
 
@@ -51,7 +51,7 @@ jobs:
         name: vet integration-tagged tests
         run: go vet -tags integration ./...
       - if: runner.os == 'Linux'
-        run: go run github.com/tjbdwanghaibo/cube-core/cmd/glsvet ./...
+        run: go run github.com/tjbdwanghaibo/roost-core/cmd/glsvet ./...
       - if: runner.os == 'Linux'
         run: go test -race ./...
       - if: runner.os == 'Linux'
@@ -65,29 +65,29 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          path: cube-kit
+          path: roost-kit
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: tjbdwanghaibo/cube-core
+          repository: tjbdwanghaibo/roost-core
           ref: ${{ inputs.core_ref || 'main' }}
-          path: cube-core
+          path: roost-core
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: cube-kit/go.mod
+          go-version-file: roost-kit/go.mod
           cache-dependency-path: |
-            cube-kit/go.sum
-            cube-core/go.sum
-      - working-directory: cube-kit
-        run: go mod edit -replace github.com/tjbdwanghaibo/cube-core=../cube-core
-      - working-directory: cube-kit
+            roost-kit/go.sum
+            roost-core/go.sum
+      - working-directory: roost-kit
+        run: go mod edit -replace github.com/tjbdwanghaibo/roost-core=../roost-core
+      - working-directory: roost-kit
         run: go mod verify
-      - working-directory: cube-kit
+      - working-directory: roost-kit
         run: go test ./...
-      - working-directory: cube-kit
+      - working-directory: roost-kit
         run: go vet ./...
-      - working-directory: cube-kit
-        run: go run ../cube-core/cmd/glsvet ./...
-      - working-directory: cube-kit
+      - working-directory: roost-kit
+        run: go run ../roost-core/cmd/glsvet ./...
+      - working-directory: roost-kit
         run: go test -race ./...
 
   release-hygiene:

@@ -4,9 +4,9 @@ import (
 	"testing"
 
 	"github.com/spf13/viper"
-	"github.com/tjbdwanghaibo/cube-core/app"
-	flock "github.com/tjbdwanghaibo/cube-core/lock"
-	"github.com/tjbdwanghaibo/cube-kit/mods"
+	"github.com/tjbdwanghaibo/roost-core/app"
+	flock "github.com/tjbdwanghaibo/roost-core/lock"
+	"github.com/tjbdwanghaibo/roost-kit/mods"
 )
 
 func TestLockModProvidesReentrantLockManager(t *testing.T) {
