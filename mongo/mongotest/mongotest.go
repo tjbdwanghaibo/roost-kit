@@ -1,28 +1,19 @@
-// Package mongofake is an in-memory fmongo.IMongo that actually evaluates
-// filters, updates and unique indexes.
+// Package mongotest is a filter-evaluating in-memory MongoDB for tests.
 //
-// Why it exists: every kit package used to hand-roll its own ICollection stub
-// whose Find/Update methods recorded the filter and returned whatever the test
-// had preloaded. Those stubs cannot tell a correct query from a wrong one, so
-// the mechanisms that carry roost's correctness — projection version CAS, saga
-// step lease CAS, command receipt dedup, remote-entity version CAS, effect
-// inbox idempotency — were all invisible to the unit tests. A filter that
-// names the wrong field, drops a condition or inverts a comparison passed
-// every one of them.
+// It is exported — rather than internal to the kit — because a test double
+// that does not evaluate its filters is worse than none: it makes every
+// version CAS, lease predicate, unique-index conflict and tombstone guard
+// pass unconditionally, so the semantics those constructs exist to enforce go
+// untested. Business repositories and roost-service need the same double the
+// kit's own tests use, and hand-rolled copies reliably get it wrong (comparing
+// with fmt.Sprint, encoding documents with encoding/json instead of bson, or
+// returning nil from Pipeline so the production read path never executes).
 //
-// This fake models a collection instead of a canned answer: documents live in
-// a map keyed by _id, queries are evaluated against them, updates mutate them,
-// and `_id`/unique-index collisions return fmongo.ErrDuplicateKey. Tests
-// therefore assert on observable storage behaviour rather than on the shape of
-// a recorded filter.
-//
-// Deliberately supported (exactly what kit's production code emits — verified
-// by inventory, not guessed): equality, $and, $or, $gt, $gte, $lt, $lte, $ne,
-// $exists, $in for filters; $set, $unset, $inc, whole-document replacement and
-// the `[{$replaceWith: doc}]` pipeline for updates. Anything else fails loudly
-// rather than silently matching, so an unsupported operator can never be
-// mistaken for a passing assertion.
-package mongofake
+// The contract that makes it trustworthy: an unsupported construct returns
+// ErrUnsupported instead of silently matching, scalars round-trip through the
+// real bson codec rather than hand-written widening rules, and
+// WithTransaction snapshots every collection so an abort really rolls back.
+package mongotest
 
 import (
 	"context"
