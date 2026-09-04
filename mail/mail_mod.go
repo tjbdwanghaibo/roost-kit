@@ -36,8 +36,11 @@ func NewMod(broadcast Deliverer, reporter servicemetrics.Reporter) *Mod {
 	return &Mod{broadcast: broadcast, metrics: reporter}
 }
 
-// Name implements app.Mod.
-func (m *Mod) Name() app.ModName { return servicemods.ModMail }
+// Name implements app.Mod. It returns the generated CapabilityName rather
+// than a second literal: the owning Mod and the client Mod must publish the
+// same name for the two to be mutually exclusive, and the generated constant
+// is where that name is derived from the interface's marker.
+func (m *Mod) Name() app.ModName { return CapabilityName }
 
 // DependsOn implements app.ModDependencyProvider.
 func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
@@ -94,7 +97,17 @@ func (m *Mod) Provide(r *app.Registry) error {
 		return fmt.Errorf("mail mod: %w", err)
 	}
 	m.service = service
-	return mods.RegisterAll(r, mods.Capability{Name: servicemods.ModMail, Value: service})
+	// Two capabilities, from one generated call so they cannot be published
+	// apart: the interface every consumer looks up, and the owner-only name
+	// the Server looks up to know this process holds the implementation.
+	//
+	// Both are the wrapped interface — NOT *Service. That is what lets a
+	// caller be written once and deployed either way: ClientMod registers a
+	// client under the same consumer-facing name, so app.Lookup[Mail] resolves
+	// in both processes. A capability published as a concrete type binds every
+	// consumer to "mail runs here", which is the opposite of the deployment
+	// freedom this repository claims.
+	return mods.RegisterAll(r, OwnerCapabilities(service)...)
 }
 
 // Start implements app.Mod. Nothing to start.

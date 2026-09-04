@@ -52,6 +52,19 @@ const (
 	CodeLeaseExpired   int32 = 570108
 	CodeRangeInvalid   int32 = 570109
 	CodeConflict       int32 = 570110
+	// CodeRequestInvalid reports a request this service could not even read:
+	// a wire frame that failed to decode. The generated transport needs one
+	// coded error for that, and answering it with CodeInternal would report a
+	// caller's malformed request as a server fault.
+	//
+	// It is 570125, not 570111 — the next free-LOOKING number — because
+	// 570111 through 570124 are RETIRED rather than free. 570111 was a
+	// catch-all "store failed" that was removed; 570112 through 570124 were
+	// the activity codes, which moved to package activity's own segment when
+	// that service was split out of this one. Every one of those numbers
+	// meant something in a shipped release, and a code that comes back
+	// meaning something else is worse than a hole a comment explains.
+	CodeRequestInvalid int32 = 570125
 )
 
 var (
@@ -74,6 +87,10 @@ var (
 
 	ErrRangeInvalid = errcode.Define(CodeRangeInvalid, "global: range is invalid", "")
 	ErrConflict     = errcode.Define(CodeConflict, "global: conflict", "")
+	// ErrRequestInvalid reports a request that could not be decoded. The
+	// generated transport returns it for a frame it cannot read, which is the
+	// one refusal the transport itself has to be able to make.
+	ErrRequestInvalid = errcode.Define(CodeRequestInvalid, "global: request is invalid", "")
 )
 
 // MaxPageSize bounds a listing, and cannot be bypassed with a zero limit.

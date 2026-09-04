@@ -52,7 +52,7 @@ func TestAMissingBroadcastDelivererIsAllowedAndRefusesBroadcasts(t *testing.T) {
 	h := newHarness(t, func(cfg *Config) { cfg.Broadcast = nil })
 	_, err := h.service.Send(context.Background(), SendRequest{
 		Audience: AudienceBroadcast, Subject: "maintenance",
-		ExpiresIn: time.Hour, RequestID: "send-1",
+		ExpiresInSeconds: 3600, RequestID: "send-1",
 	})
 	if !errors.Is(err, ErrAudienceInvalid) {
 		t.Fatalf("a broadcast with no deliverer produced %v, want ErrAudienceInvalid; "+

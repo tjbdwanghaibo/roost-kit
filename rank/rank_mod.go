@@ -39,7 +39,12 @@ func NewMod(reporter servicemetrics.Reporter) *Mod {
 }
 
 // Name implements app.Mod.
-func (m *Mod) Name() app.ModName { return servicemods.ModRank }
+// Name implements app.Mod. It returns the generated CapabilityName, so the
+// Mod's name and the capability it publishes are one fact rather than two
+// literals — the app orders Mods by name and the registry keys on the
+// capability, and a divergence would have them disagree about which Mod owns
+// what.
+func (m *Mod) Name() app.ModName { return CapabilityName }
 
 // DependsOn implements app.ModDependencyProvider: the Redis capability has to
 // exist before Provide runs.
@@ -69,7 +74,10 @@ func (m *Mod) Provide(r *app.Registry) error {
 		return fmt.Errorf("rank mod: %w", err)
 	}
 	m.store = store
-	return mods.RegisterAll(r, mods.Capability{Name: servicemods.ModRank, Value: Store(store)})
+	// Two capabilities, from one generated call so they cannot be published
+	// apart: the interface every consumer looks up, and the owner-only name
+	// the Server looks up to know this process holds the implementation.
+	return mods.RegisterAll(r, OwnerCapabilities(store)...)
 }
 
 // Start implements app.Mod. There is nothing to start: the store holds no

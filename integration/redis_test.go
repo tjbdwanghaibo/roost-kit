@@ -18,6 +18,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-service/chat"
 	"github.com/tjbdwanghaibo/roost-service/directory"
 	"github.com/tjbdwanghaibo/roost-service/global"
+	"github.com/tjbdwanghaibo/roost-service/global/activity"
 	"github.com/tjbdwanghaibo/roost-service/mail"
 	"github.com/tjbdwanghaibo/roost-service/match"
 	"github.com/tjbdwanghaibo/roost-service/platform"
@@ -253,7 +254,7 @@ func TestAccountRunsOnRedis(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if _, err := service.UpsertServer(ctx, account.Server{ID: 1, Name: "s1", Status: account.ServerOpen}); err != nil {
+	if _, err := service.UpsertServer(ctx, account.GameServer{ID: 1, Name: "s1", Status: account.ServerOpen}); err != nil {
 		t.Fatal(err)
 	}
 	acct, err := service.Login(ctx, account.Identity{Channel: "store", OpenID: "u1", Credential: "good"})
@@ -306,7 +307,7 @@ func TestAccountSlotExcludesAnAccountRacingItselfOnRedis(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, err := service.UpsertServer(ctx, account.Server{ID: 1, Name: "s1", Status: account.ServerOpen}); err != nil {
+	if _, err := service.UpsertServer(ctx, account.GameServer{ID: 1, Name: "s1", Status: account.ServerOpen}); err != nil {
 		t.Fatal(err)
 	}
 	acct, err := service.Login(ctx, account.Identity{Channel: "store", OpenID: "u1", Credential: "good"})
@@ -459,7 +460,7 @@ func TestChatRunsOnRedis(t *testing.T) {
 // --- global ---
 
 func TestGlobalRunsOnRedis(t *testing.T) {
-	stores, err := global.NewRedisStores(client(t), prefix(t, "global"), 30*time.Minute)
+	stores, err := global.NewRedisStores(client(t), prefix(t, "global"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -623,7 +624,7 @@ func TestMailRunsOnRedis(t *testing.T) {
 	sent, err := service.Send(ctx, mail.SendRequest{
 		Audience: mail.AudienceDirect, Recipients: []int64{7},
 		Subject: "reward", Attachment: []byte("100 gold"),
-		ExpiresIn: time.Hour, RequestID: "req-1",
+		ExpiresInSeconds: 3600, RequestID: "req-1",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -656,6 +657,11 @@ var everyNamespace = []string{
 	":chat:ch:",
 	":directory:name:",
 	":global:route:", ":global:lease:",
+	// activity was part of global until the transport generator made the
+	// packaging visible; these six namespaces were never covered here while
+	// they sat under the global prefix and nothing drove them.
+	":activity:act:", ":activity:part:", ":activity:req:",
+	":activity:audit:", ":activity:disp:", ":activity:win:",
 	":mail:env:", ":mail:box:", ":mail:send:",
 	":match:queue:",
 	":platform:order:",
@@ -739,7 +745,7 @@ func driveEveryPackage(t *testing.T, c fredis.IRedis, root string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := acctSvc.UpsertServer(ctx, account.Server{ID: 1, Name: "s1", Status: account.ServerOpen}); err != nil {
+	if _, err := acctSvc.UpsertServer(ctx, account.GameServer{ID: 1, Name: "s1", Status: account.ServerOpen}); err != nil {
 		t.Fatal(err)
 	}
 	acct, err := acctSvc.Login(ctx, account.Identity{Channel: "store", OpenID: "u1", Credential: "good"})
@@ -788,7 +794,7 @@ func driveEveryPackage(t *testing.T, c fredis.IRedis, root string) {
 	}
 
 	// global: routes and leases.
-	globalStores, err := global.NewRedisStores(c, root+":global", 30*time.Minute)
+	globalStores, err := global.NewRedisStores(c, root+":global")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -800,6 +806,43 @@ func driveEveryPackage(t *testing.T, c fredis.IRedis, root string) {
 		t.Fatal(err)
 	}
 	if _, err := globalSvc.AcquireLease(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+
+	// activity: activities, participants, the request ledger, notify audits,
+	// dispatches, and the group's pending window.
+	//
+	// All six namespaces need writing, and getting there means driving the
+	// activity to completion rather than just opening one: the dispatch
+	// records only exist once an aggregation finished, and the audit log only
+	// once a notify was refused. That is the point of the walk — a namespace
+	// nothing drives is a namespace this test cannot speak for.
+	actStores, err := activity.NewRedisStores(c, root+":activity", 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actSvc, err := activity.New(activity.Config{
+		Activities: actStores.Activities, Participants: actStores.Participants,
+		Ledger: actStores.Ledger, Audits: actStores.Audits,
+		Dispatches: actStores.Dispatches, Windows: actStores.Windows,
+		ReservationTTL: 30 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actKey := activity.Key{GroupID: "group-a", ActivityID: "act-1", Phase: activity.PhaseSettle}
+	if _, err := actSvc.OpenActivity(ctx, actKey, []int32{7}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := actSvc.ApplyProgress(ctx, actKey, "p1", "r1", activity.ProgressDelta{Score: 10}); err != nil {
+		t.Fatal(err)
+	}
+	// A game that is not expected by this activity: refused, and the refusal
+	// writes the audit. It is the only way an audit record comes into being.
+	if _, err := actSvc.NotifyPhase(ctx, actKey, 99); err == nil {
+		t.Fatal("a notification from an unexpected game server was accepted")
+	}
+	if _, err := actSvc.NotifyPhase(ctx, actKey, 7); err != nil {
 		t.Fatal(err)
 	}
 
@@ -818,7 +861,7 @@ func driveEveryPackage(t *testing.T, c fredis.IRedis, root string) {
 	}
 	if _, err := mailSvc.Send(ctx, mail.SendRequest{
 		Audience: mail.AudienceDirect, Recipients: []int64{1}, Subject: "s",
-		ExpiresIn: time.Hour, RequestID: "r1",
+		ExpiresInSeconds: 3600, RequestID: "r1",
 	}); err != nil {
 		t.Fatal(err)
 	}

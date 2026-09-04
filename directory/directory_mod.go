@@ -87,7 +87,7 @@ func (m *Mod) Provide(r *app.Registry) error {
 		return fmt.Errorf("directory mod: %w", err)
 	}
 	m.directory = dir
-	return mods.RegisterAll(r, mods.Capability{Name: servicemods.ModDirectory, Value: dir})
+	return mods.RegisterAll(r, mods.Capability{Name: m.Name(), Value: dir})
 }
 
 // Start implements app.Mod. Nothing to start.

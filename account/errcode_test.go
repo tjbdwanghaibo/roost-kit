@@ -21,7 +21,7 @@ import (
 const (
 	segmentFirst     = 560101
 	segmentLast      = 560199
-	segmentAllocated = 13
+	segmentAllocated = 14
 )
 
 // internalReason is what errcode.ClientError returns for anything it cannot
@@ -43,6 +43,7 @@ var codedSentinels = map[int32]error{
 	CodeSessionInvalid:  ErrSessionInvalid,
 	CodeRangeInvalid:    ErrRangeInvalid,
 	CodeConflict:        ErrConflict,
+	CodeRequestInvalid:  ErrRequestInvalid,
 }
 
 // Every sentinel this package returns must carry its own code.

@@ -1,14 +1,16 @@
-package global
+package activity
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/tjbdwanghaibo/roost-core/errcode"
+	"github.com/tjbdwanghaibo/roost-kit/versionstore"
 )
 
-// This file is the cross-server activity coordination half of the package:
+// Package activity is the cross-server activity coordination service:
 // aggregating a phase advance (close, settle, ...) across the game servers
 // that take part in one activity, the per-participant progress those servers
 // report, and the delivery of the aggregated result back to them.
@@ -38,87 +40,143 @@ import (
 //
 // One further rule from that document shapes the API more than anything else:
 // "活动开关和阶段推进由各 game 根据本服业务时间线通知，global 不按自身 CloseAt
-// 主动驱动活动时间线" — global never advances an activity from its own clock.
-// So an activity opens in ActivityPending and stays there indefinitely; only a
-// game's notification starts the grace window, and the sweep that back-stops
-// the aggregation can only finish a window a game already started.
+// 主动驱动活动时间线" — this service never advances an activity from its own
+// clock. So an activity opens in StatusPending and stays there indefinitely;
+// only a game's notification starts the grace window, and the sweep that
+// back-stops the aggregation can only finish a window a game already started.
+//
+// It lived inside package global until the transport generator made the
+// packaging visible: global publishes two capabilities and app.Service is one
+// per process, so routing/leases and activity coordination were always two
+// deployments sharing one Go package. They share no type and no store.
 
-// Activity error codes. The block in types.go ends at 570111 and this one
-// continues from there, written out rather than derived with iota so a code is
-// a fact about the wire and not a fact about the order of const specs.
+// Error codes.
+//
+// Written out rather than derived with iota so a code is a fact about the wire
+// and not a fact about the order of const specs.
+//
+// This package has its own segment. It shared global's when it lived inside
+// it, and that sharing left a hole at 570111 that global's segment test had to
+// carry as a documented exception — an exception that existed only because two
+// services were numbering out of one range.
 const (
-	CodeActivityInvalid    int32 = 570112
-	CodeActivityMissing    int32 = 570113
-	CodeActivityExists     int32 = 570114
-	CodeActivityStatus     int32 = 570115
-	CodeNotifyUnexpected   int32 = 570116
-	CodeNotifyLate         int32 = 570117
-	CodeActivityBacklog    int32 = 570118
-	CodeParticipantInvalid int32 = 570119
-	CodeRequestInvalid     int32 = 570120
-	CodeDispatchMissing    int32 = 570121
-	CodeDispatchToken      int32 = 570122
-	CodeDispatchExhausted  int32 = 570123
-	CodeDispatchNotDue     int32 = 570124
+	// CodeOK is the absence of an error.
+	CodeOK int32 = 0
+
+	CodeInvalid            int32 = 620101
+	CodeMissing            int32 = 620102
+	CodeExists             int32 = 620103
+	CodeStatus             int32 = 620104
+	CodeNotifyUnexpected   int32 = 620105
+	CodeNotifyLate         int32 = 620106
+	CodeBacklog            int32 = 620107
+	CodeParticipantInvalid int32 = 620108
+	CodeRequestInvalid     int32 = 620109
+	CodeDispatchMissing    int32 = 620110
+	CodeDispatchToken      int32 = 620111
+	CodeDispatchExhausted  int32 = 620112
+	CodeDispatchNotDue     int32 = 620113
+	// CodeRangeInvalid and CodeConflict were global's when this package lived
+	// inside it. They are declared here now, in this package's own segment,
+	// because a package that borrows another's codes has two owners for one
+	// number — and the segment tests in each package would each have to know
+	// about the other's holes.
+	CodeRangeInvalid int32 = 620114
+	CodeConflict     int32 = 620115
 )
 
 var (
-	ErrActivityInvalid = errcode.Define(CodeActivityInvalid, "global: activity request is invalid", "")
-	ErrActivityMissing = errcode.Define(CodeActivityMissing, "global: activity not found", "")
-	ErrActivityExists  = errcode.Define(CodeActivityExists, "global: activity already open", "")
-	// ErrActivityStatus reports that the activity is not in a status the
+	ErrInvalid = errcode.Define(CodeInvalid, "activity: request is invalid", "")
+	ErrMissing = errcode.Define(CodeMissing, "activity: not found", "")
+	ErrExists  = errcode.Define(CodeExists, "activity: already open", "")
+	// ErrStatus reports that the activity is not in a status the
 	// operation applies to — a notify or a progress apply against an
 	// aggregation that already completed. It is distinct from ErrNotifyLate so
 	// an operator can tell "the window closed while you were away" from "the
 	// result was already dispatched".
-	ErrActivityStatus = errcode.Define(CodeActivityStatus, "global: activity is not in a status that allows this", "")
+	ErrStatus = errcode.Define(CodeStatus, "activity: is not in a status that allows this", "")
 	// ErrNotifyUnexpected reports a notification from a game server that is
 	// not in the activity's expected set. The expected set is fixed when the
 	// activity opens and is never taken from a notify, because an aggregation
 	// whose membership can be widened by the notification itself can always be
 	// completed by whoever notifies last.
-	ErrNotifyUnexpected = errcode.Define(CodeNotifyUnexpected, "global: notifying game is not expected by this activity", "")
+	ErrNotifyUnexpected = errcode.Define(CodeNotifyUnexpected, "activity: notifying game is not expected by this activity", "")
 	// ErrNotifyLate reports a notification that arrived after the grace
 	// deadline. Accepting it would make the aggregated result depend on
 	// whether the sweep happened to have run yet, so the same interleaving
 	// would produce different results on different days.
-	ErrNotifyLate = errcode.Define(CodeNotifyLate, "global: notification arrived after the grace window closed", "")
-	// ErrActivityBacklog reports that the group's pending window is full.
+	ErrNotifyLate = errcode.Define(CodeNotifyLate, "activity: notification arrived after the grace window closed", "")
+	// ErrBacklog reports that the group's pending window is full.
 	// Refusing to open is deliberate: the window is what the sweep scans, so
 	// an activity that is not in it would never be back-stopped, and silently
 	// opening one outside the window would trade a loud refusal for a
 	// permanently stranded aggregation.
-	ErrActivityBacklog = errcode.Define(CodeActivityBacklog, "global: pending activity window is full", "")
+	ErrBacklog = errcode.Define(CodeBacklog, "activity: pending activity window is full", "")
 
-	ErrParticipantInvalid = errcode.Define(CodeParticipantInvalid, "global: participant is invalid", "")
+	ErrParticipantInvalid = errcode.Define(CodeParticipantInvalid, "activity: participant is invalid", "")
 	// ErrRequestInvalid reports a malformed idempotency key, or one that was
 	// reserved for a different delta. Reusing a request id for different
 	// arguments cannot be resolved by applying either of them, and applying
 	// both is the double count this ledger exists to prevent.
-	ErrRequestInvalid = errcode.Define(CodeRequestInvalid, "global: progress request is invalid", "")
+	ErrRequestInvalid = errcode.Define(CodeRequestInvalid, "activity: progress request is invalid", "")
 
-	ErrDispatchMissing = errcode.Define(CodeDispatchMissing, "global: dispatch not found", "")
+	ErrDispatchMissing = errcode.Define(CodeDispatchMissing, "activity: dispatch not found", "")
 	// ErrDispatchToken reports an ACK that did not present the token the
 	// dispatch was delivered with. It never echoes the expected token: the
 	// token is the whole authorization, so a wrong guess must not teach the
 	// caller the right one.
-	ErrDispatchToken = errcode.Define(CodeDispatchToken, "global: dispatch ack token does not match", "")
+	ErrDispatchToken = errcode.Define(CodeDispatchToken, "activity: dispatch ack token does not match", "")
 	// ErrDispatchExhausted reports a dispatch whose attempt budget is spent.
 	// It is terminal on purpose. Quietly accepting an ACK after the budget was
 	// spent would erase the evidence that delivery to that game never worked,
 	// which is precisely the class of silent path the design constraints call
 	// out as able to survive for years.
-	ErrDispatchExhausted = errcode.Define(CodeDispatchExhausted, "global: dispatch attempts are exhausted", "")
-	ErrDispatchNotDue    = errcode.Define(CodeDispatchNotDue, "global: dispatch is not due for another attempt", "")
+	ErrDispatchExhausted = errcode.Define(CodeDispatchExhausted, "activity: dispatch attempts are exhausted", "")
+	ErrDispatchNotDue    = errcode.Define(CodeDispatchNotDue, "activity: dispatch is not due for another attempt", "")
+
+	ErrRangeInvalid = errcode.Define(CodeRangeInvalid, "activity: range is invalid", "")
+	// ErrConflict is what compare-and-set exhaustion under contention reaches
+	// a caller as. It is retryable, which is why it is not CodeInternal.
+	ErrConflict = errcode.Define(CodeConflict, "activity: conflict", "")
 )
 
-// ActivityCode maps an activity error to its code.
+// Error maps an error to the code and reason a client sees.
 //
-// It delegates to global.Code, which covers this package's route, lease and
-// activity sentinels alike — they share one code segment and one error
-// vocabulary, so two mapping functions would be two places for a new sentinel
-// to be forgotten in. It stays for the callers that named it.
-func ActivityCode(err error) int32 { return Code(err) }
+// It matches roost-kit's servicerpc.Error convention, which is what an RPC
+// envelope is filled from.
+//
+// It is short because the sentinels carry their own codes: errcode.ClientError
+// finds the code through any depth of fmt.Errorf wrapping, so there is no
+// per-sentinel table here to keep in step with the block above.
+//
+// Two behaviours are relied on rather than incidental:
+//
+//   - When an error wraps two coded errors with "%w: %w", the FIRST one wins.
+//     That is what makes a refusal which wraps a caller's own reason report
+//     the refusal, which is what the client has to be told.
+//   - An error this package cannot classify reports errcode.CodeInternal, not
+//     a code of its own. Answering "the store failed" for an unclassified bug
+//     is a guess presented as a diagnosis.
+func Error(err error) (int32, string) {
+	if err == nil {
+		return CodeOK, ""
+	}
+	// versionstore.ErrConflict is a FOREIGN sentinel: it belongs to roost-kit
+	// and carries no code of this package's, so errcode.ClientError would
+	// report it as CodeInternal. Compare-and-set exhaustion under contention
+	// is a real, retryable outcome a caller can act on, and "server error" is
+	// not an answer it can act on — so it is mapped deliberately here.
+	if errors.Is(err, versionstore.ErrConflict) {
+		return errcode.ClientError(ErrConflict)
+	}
+	return errcode.ClientError(err)
+}
+
+// Code is Error without the reason, for callers that only switch on the code.
+func Code(err error) int32 {
+	code, _ := Error(err)
+	return code
+}
 
 // Bounds. Every one of these is a bound a zero value cannot bypass: a limit of
 // zero is an error rather than "unlimited", and a size a caller controls is
@@ -128,6 +186,10 @@ const (
 	// dispatch fan-out and the per-activity dispatch scan, so those need no
 	// separate limit.
 	MaxExpectedGames = 64
+
+	// MaxPageSize bounds a listing, and cannot be bypassed with a zero limit:
+	// a limit of zero is an error rather than "unlimited".
+	MaxPageSize = 200
 
 	// MaxPendingActivities bounds one group's pending window. The window is
 	// the only enumerable index of activities that are not finished, so it is
@@ -157,59 +219,70 @@ const (
 	MaxRequestIDLen = 128
 )
 
-// ActivityPhase is which cross-server advance an aggregation is for. "close"
+// Phase is which cross-server advance an aggregation is for. "close"
 // and "settle" are the ones the boundary document names; the type is a string
 // because which phases exist is a game concept and baking an enum in here
 // would make every new phase a change to this package.
-type ActivityPhase string
+type Phase string
 
 const (
-	PhaseClose  ActivityPhase = "close"
-	PhaseSettle ActivityPhase = "settle"
+	PhaseClose  Phase = "close"
+	PhaseSettle Phase = "settle"
 )
 
-// ActivityKey is the aggregation key: one activity instance, one phase, within
+// Key is the aggregation key: one activity instance, one phase, within
 // one coordination group. The group is part of the key because the pending
 // window a sweep scans is per group, and a sweep must not be able to reach
 // activities outside the group it was asked about.
-type ActivityKey struct {
-	GroupID    string        `json:"group_id"`
-	ActivityID string        `json:"activity_id"`
-	Phase      ActivityPhase `json:"phase"`
+type Key struct {
+	GroupID    string `json:"group_id"`
+	ActivityID string `json:"activity_id"`
+	Phase      Phase  `json:"phase"`
 }
 
-func (k ActivityKey) Validate() error {
+func (k Key) Validate() error {
 	if strings.TrimSpace(k.GroupID) == "" {
-		return fmt.Errorf("%w: group id is empty", ErrActivityInvalid)
+		return fmt.Errorf("%w: group id is empty", ErrInvalid)
 	}
 	if strings.TrimSpace(k.ActivityID) == "" {
-		return fmt.Errorf("%w: activity id is empty", ErrActivityInvalid)
+		return fmt.Errorf("%w: activity id is empty", ErrInvalid)
 	}
 	if len(k.ActivityID) > MaxActivityIDLen {
-		return fmt.Errorf("%w: activity id is %d bytes, limit %d", ErrActivityInvalid, len(k.ActivityID), MaxActivityIDLen)
+		return fmt.Errorf("%w: activity id is %d bytes, limit %d", ErrInvalid, len(k.ActivityID), MaxActivityIDLen)
 	}
 	if strings.TrimSpace(string(k.Phase)) == "" {
-		return fmt.Errorf("%w: phase is empty", ErrActivityInvalid)
+		return fmt.Errorf("%w: phase is empty", ErrInvalid)
 	}
 	if len(k.Phase) > MaxActivityIDLen {
-		return fmt.Errorf("%w: phase is %d bytes, limit %d", ErrActivityInvalid, len(k.Phase), MaxActivityIDLen)
+		return fmt.Errorf("%w: phase is %d bytes, limit %d", ErrInvalid, len(k.Phase), MaxActivityIDLen)
 	}
 	// A separator that can appear inside a component would let two different
 	// keys render to one store key, which is a cross-activity write.
 	for _, part := range []string{k.GroupID, k.ActivityID, string(k.Phase)} {
 		if strings.Contains(part, "/") {
-			return fmt.Errorf("%w: key components must not contain '/'", ErrActivityInvalid)
+			return fmt.Errorf("%w: key components must not contain '/'", ErrInvalid)
 		}
 	}
 	return nil
 }
 
 // String renders the key for messages and for a backend KeyFunc.
-func (k ActivityKey) String() string {
+// Group is the routing key for every call about this activity.
+//
+// It exists as a method rather than being read off the GroupID field because
+// the generated transport's affinity marker takes a parameter or a no-argument
+// method on one, and because naming it makes the reason legible: a group's
+// pending window is ONE versioned entry, so every activity in a group commits
+// through the same compare-and-set. Routing a group's traffic to one instance
+// keeps that contention inside one process instead of spreading it across
+// replicas — the same reason match routes by queue.
+func (k Key) Group() string { return k.GroupID }
+
+func (k Key) String() string {
 	return k.GroupID + "/" + k.ActivityID + "/" + string(k.Phase)
 }
 
-// ActivityStatus is where an aggregation is.
+// Status is where an aggregation is.
 //
 //	pending ──(first notify)──> collecting ──> complete
 //
@@ -219,12 +292,12 @@ func (k ActivityKey) String() string {
 // deadline does not even exist until a game notifies — because global driving
 // the timeline from its own clock is exactly what the boundary document
 // forbade.
-type ActivityStatus string
+type Status string
 
 const (
-	ActivityPending    ActivityStatus = "pending"
-	ActivityCollecting ActivityStatus = "collecting"
-	ActivityComplete   ActivityStatus = "complete"
+	StatusPending    Status = "pending"
+	StatusCollecting Status = "collecting"
+	StatusComplete   Status = "complete"
 )
 
 // CompletionReason says which of the two completion paths finished an
@@ -245,15 +318,15 @@ const (
 
 // Activity is one cross-server aggregation.
 type Activity struct {
-	Key ActivityKey `json:"key"`
+	Key Key `json:"key"`
 	// ExpectedGameSIDs is fixed when the activity opens. See
 	// ErrNotifyUnexpected for why it is never taken from a notify.
 	ExpectedGameSIDs []int32 `json:"expected_game_sids"`
 	// NotifiedGameSIDs is the collecting snapshot: which expected games have
 	// reported the phase. It carries no duplicates, so a redelivered
 	// notification cannot make the set look collected.
-	NotifiedGameSIDs []int32        `json:"notified_game_sids,omitempty"`
-	Status           ActivityStatus `json:"status"`
+	NotifiedGameSIDs []int32 `json:"notified_game_sids,omitempty"`
+	Status           Status  `json:"status"`
 	// GraceDeadlineUnix is zero until the first notify. Zero means "no game
 	// has reached this phase", and the sweep skips it.
 	GraceDeadlineUnix int64            `json:"grace_deadline_unix,omitempty"`
@@ -314,19 +387,19 @@ func (a Activity) clone() Activity {
 	return out
 }
 
-// ActivityResult is what gets dispatched to each game when an aggregation
+// Result is what gets dispatched to each game when an aggregation
 // finishes: the coordination outcome, not the game's own business payload.
 // MissingGameSIDs is part of it because a game settling on a grace-expired
 // aggregation needs to know it is settling on partial input.
-type ActivityResult struct {
-	Key              ActivityKey      `json:"key"`
+type Result struct {
+	Key              Key              `json:"key"`
 	Reason           CompletionReason `json:"reason"`
 	NotifiedGameSIDs []int32          `json:"notified_game_sids,omitempty"`
 	MissingGameSIDs  []int32          `json:"missing_game_sids,omitempty"`
 	CompletedAtUnix  int64            `json:"completed_at_unix"`
 }
 
-func (r ActivityResult) clone() ActivityResult {
+func (r Result) clone() Result {
 	out := r
 	out.NotifiedGameSIDs = cloneSIDs(r.NotifiedGameSIDs)
 	out.MissingGameSIDs = cloneSIDs(r.MissingGameSIDs)
@@ -334,8 +407,8 @@ func (r ActivityResult) clone() ActivityResult {
 }
 
 // result builds the dispatch payload from a completed activity.
-func (a Activity) result() ActivityResult {
-	return ActivityResult{
+func (a Activity) result() Result {
+	return Result{
 		Key:              a.Key,
 		Reason:           a.CompletionReason,
 		NotifiedGameSIDs: cloneSIDs(a.NotifiedGameSIDs),
@@ -346,8 +419,8 @@ func (a Activity) result() ActivityResult {
 
 // ParticipantKey addresses one participant's progress within one aggregation.
 type ParticipantKey struct {
-	Activity      ActivityKey `json:"activity"`
-	ParticipantID string      `json:"participant_id"`
+	Activity      Key    `json:"activity"`
+	ParticipantID string `json:"participant_id"`
 }
 
 func (k ParticipantKey) Validate() error {
@@ -392,10 +465,10 @@ func (d ProgressDelta) Validate() error {
 
 // Participant is one participant's aggregated standing in one activity.
 type Participant struct {
-	Key           ActivityKey `json:"key"`
-	ParticipantID string      `json:"participant_id"`
-	Score         int64       `json:"score"`
-	Progress      int64       `json:"progress"`
+	Key           Key    `json:"key"`
+	ParticipantID string `json:"participant_id"`
+	Score         int64  `json:"score"`
+	Progress      int64  `json:"progress"`
 
 	// AppliedRequestIDs is a bounded FIFO ring of the request ids most
 	// recently applied to this participant. It is written in the same
@@ -432,9 +505,9 @@ func (p Participant) clone() Participant {
 // request id for different participants do not collide — a global request id
 // namespace would make one game's retry cancel another's write.
 type RequestKey struct {
-	Activity      ActivityKey `json:"activity"`
-	ParticipantID string      `json:"participant_id"`
-	RequestID     string      `json:"request_id"`
+	Activity      Key    `json:"activity"`
+	ParticipantID string `json:"participant_id"`
+	RequestID     string `json:"request_id"`
 }
 
 func (k RequestKey) Validate() error {
@@ -482,7 +555,7 @@ const (
 // request rate times the TTL. The cost: a replay that arrives after the TTL is
 // indistinguishable from a new request and will apply again, so the TTL must
 // exceed the longest client retry horizon. Making that a configured duration
-// rather than a comment is why ActivityConfig.ReservationTTL must be positive.
+// rather than a comment is why Config.ReservationTTL must be positive.
 //
 // Note that expiry is never a logic gate in this package. Nothing refuses a
 // replay because its reservation "looks expired", because that would turn a
@@ -521,14 +594,14 @@ type NotifyAudit struct {
 	// can collide, and an audit that overwrote another audit would be worse
 	// than no audit at all.
 	Seq     uint64        `json:"seq"`
-	Key     ActivityKey   `json:"key"`
+	Key     Key           `json:"key"`
 	GameSID int32         `json:"game_sid"`
 	Refusal NotifyRefusal `json:"refusal"`
 	// Status is the activity's status at the moment of refusal, so the record
 	// answers "late relative to what" without a second lookup.
-	Status ActivityStatus `json:"status"`
-	AtUnix int64          `json:"at_unix"`
-	Detail string         `json:"detail,omitempty"`
+	Status Status `json:"status"`
+	AtUnix int64  `json:"at_unix"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // NotifyAuditLog is the append-only refusal log for one activity.
@@ -538,7 +611,7 @@ type NotifyAudit struct {
 // the log is full it stops accepting entries and counts them instead, so the
 // oldest evidence — when the misbehaviour started — survives a flood.
 type NotifyAuditLog struct {
-	Key     ActivityKey   `json:"key"`
+	Key     Key           `json:"key"`
 	Entries []NotifyAudit `json:"entries,omitempty"`
 	NextSeq uint64        `json:"next_seq"`
 	// Overflowed counts refusals that were audited only as this number,
@@ -557,8 +630,8 @@ func (l NotifyAuditLog) clone() NotifyAuditLog {
 // It is derived from the activity key and the game sid rather than being a
 // minted id, so a retry never has to enumerate anything to find its dispatch.
 type DispatchKey struct {
-	Activity ActivityKey `json:"activity"`
-	GameSID  int32       `json:"game_sid"`
+	Activity Key   `json:"activity"`
+	GameSID  int32 `json:"game_sid"`
 }
 
 func (k DispatchKey) String() string { return fmt.Sprintf("%s/%d", k.Activity, k.GameSID) }
@@ -586,15 +659,15 @@ const (
 // record has no way to answer "did game 7 ever process the settlement", and
 // that question is asked exactly when it can no longer be reconstructed.
 type Dispatch struct {
-	Key     ActivityKey `json:"key"`
-	GameSID int32       `json:"game_sid"`
+	Key     Key   `json:"key"`
+	GameSID int32 `json:"game_sid"`
 	// Token authorizes the ACK. It is server-minted and unguessable, and it
 	// travels with the payload, which is what makes an ACK evidence that the
 	// delivery arrived rather than a claim anyone could make about a
 	// well-known key.
-	Token  string         `json:"token"`
-	Result ActivityResult `json:"result"`
-	State  DispatchState  `json:"state"`
+	Token  string        `json:"token"`
+	Result Result        `json:"result"`
+	State  DispatchState `json:"state"`
 
 	Attempts    int `json:"attempts"`
 	MaxAttempts int `json:"max_attempts"`
@@ -627,7 +700,7 @@ func (d Dispatch) clone() Dispatch {
 	return out
 }
 
-// ActivityWindow is one group's index of activities that are not finished.
+// Window is one group's index of activities that are not finished.
 //
 // versionstore is a keyed store with no listing — deliberately, since an
 // unbounded scan is not a primitive worth offering — so the back-stop sweep
@@ -640,15 +713,15 @@ func (d Dispatch) clone() Dispatch {
 // activity record, because a window entry whose activity does not exist is
 // pruned by the next sweep, whereas an activity with no window entry would
 // never be swept and would sit at its grace deadline forever.
-type ActivityWindow struct {
-	GroupID string        `json:"group_id"`
-	Keys    []ActivityKey `json:"keys,omitempty"`
+type Window struct {
+	GroupID string `json:"group_id"`
+	Keys    []Key  `json:"keys,omitempty"`
 	// RefusedOpens counts opens rejected because the window was full — the
 	// backlog signal an operator needs to see before it turns into a stall.
 	RefusedOpens uint64 `json:"refused_opens"`
 }
 
-func (w ActivityWindow) contains(key ActivityKey) bool {
+func (w Window) contains(key Key) bool {
 	for _, existing := range w.Keys {
 		if existing == key {
 			return true
@@ -657,10 +730,10 @@ func (w ActivityWindow) contains(key ActivityKey) bool {
 	return false
 }
 
-func (w ActivityWindow) clone() ActivityWindow {
+func (w Window) clone() Window {
 	out := w
 	if len(w.Keys) > 0 {
-		out.Keys = make([]ActivityKey, len(w.Keys))
+		out.Keys = make([]Key, len(w.Keys))
 		copy(out.Keys, w.Keys)
 	}
 	return out
@@ -673,30 +746,30 @@ func (w ActivityWindow) clone() ActivityWindow {
 // that will show up again elsewhere.
 func validateExpectedGames(expected []int32) error {
 	if len(expected) == 0 {
-		return fmt.Errorf("%w: expected game set is empty", ErrActivityInvalid)
+		return fmt.Errorf("%w: expected game set is empty", ErrInvalid)
 	}
 	if len(expected) > MaxExpectedGames {
 		return fmt.Errorf("%w: expected game set has %d entries, limit %d",
-			ErrActivityInvalid, len(expected), MaxExpectedGames)
+			ErrInvalid, len(expected), MaxExpectedGames)
 	}
 	seen := make(map[int32]struct{}, len(expected))
 	for _, gameSID := range expected {
 		if gameSID <= 0 {
-			return fmt.Errorf("%w: expected game sid must be positive, got %d", ErrActivityInvalid, gameSID)
+			return fmt.Errorf("%w: expected game sid must be positive, got %d", ErrInvalid, gameSID)
 		}
 		if _, duplicate := seen[gameSID]; duplicate {
-			return fmt.Errorf("%w: game %d appears twice in the expected set", ErrActivityInvalid, gameSID)
+			return fmt.Errorf("%w: game %d appears twice in the expected set", ErrInvalid, gameSID)
 		}
 		seen[gameSID] = struct{}{}
 	}
 	return nil
 }
 
-// validateActivityLimit is the shared bound for every listing and sweep here.
+// validateLimit is the shared bound for every listing and sweep here.
 // A non-positive limit is an error and never means unlimited, which is design
 // constraint 7 and the reason it cannot be bypassed by leaving the field at
 // its zero value.
-func validateActivityLimit(limit int) error {
+func validateLimit(limit int) error {
 	if limit <= 0 {
 		return fmt.Errorf("%w: limit must be positive, got %d", ErrRangeInvalid, limit)
 	}
@@ -764,8 +837,8 @@ func appendBounded(ring []string, value string, max int) []string {
 	return append(next, value)
 }
 
-// sortActivityKeys gives the sweep a deterministic order, so which activities
+// sortKeys gives the sweep a deterministic order, so which activities
 // a bounded sweep picks does not depend on map iteration or store internals.
-func sortActivityKeys(keys []ActivityKey) {
+func sortKeys(keys []Key) {
 	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
 }

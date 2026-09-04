@@ -191,16 +191,104 @@
 - `directory` 此前**只有 sentinel、零 code**——"这个名字被占了"这种最日常的拒绝
   一路以 "server error" 到达客户端。现在分配了 530101-530106 段。
 
-- `global` 的段里留下一个**刻意的洞 570111**（原兜底码的位置）。活动码没有向下
-  重编号：它们在已发布版本里是**可观测的**（`ActivityCode` 的手写 switch 真的会
-  返回 570112 起），改值会破坏按码匹配的客户端。一个有文档的洞比一个静默移位的码
-  代价小，而且 570111 不再复用——一个曾经意味着"存储失败"的码，改成别的含义比留
-  着空档更坏。
+- `global` 的段里留下一个**刻意的洞 570111**（原兜底码的位置）。570111 至今不复用
+  ——一个曾经意味着"存储失败"的码，改成别的含义比留着空档更坏。
+
+  **后续更正**：那个洞完全是两个服务从一个号段里发号造成的。`global/activity` 拆成
+  独立包后带走了自己的 5701xx 号段并重编到 6201xx（见下），两边各自连续。原先写在
+  这里的"活动码不向下重编号，因为已发布版本里可观测"这条理由**没有被推翻，而是被
+  一个更大的破坏性变更吸收了**：拆包本身就是 `global.ActivityService` →
+  `activity.Service`，本来就需要一个大版本，而在一个大版本里改号是可以写进迁移说明
+  的；把一个老号悄悄换成新含义不行，因为按码匹配的客户端拿到的是**错的答案而不是
+  一个错误**。所以 570111–570124 整段作废，`global` 新增的 `CodeRequestInvalid` 取
+  570125 而不是看起来空着的 570111。
 
 - 八条变异验证。其中一条一度是绿的，原因值得记：我用"返回最内层 code"去变异优先级，
   但 `fmt.Errorf` 双 `%w` 返回的是 `Unwrap() []error`，`errors.Unwrap` 对它返回
   nil，所以那个变异是空操作。优先级并非我的代码实现的——**确立它的是 `chat.denied`
   的 wrap 顺序**（`%w: %w`，拒绝在前）。改那个顺序才真的变红。
+
+### 跨进程传输层（`servicerpc` 生成器）
+
+- **九个服务各有一个手写接口 + 一份生成的传输层**（`directory` 故意没有：它是被
+  `account` 嵌入的原语，不是服务）。生成的东西：线上类型、handler 注册、打字的
+  client、`Server`、`ClientMod`、capability 包装。从**接口本身**生成，所以漂移是
+  结构上不可能，而不是被检测到。
+
+- Mod 发布的不再是具体类型，而是 `OwnerCapabilities(service)` 返回的两个
+  capability：调用方查的接口名，以及 `Server` 用来判断"本进程是不是拥有者"的
+  owner-only 名（公开名 + `.local`）。
+
+- 接口刻意比进程内 API 小，每个省略都有理由（对照表见 README）。三处值得单记：
+
+  - `platform.ValidateSession` **没有 ctx**。这不是签名疏漏——它不做任何 I/O，只用
+    本进程已有的密钥重算一个 MAC。生成器要求首参是 `context.Context`，于是这个方法
+    自动落在接口外，而这个"限制"恰好是对的：一个什么都不碰的方法没有理由是一次往返。
+  - `chat.ChannelRef` 的 key 字段是**未导出的**（故意的：ref 只能来自 `Resolve`），
+    所以它根本过不了总线——任何 codec 都会静默丢掉 key，对面拿到的 ref 指向空。
+    生成器按"未导出字段"这条规则点名拒绝，并指出是 `ref.key`。
+  - `chat.PublishSystem` **在**接口里。关于信任的判断没有任何一部分上线：请求不带
+    令牌，令牌由拥有者进程的 `SystemAuthenticator` 从 handler 自己 ctx 里的传输身份
+    铸出。总线情形因此 **fail closed**——总线不带可背书的调用方身份时签不出令牌，
+    直接 `ErrSystemDenied`。缺一块拼图产生的是拒绝而不是许可，这正是被删掉的
+    `Trusted` bool 搞反的那件事。
+
+- 每个服务手写一个 `run(ctx)` 钩子，"没有周期性工作"也要显式写出来。写下来之后
+  `match`/`session`/`platform`/`chat`/`global/activity` 五个答"有"，
+  `rank`/`account`/`global` 三个答"没有"，而且答"没有"的理由各不相同（README 有表）。
+
+- **`global` 拆成 `global/` + `global/activity/`（破坏性）。** 触发它的是生成器新增的
+  "一个包只能有一个 `//roost:rpc` 接口"规则：生成文件在包级别声明十几个固定名字，
+  两份就是每个都声明两次。而这条规则只是把一件早就成立的事说出来——`app.Service`
+  每进程一个，所以 `global` 那两个 capability 从来就是两个独立部署的东西。
+  两者**不共享任何类型、任何 store**（拆的时候确认过：活动侧一个 routing 符号都没用）。
+  变化：`global.ActivityService` → `activity.Service`、`ActivityKey` → `activity.Key`
+  等去掉 stutter 的重命名；配置段 `global:` → `activity:`；错误码 5701xx → 6201xx；
+  各自一个 Mod，于是"Mod 叫什么"和"它发布什么"重新变成一件事。
+
+- **两条新的包级拒绝规则**（都由真实事故推出来，见 roost-codegen CHANGELOG）：生成名
+  与包内已有声明撞名（`account` 的 `type Server struct` 撞生成的进程壳 `Server`，
+  已重命名为 `GameServer`）；一个包两个被标记的接口。
+
+### 构建与生成
+
+- **go 指令 1.25.0 → 1.27.0**，与 core / kit / codegen 和 `go.work` 统一。取 1.27.0
+  而不是最新的 1.27.1：补丁级的 go 指令什么都买不到，还会让停在 1.27.0 的工具链去下载
+  一个新的。`go mod tidy` 顺带纠正了两处旧标注——`spf13/viper` 与 `roost-core` 从
+  `// indirect` 改为直接依赖，各 Mod 的 `Init(cfg *viper.Viper)` 与 core 的
+  `app`/`errcode` 一直在直接用它们。
+
+- **`roost-codegen` v1.12.0 接成 tool 依赖**（`tool
+  github.com/tjbdwanghaibo/roost-codegen/cmd/servicerpc`），于是 `GOWORK=off` 发布态下
+  `go generate ./...` 也能跑——此前只有 workspace 里能重新生成，提交的生成物是唯一
+  可信来源，而"生成物是否与接口一致"在发布态无法验证。九个包现在都报 `up to date`。
+
+  代价很小：go.sum 多两行（本仓只依赖 `gopkg.in/yaml.v3`，不成环、不牵扯别的东西）。
+
+  接进来时先撞到一件事：`go mod tidy` 把本仓的 go 指令从 1.25.0 顶到 **1.26.5**（
+  roost-codegen v1.12.0 的 go 指令），而且**手工按回去不管用**——下次 tidy 又顶回来。
+  也就是说一个生成器的 go 指令是每个消费方都要满足的下限。**已按"四仓统一到最新"
+  处理**：core / kit / codegen / service 与 `go.work` 全部改为 `go 1.27.0`，于是
+  tidy 稳定不再动它。这条代价记在 roost-codegen 的 CHANGELOG 里：1.25.x / 1.26.x
+  两条 consumer lane 因此没了。
+
+
+
+### 集成测试
+
+- **默认跳过。** 没有 `REDIS_ADDR` 时 `integration/` 全部 `t.Skip`，本轮因此抓到一件
+  事：`session`/`rank`/`match`/`platform` 四个包里断言**具体类型**的集成子测试
+  （`app.Lookup[*session.Service]` 之类）长期"绿着"，真的连上 Redis 那天同时红掉。
+  它们现在全部改成查接口，并新增
+  `TestEveryOwningModPublishesTheInterfaceAndNotTheImplementation`——**九个包**一起断言
+  "接口能查到、具体类型查不到"。反向变异（把 `OwnerCapabilities` 换成
+  `Value: Coordinator(service)` 这种调用点转换）确认变红：Go 存进 any 的动态类型仍是
+  `*Service`，所以调用点转换达不到这个效果，必须有包装类型。
+
+- `global/activity` 的六个 key 命名空间此前**从未被覆盖**（它们挂在 global 前缀下，
+  而没有任何测试驱动它们）。现在纳入 keyspace 走查，并且为了让六个都真的被写到，
+  测试把活动驱动到完成：dispatch 记录只在聚合结束后存在，audit 只在一次 notify 被拒
+  之后存在。逐个命名空间改名的六次变异全部变红。
 
 ### 依赖的框架能力
 

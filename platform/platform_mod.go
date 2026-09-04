@@ -49,7 +49,7 @@ func NewMod(verifier Verifier, players PlayerResolver, deliver Deliverer, report
 }
 
 // Name implements app.Mod.
-func (m *Mod) Name() app.ModName { return servicemods.ModPlatform }
+func (m *Mod) Name() app.ModName { return CapabilityName }
 
 // DependsOn implements app.ModDependencyProvider.
 func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
@@ -134,15 +134,18 @@ func (m *Mod) Provide(r *app.Registry) error {
 		return fmt.Errorf("platform mod: %w", err)
 	}
 	m.service = service
-	return mods.RegisterAll(r, mods.Capability{Name: servicemods.ModPlatform, Value: service})
+	// Two capabilities, from one generated call so they cannot be published
+	// apart: the interface consumers look up, and the owner-only name the
+	// Server looks up to know this process holds the implementation.
+	return mods.RegisterAll(r, OwnerCapabilities(service)...)
 }
 
 // Start implements app.Mod.
 //
-// Nothing is started. Orders whose delivery failed are retried by
-// AttemptDelivery, which the caller drives — the retry cadence is a
-// deployment decision, and a payment retry loop nobody can see is worse than
-// none.
+// Nothing is started here. Orders whose delivery failed are retried by the
+// Server's run hook, which runs in the process that OWNS this service — a Mod
+// cannot own that loop, because a process that merely holds a platform client
+// would then be retrying deliveries it does not own.
 func (m *Mod) Start() error { return nil }
 
 // Stop implements app.Mod. Nothing to stop.

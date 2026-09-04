@@ -118,8 +118,17 @@ type SendRequest struct {
 	Body       string
 	Attachment []byte
 
-	// ExpiresIn is how long the mail stays readable. Required and positive.
-	ExpiresIn time.Duration
+	// ExpiresInSeconds is how long the mail stays readable. Required and
+	// positive.
+	//
+	// Seconds rather than a time.Duration, and the unit is in the name. A
+	// Duration is the better type inside a process, but this request crosses a
+	// bus: it marshals as an integer nanosecond count, which is unreadable in
+	// a packet capture and unproducible by a non-Go caller. The type now says
+	// what the unit is, so no layer between here and the wire has to remember
+	// a conversion — an earlier version did that conversion inside the client,
+	// where nothing in the type system mentioned it.
+	ExpiresInSeconds int64
 	// RequestID is the send idempotency key. Required: the transports this
 	// service is reached over are at-least-once, and a send without a key is
 	// a duplicate mail per redelivery.
@@ -136,8 +145,8 @@ func (s *Service) Send(ctx context.Context, req SendRequest) (Envelope, error) {
 	if strings.TrimSpace(req.RequestID) == "" {
 		return Envelope{}, fmt.Errorf("%w: a send idempotency key is required", ErrRequestInvalid)
 	}
-	if req.ExpiresIn <= 0 {
-		return Envelope{}, fmt.Errorf("%w: expires_in must be positive", ErrMailInvalid)
+	if req.ExpiresInSeconds <= 0 {
+		return Envelope{}, fmt.Errorf("%w: expires_in_seconds must be positive", ErrMailInvalid)
 	}
 	if req.Audience == AudienceBroadcast && s.cfg.Broadcast == nil {
 		// Honest refusal beats accepting a broadcast and delivering it to
@@ -180,7 +189,7 @@ func (s *Service) Send(ctx context.Context, req SendRequest) (Envelope, error) {
 		Attachment:    append([]byte(nil), req.Attachment...),
 		SendRequestID: req.RequestID,
 		CreatedAtUnix: now.Unix(),
-		ExpiresAtUnix: now.Add(req.ExpiresIn).Unix(),
+		ExpiresAtUnix: now.Add(time.Duration(req.ExpiresInSeconds) * time.Second).Unix(),
 	}
 	if err := envelope.Validate(); err != nil {
 		return Envelope{}, err

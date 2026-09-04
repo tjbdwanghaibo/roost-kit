@@ -1,7 +1,6 @@
 package global
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/spf13/viper"
@@ -12,40 +11,34 @@ import (
 	"github.com/tjbdwanghaibo/roost-service/servicemods"
 )
 
-// Mod wires the two global services into an app and registers them as TWO
-// capabilities.
+// Mod wires the routing and lease service into an app and registers it as a
+// capability.
 //
-// Two rather than one because the halves share no state: routing and leases
-// answer "where does this game belong and is it alive", activity coordination
-// answers "has every game reached the phase yet". A deployment may want one
-// and not the other, and a single capability would give the activity half a
-// reason to reach into the lease store — which is how two bounded services
-// become one unbounded one.
+// It used to wire two services and publish two capabilities: routing/leases
+// and cross-server activity coordination lived in one package. They shared no
+// state — routing answers "where does this game belong and is it alive",
+// activity coordination answers "has every game reached the phase yet" — and
+// app.Service is one per process, so they were always two deployments. They
+// are now two packages; the activity Mod is activity.NewMod.
 //
-// The stores are built once and shared, because they are namespaced under one
-// prefix and building them twice would mean two prefixes to keep in step.
+// The Mod needs no policy collaborator: every decision here is a
+// compare-and-set against state, not a judgement about a caller.
 type Mod struct {
 	metrics servicemetrics.Reporter
 
-	prefix           string
-	leaseTTL         time.Duration
-	reservationTTL   time.Duration
-	graceWindow      time.Duration
-	dispatchAttempts int
-	dispatchBackoff  time.Duration
+	prefix   string
+	leaseTTL time.Duration
 
-	service  *Service
-	activity *ActivityService
+	service *Service
 }
 
-// NewMod returns a global Mod. It needs no policy collaborator: every decision
-// here is a compare-and-set against state, not a judgement about a caller.
+// NewMod returns a global Mod.
 func NewMod(reporter servicemetrics.Reporter) *Mod {
 	return &Mod{metrics: reporter}
 }
 
 // Name implements app.Mod.
-func (m *Mod) Name() app.ModName { return servicemods.ModGlobal }
+func (m *Mod) Name() app.ModName { return CapabilityName }
 
 // DependsOn implements app.ModDependencyProvider.
 func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
@@ -55,10 +48,10 @@ func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
 //	global:
 //	  key_prefix: roost:global   # required, no default
 //	  lease_ttl: 30s             # optional
-//	  reservation_ttl: 30m       # required; see below
-//	  grace_window: 60s          # optional
-//	  dispatch_attempts: 5       # optional
-//	  dispatch_backoff: 5s       # optional
+//
+// The activity settings that used to live under this key — reservation_ttl,
+// grace_window, dispatch_attempts, dispatch_backoff — moved with the service,
+// to activity.Mod's own section.
 func (m *Mod) Init(cfg *viper.Viper) error {
 	prefix, err := servicemods.KeyPrefix(cfg, "global")
 	if err != nil {
@@ -68,76 +61,40 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 	if err != nil {
 		return err
 	}
-	// Required, with no default. It must exceed the longest client retry
-	// horizon: past it a replayed progress request is indistinguishable from a
-	// new one and the progress is applied twice. That horizon belongs to the
-	// caller's transport.
-	reservationTTL, err := servicemods.RequiredDuration(cfg, "global.reservation_ttl")
-	if err != nil {
-		return err
-	}
-	graceWindow, err := servicemods.Duration(cfg, "global.grace_window", DefaultGraceWindow)
-	if err != nil {
-		return err
-	}
-	dispatchBackoff, err := servicemods.Duration(cfg, "global.dispatch_backoff", DefaultDispatchBackoff)
-	if err != nil {
-		return err
-	}
-	dispatchAttempts := DefaultDispatchAttempts
-	if cfg.IsSet("global.dispatch_attempts") {
-		dispatchAttempts = cfg.GetInt("global.dispatch_attempts")
-		if dispatchAttempts <= 0 {
-			return fmt.Errorf("global mod: global.dispatch_attempts must be positive, got %d", dispatchAttempts)
-		}
-	}
-	m.prefix, m.leaseTTL, m.reservationTTL = prefix, leaseTTL, reservationTTL
-	m.graceWindow, m.dispatchAttempts, m.dispatchBackoff = graceWindow, dispatchAttempts, dispatchBackoff
+	m.prefix, m.leaseTTL = prefix, leaseTTL
 	return nil
 }
 
-// Provide builds both services and registers both capabilities.
+// Provide builds the service and registers it.
 func (m *Mod) Provide(r *app.Registry) error {
 	client, err := servicemods.Redis(r)
 	if err != nil {
 		return err
 	}
-	stores, err := NewRedisStores(client, m.prefix, m.reservationTTL)
+	stores, err := NewRedisStores(client, m.prefix)
 	if err != nil {
-		return fmt.Errorf("global mod: %w", err)
+		return err
 	}
 	service, err := New(Config{
 		Routes: stores.Routes, Leases: stores.Leases,
 		LeaseTTL: m.leaseTTL, Metrics: m.metrics,
 	})
 	if err != nil {
-		return fmt.Errorf("global mod: routing: %w", err)
+		return err
 	}
-	activity, err := NewActivityService(ActivityConfig{
-		Activities: stores.Activities, Participants: stores.Participants,
-		Ledger: stores.Ledger, Audits: stores.Audits,
-		Dispatches: stores.Dispatches, Windows: stores.Windows,
-		GraceWindow: m.graceWindow, ReservationTTL: m.reservationTTL,
-		DispatchBackoff: m.dispatchBackoff, DispatchMaxAttempts: m.dispatchAttempts,
-		Metrics: m.metrics,
-	})
-	if err != nil {
-		return fmt.Errorf("global mod: activity: %w", err)
-	}
-	m.service, m.activity = service, activity
-	// Registered as one batch, so a name collision is caught before either is
-	// published rather than leaving the registry half-updated.
-	return mods.RegisterAll(r,
-		mods.Capability{Name: servicemods.ModGlobal, Value: service},
-		mods.Capability{Name: servicemods.ModGlobalActivity, Value: activity},
-	)
+	m.service = service
+	// Two capabilities, from one generated call so they cannot be published
+	// apart: the interface consumers look up, and the owner-only name the
+	// Server looks up to know this process holds the implementation.
+	return mods.RegisterAll(r, OwnerCapabilities(service)...)
 }
 
 // Start implements app.Mod.
 //
-// Nothing is started. Lapsed leases and expired activities are resolved by the
-// callers' sweeps — the cadence is a deployment decision, and a goroutine a
-// Mod starts silently is one nobody can see failing.
+// Nothing is started here. Lapsed leases are reclaimed by the Server's run
+// hook, which runs in the process that OWNS this service — a Mod cannot own
+// that loop, because a process that merely holds a global client would then be
+// reclaiming leases it does not own.
 func (m *Mod) Start() error { return nil }
 
 // Stop implements app.Mod. Nothing to stop.

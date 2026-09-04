@@ -87,7 +87,7 @@ func directTo(recipients ...int64) SendRequest {
 	return SendRequest{
 		Audience: AudienceDirect, Recipients: recipients,
 		Subject: "reward", Body: "well played",
-		ExpiresIn: 7 * 24 * time.Hour, RequestID: "send-1",
+		ExpiresInSeconds: 604800, RequestID: "send-1",
 	}
 }
 
@@ -388,7 +388,7 @@ func TestABroadcastAddressesOnlyItsScope(t *testing.T) {
 	ctx := context.Background()
 	req := SendRequest{
 		Audience: AudienceBroadcast, Scope: "server-1",
-		Subject: "maintenance", ExpiresIn: time.Hour, RequestID: "send-b",
+		Subject: "maintenance", ExpiresInSeconds: 3600, RequestID: "send-b",
 	}
 	envelope, err := h.service.Send(ctx, req)
 	if err != nil {
@@ -417,7 +417,7 @@ func TestABroadcastWithoutADelivererIsRefused(t *testing.T) {
 	h := newHarness(t)
 	_, err := h.service.Send(context.Background(), SendRequest{
 		Audience: AudienceBroadcast, Subject: "hello",
-		ExpiresIn: time.Hour, RequestID: "send-b",
+		ExpiresInSeconds: 3600, RequestID: "send-b",
 	})
 	if !errors.Is(err, ErrAudienceInvalid) {
 		t.Fatalf("a broadcast with no deliverer returned %v, want ErrAudienceInvalid", err)
@@ -434,7 +434,7 @@ func TestABroadcastMayNotCarryARecipientList(t *testing.T) {
 	})
 	_, err := h.service.Send(context.Background(), SendRequest{
 		Audience: AudienceBroadcast, Recipients: []int64{1},
-		Subject: "hello", ExpiresIn: time.Hour, RequestID: "send-b",
+		Subject: "hello", ExpiresInSeconds: 3600, RequestID: "send-b",
 	})
 	if !errors.Is(err, ErrAudienceInvalid) {
 		t.Fatalf("a broadcast with recipients returned %v, want ErrAudienceInvalid", err)
@@ -460,7 +460,7 @@ func TestListIsTwoReadsRegardlessOfMailboxSize(t *testing.T) {
 	for i := 0; i < 60; i++ {
 		envelope := mustSend(t, h, SendRequest{
 			Audience: AudienceDirect, Recipients: []int64{1},
-			Subject: fmt.Sprintf("mail %d", i), ExpiresIn: time.Hour,
+			Subject: fmt.Sprintf("mail %d", i), ExpiresInSeconds: 3600,
 			RequestID: fmt.Sprintf("send-%d", i),
 		})
 		if i%2 == 0 {
@@ -497,7 +497,7 @@ func TestAZeroLimitDoesNotMeanUnbounded(t *testing.T) {
 	for i := 0; i < DefaultPageSize+15; i++ {
 		mustSend(t, h, SendRequest{
 			Audience: AudienceDirect, Recipients: []int64{1},
-			Subject: "mail", ExpiresIn: time.Hour, RequestID: fmt.Sprintf("send-%d", i),
+			Subject: "mail", ExpiresInSeconds: 3600, RequestID: fmt.Sprintf("send-%d", i),
 		})
 		h.clock.advance(time.Second)
 	}
@@ -517,7 +517,7 @@ func TestAnOversizedLimitIsClamped(t *testing.T) {
 	for i := 0; i < MaxPageSize+10; i++ {
 		mustSend(t, h, SendRequest{
 			Audience: AudienceDirect, Recipients: []int64{1},
-			Subject: "mail", ExpiresIn: time.Hour, RequestID: fmt.Sprintf("send-%d", i),
+			Subject: "mail", ExpiresInSeconds: 3600, RequestID: fmt.Sprintf("send-%d", i),
 		})
 		h.clock.advance(time.Second)
 	}
@@ -538,7 +538,7 @@ func TestPagingCoversTheMailboxExactlyOnce(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		envelope := mustSend(t, h, SendRequest{
 			Audience: AudienceDirect, Recipients: []int64{1},
-			Subject: "mail", ExpiresIn: time.Hour, RequestID: fmt.Sprintf("send-%d", i),
+			Subject: "mail", ExpiresInSeconds: 3600, RequestID: fmt.Sprintf("send-%d", i),
 		})
 		want[envelope.ID] = true
 		h.clock.advance(time.Second)
@@ -605,7 +605,7 @@ func TestUnreadCountTracksStatusesExactly(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		envelope := mustSend(t, h, SendRequest{
 			Audience: AudienceDirect, Recipients: []int64{1},
-			Subject: "mail", ExpiresIn: time.Hour, RequestID: fmt.Sprintf("send-%d", i),
+			Subject: "mail", ExpiresInSeconds: 3600, RequestID: fmt.Sprintf("send-%d", i),
 		})
 		ids = append(ids, envelope.ID)
 	}
@@ -695,7 +695,7 @@ func TestConcurrentDeliveriesAllLand(t *testing.T) {
 	for i := 0; i < mails; i++ {
 		envelope, err := h.service.Send(ctx, SendRequest{
 			Audience: AudienceDirect, Recipients: []int64{99},
-			Subject: "mail", ExpiresIn: time.Hour, RequestID: fmt.Sprintf("send-%d", i),
+			Subject: "mail", ExpiresInSeconds: 3600, RequestID: fmt.Sprintf("send-%d", i),
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -910,7 +910,7 @@ func TestASendWithoutAnIdempotencyKeyIsRefused(t *testing.T) {
 func TestAMailMustExpire(t *testing.T) {
 	h := newHarness(t)
 	req := directTo(1)
-	req.ExpiresIn = 0
+	req.ExpiresInSeconds = 0
 	if _, err := h.service.Send(context.Background(), req); !errors.Is(err, ErrMailInvalid) {
 		t.Fatalf("a mail with no expiry returned %v, want ErrMailInvalid", err)
 	}
@@ -922,7 +922,7 @@ func TestAnExpiredMailIsNeitherListedNorClaimable(t *testing.T) {
 	ctx := context.Background()
 	envelope := mustSend(t, h, func() SendRequest {
 		req := withAttachment(directTo(1), "100 gold")
-		req.ExpiresIn = time.Hour
+		req.ExpiresInSeconds = 3600
 		return req
 	}())
 

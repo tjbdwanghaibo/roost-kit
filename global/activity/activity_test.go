@@ -1,9 +1,10 @@
-package global
+package activity
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -33,16 +34,16 @@ func (c *activityClock) advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-func newActivityService(t *testing.T, mutate ...func(*ActivityConfig)) (*ActivityService, *activityClock) {
+func newActivityService(t *testing.T, mutate ...func(*Config)) (*Service, *activityClock) {
 	t.Helper()
 	c := &activityClock{now: time.Unix(1_700_000_000, 0)}
-	cfg := ActivityConfig{
-		Activities:          versionstore.NewMemoryStore[ActivityKey, Activity](),
+	cfg := Config{
+		Activities:          versionstore.NewMemoryStore[Key, Activity](),
 		Participants:        versionstore.NewMemoryStore[ParticipantKey, Participant](),
 		Ledger:              versionstore.NewMemoryStore[RequestKey, ProgressReservation](),
-		Audits:              versionstore.NewMemoryStore[ActivityKey, NotifyAuditLog](),
+		Audits:              versionstore.NewMemoryStore[Key, NotifyAuditLog](),
 		Dispatches:          versionstore.NewMemoryStore[DispatchKey, Dispatch](),
-		Windows:             versionstore.NewMemoryStore[string, ActivityWindow](),
+		Windows:             versionstore.NewMemoryStore[string, Window](),
 		GraceWindow:         30 * time.Second,
 		ReservationTTL:      10 * time.Minute,
 		DispatchBackoff:     5 * time.Second,
@@ -52,18 +53,18 @@ func newActivityService(t *testing.T, mutate ...func(*ActivityConfig)) (*Activit
 	for _, m := range mutate {
 		m(&cfg)
 	}
-	service, err := NewActivityService(cfg)
+	service, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return service, c
 }
 
-func activityKey(id string) ActivityKey {
-	return ActivityKey{GroupID: "group-a", ActivityID: id, Phase: PhaseClose}
+func activityKey(id string) Key {
+	return Key{GroupID: "group-a", ActivityID: id, Phase: PhaseClose}
 }
 
-func openActivity(t *testing.T, s *ActivityService, key ActivityKey, expected ...int32) Activity {
+func openActivity(t *testing.T, s *Service, key Key, expected ...int32) Activity {
 	t.Helper()
 	activity, err := s.OpenActivity(context.Background(), key, expected)
 	if err != nil {
@@ -73,7 +74,7 @@ func openActivity(t *testing.T, s *ActivityService, key ActivityKey, expected ..
 }
 
 // notify is a fatal-on-error notify, for arranging state.
-func notify(t *testing.T, s *ActivityService, key ActivityKey, gameSID int32) Activity {
+func notify(t *testing.T, s *Service, key Key, gameSID int32) Activity {
 	t.Helper()
 	activity, err := s.NotifyPhase(context.Background(), key, gameSID)
 	if err != nil {
@@ -90,7 +91,7 @@ func TestOpenActivityIsInsertOnlyAndBounded(t *testing.T) {
 	key := activityKey("act-1")
 
 	opened := openActivity(t, service, key, 1, 2, 3)
-	if opened.Status != ActivityPending {
+	if opened.Status != StatusPending {
 		t.Fatalf("a new activity is %q, want pending", opened.Status)
 	}
 	// The grace deadline does not exist until a game notifies: global must not
@@ -99,8 +100,8 @@ func TestOpenActivityIsInsertOnlyAndBounded(t *testing.T) {
 		t.Fatalf("opening scheduled an advance: %+v", opened)
 	}
 
-	if _, err := service.OpenActivity(ctx, key, []int32{1, 2}); !errors.Is(err, ErrActivityExists) {
-		t.Fatalf("reopening returned %v, want ErrActivityExists", err)
+	if _, err := service.OpenActivity(ctx, key, []int32{1, 2}); !errors.Is(err, ErrExists) {
+		t.Fatalf("reopening returned %v, want ErrExists", err)
 	}
 	// The refused reopen did not narrow the expected set.
 	current, found, err := service.LookupActivity(ctx, key)
@@ -117,19 +118,19 @@ func TestOpenActivityIsInsertOnlyAndBounded(t *testing.T) {
 	}
 	for _, testCase := range []struct {
 		label    string
-		key      ActivityKey
+		key      Key
 		expected []int32
 		want     error
 	}{
-		{"empty group", ActivityKey{ActivityID: "a", Phase: PhaseClose}, []int32{1}, ErrActivityInvalid},
-		{"empty activity id", ActivityKey{GroupID: "g", Phase: PhaseClose}, []int32{1}, ErrActivityInvalid},
-		{"empty phase", ActivityKey{GroupID: "g", ActivityID: "a"}, []int32{1}, ErrActivityInvalid},
-		{"separator in id", ActivityKey{GroupID: "g", ActivityID: "a/b", Phase: PhaseClose}, []int32{1}, ErrActivityInvalid},
-		{"oversized id", ActivityKey{GroupID: "g", ActivityID: strings.Repeat("x", MaxActivityIDLen+1), Phase: PhaseClose}, []int32{1}, ErrActivityInvalid},
-		{"empty expected set", activityKey("act-2"), nil, ErrActivityInvalid},
-		{"expected set too large", activityKey("act-3"), tooMany, ErrActivityInvalid},
-		{"zero game sid", activityKey("act-4"), []int32{1, 0}, ErrActivityInvalid},
-		{"duplicate game sid", activityKey("act-5"), []int32{1, 1}, ErrActivityInvalid},
+		{"empty group", Key{ActivityID: "a", Phase: PhaseClose}, []int32{1}, ErrInvalid},
+		{"empty activity id", Key{GroupID: "g", Phase: PhaseClose}, []int32{1}, ErrInvalid},
+		{"empty phase", Key{GroupID: "g", ActivityID: "a"}, []int32{1}, ErrInvalid},
+		{"separator in id", Key{GroupID: "g", ActivityID: "a/b", Phase: PhaseClose}, []int32{1}, ErrInvalid},
+		{"oversized id", Key{GroupID: "g", ActivityID: strings.Repeat("x", MaxActivityIDLen+1), Phase: PhaseClose}, []int32{1}, ErrInvalid},
+		{"empty expected set", activityKey("act-2"), nil, ErrInvalid},
+		{"expected set too large", activityKey("act-3"), tooMany, ErrInvalid},
+		{"zero game sid", activityKey("act-4"), []int32{1, 0}, ErrInvalid},
+		{"duplicate game sid", activityKey("act-5"), []int32{1, 1}, ErrInvalid},
 	} {
 		if _, err := service.OpenActivity(ctx, testCase.key, testCase.expected); !errors.Is(err, testCase.want) {
 			t.Fatalf("%s: got %v, want %v", testCase.label, err, testCase.want)
@@ -147,8 +148,8 @@ func TestPendingWindowIsBoundedAndCountsRefusals(t *testing.T) {
 		openActivity(t, service, activityKey(fmt.Sprintf("act-%d", i)), 1, 2)
 	}
 	_, err := service.OpenActivity(ctx, activityKey("one-too-many"), []int32{1, 2})
-	if !errors.Is(err, ErrActivityBacklog) {
-		t.Fatalf("the %dth open returned %v, want ErrActivityBacklog", MaxPendingActivities+1, err)
+	if !errors.Is(err, ErrBacklog) {
+		t.Fatalf("the %dth open returned %v, want ErrBacklog", MaxPendingActivities+1, err)
 	}
 	// The refusal is counted in the window record, not only returned to the
 	// caller that happened to lose.
@@ -179,7 +180,7 @@ func TestFirstNotifyCreatesTheCollectingSnapshot(t *testing.T) {
 	openActivity(t, service, key, 1, 2, 3)
 
 	first := notify(t, service, key, 1)
-	if first.Status != ActivityCollecting {
+	if first.Status != StatusCollecting {
 		t.Fatalf("status after the first notify is %q, want collecting", first.Status)
 	}
 	wantDeadline := c.Now().Add(30 * time.Second).Unix()
@@ -200,7 +201,7 @@ func TestFirstNotifyCreatesTheCollectingSnapshot(t *testing.T) {
 	if second.GraceDeadlineUnix != wantDeadline {
 		t.Fatalf("the second notify moved the deadline to %d", second.GraceDeadlineUnix)
 	}
-	if second.Status != ActivityCollecting {
+	if second.Status != StatusCollecting {
 		t.Fatalf("status = %q with one game outstanding", second.Status)
 	}
 }
@@ -217,7 +218,7 @@ func TestCollectingEveryExpectedGameCompletesImmediately(t *testing.T) {
 	notify(t, service, key, 2)
 	completed := notify(t, service, key, 3)
 
-	if completed.Status != ActivityComplete {
+	if completed.Status != StatusComplete {
 		t.Fatalf("status = %q after every expected game notified, want complete", completed.Status)
 	}
 	if completed.CompletionReason != CompletedCollected {
@@ -275,7 +276,7 @@ func TestDuplicateNotifyIsAnUnauditedNoOp(t *testing.T) {
 	if again.UpdatedAtUnix != first.UpdatedAtUnix {
 		t.Fatal("a redelivered notify wrote to the activity")
 	}
-	if again.Status != ActivityCollecting {
+	if again.Status != StatusCollecting {
 		t.Fatalf("status = %q, want collecting: a duplicate must not complete a set of two", again.Status)
 	}
 	audits, err := service.NotifyAudits(ctx, key, 10)
@@ -295,7 +296,7 @@ func TestDuplicateNotifyIsAnUnauditedNoOp(t *testing.T) {
 func TestEveryRefusedNotifyWritesAnAudit(t *testing.T) {
 	for _, testCase := range []struct {
 		label       string
-		arrange     func(t *testing.T, s *ActivityService, c *activityClock, key ActivityKey)
+		arrange     func(t *testing.T, s *Service, c *activityClock, key Key)
 		gameSID     int32
 		wantErr     error
 		wantRefusal NotifyRefusal
@@ -303,15 +304,15 @@ func TestEveryRefusedNotifyWritesAnAudit(t *testing.T) {
 	}{
 		{
 			label:       "unknown activity",
-			arrange:     func(*testing.T, *ActivityService, *activityClock, ActivityKey) {},
+			arrange:     func(*testing.T, *Service, *activityClock, Key) {},
 			gameSID:     1,
-			wantErr:     ErrActivityMissing,
+			wantErr:     ErrMissing,
 			wantRefusal: RefusalUnknownActivity,
-			wantCode:    CodeActivityMissing,
+			wantCode:    CodeMissing,
 		},
 		{
 			label: "game outside the expected set",
-			arrange: func(t *testing.T, s *ActivityService, _ *activityClock, key ActivityKey) {
+			arrange: func(t *testing.T, s *Service, _ *activityClock, key Key) {
 				openActivity(t, s, key, 1, 2)
 			},
 			gameSID:     99,
@@ -321,7 +322,7 @@ func TestEveryRefusedNotifyWritesAnAudit(t *testing.T) {
 		},
 		{
 			label: "late, after the grace window closed",
-			arrange: func(t *testing.T, s *ActivityService, c *activityClock, key ActivityKey) {
+			arrange: func(t *testing.T, s *Service, c *activityClock, key Key) {
 				openActivity(t, s, key, 1, 2)
 				notify(t, s, key, 1)
 				c.advance(31 * time.Second)
@@ -333,7 +334,7 @@ func TestEveryRefusedNotifyWritesAnAudit(t *testing.T) {
 		},
 		{
 			label: "stale status, the aggregation already completed",
-			arrange: func(t *testing.T, s *ActivityService, c *activityClock, key ActivityKey) {
+			arrange: func(t *testing.T, s *Service, c *activityClock, key Key) {
 				openActivity(t, s, key, 1, 2)
 				notify(t, s, key, 1)
 				c.advance(31 * time.Second)
@@ -343,9 +344,9 @@ func TestEveryRefusedNotifyWritesAnAudit(t *testing.T) {
 				}
 			},
 			gameSID:     2,
-			wantErr:     ErrActivityStatus,
+			wantErr:     ErrStatus,
 			wantRefusal: RefusalStaleStatus,
-			wantCode:    CodeActivityStatus,
+			wantCode:    CodeStatus,
 		},
 	} {
 		t.Run(testCase.label, func(t *testing.T) {
@@ -363,7 +364,7 @@ func TestEveryRefusedNotifyWritesAnAudit(t *testing.T) {
 			if !errors.Is(err, testCase.wantErr) {
 				t.Fatalf("notify returned %v, want %v", err, testCase.wantErr)
 			}
-			if got := ActivityCode(err); got != testCase.wantCode {
+			if got := Code(err); got != testCase.wantCode {
 				t.Fatalf("code = %d, want %d", got, testCase.wantCode)
 			}
 
@@ -442,40 +443,40 @@ func TestAuditsAccumulateAndAreBounded(t *testing.T) {
 // A service with no audit store is refused at construction rather than
 // running as a service that cannot audit.
 func TestNewActivityServiceRejectsAnIncompleteConfig(t *testing.T) {
-	full := func() ActivityConfig {
-		return ActivityConfig{
-			Activities:   versionstore.NewMemoryStore[ActivityKey, Activity](),
+	full := func() Config {
+		return Config{
+			Activities:   versionstore.NewMemoryStore[Key, Activity](),
 			Participants: versionstore.NewMemoryStore[ParticipantKey, Participant](),
 			Ledger:       versionstore.NewMemoryStore[RequestKey, ProgressReservation](),
-			Audits:       versionstore.NewMemoryStore[ActivityKey, NotifyAuditLog](),
+			Audits:       versionstore.NewMemoryStore[Key, NotifyAuditLog](),
 			Dispatches:   versionstore.NewMemoryStore[DispatchKey, Dispatch](),
-			Windows:      versionstore.NewMemoryStore[string, ActivityWindow](),
+			Windows:      versionstore.NewMemoryStore[string, Window](),
 		}
 	}
 	for _, testCase := range []struct {
 		label  string
-		mutate func(*ActivityConfig)
+		mutate func(*Config)
 	}{
-		{"no activity store", func(c *ActivityConfig) { c.Activities = nil }},
-		{"no participant store", func(c *ActivityConfig) { c.Participants = nil }},
-		{"no ledger", func(c *ActivityConfig) { c.Ledger = nil }},
-		{"no audit store", func(c *ActivityConfig) { c.Audits = nil }},
-		{"no dispatch store", func(c *ActivityConfig) { c.Dispatches = nil }},
-		{"no window store", func(c *ActivityConfig) { c.Windows = nil }},
-		{"negative grace window", func(c *ActivityConfig) { c.GraceWindow = -time.Second }},
-		{"negative reservation ttl", func(c *ActivityConfig) { c.ReservationTTL = -time.Second }},
-		{"negative dispatch backoff", func(c *ActivityConfig) { c.DispatchBackoff = -time.Second }},
-		{"negative dispatch attempts", func(c *ActivityConfig) { c.DispatchMaxAttempts = -1 }},
+		{"no activity store", func(c *Config) { c.Activities = nil }},
+		{"no participant store", func(c *Config) { c.Participants = nil }},
+		{"no ledger", func(c *Config) { c.Ledger = nil }},
+		{"no audit store", func(c *Config) { c.Audits = nil }},
+		{"no dispatch store", func(c *Config) { c.Dispatches = nil }},
+		{"no window store", func(c *Config) { c.Windows = nil }},
+		{"negative grace window", func(c *Config) { c.GraceWindow = -time.Second }},
+		{"negative reservation ttl", func(c *Config) { c.ReservationTTL = -time.Second }},
+		{"negative dispatch backoff", func(c *Config) { c.DispatchBackoff = -time.Second }},
+		{"negative dispatch attempts", func(c *Config) { c.DispatchMaxAttempts = -1 }},
 	} {
 		cfg := full()
 		testCase.mutate(&cfg)
-		if _, err := NewActivityService(cfg); err == nil {
+		if _, err := New(cfg); err == nil {
 			t.Fatalf("%s was accepted", testCase.label)
 		}
 	}
 	// Zero durations select the documented defaults rather than meaning "no
 	// window" or "no retry budget".
-	service, err := NewActivityService(full())
+	service, err := New(full())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +511,7 @@ func TestAdvanceExpiredNeverCompletesAPendingActivity(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("read: found=%v err=%v", found, err)
 	}
-	if current.Status != ActivityPending {
+	if current.Status != StatusPending {
 		t.Fatalf("status = %q after three days without a notify, want pending", current.Status)
 	}
 	// And it is still in the window, so a notify that arrives on day four is
@@ -562,7 +563,7 @@ func TestAdvanceExpiredIsBoundedAndCompletesLapsedWindows(t *testing.T) {
 	}
 
 	for _, completed := range append(first, second...) {
-		if completed.Status != ActivityComplete {
+		if completed.Status != StatusComplete {
 			t.Fatalf("swept activity is %q: %+v", completed.Status, completed)
 		}
 		if completed.CompletionReason != CompletedGraceExpired {
@@ -719,7 +720,7 @@ func TestAReplayedRequestIDIsANoOp(t *testing.T) {
 // the scheduler cooperates, and an invariant that is only tested when the
 // timing is unlucky is not tested.
 func TestAnUnmarkedReservationCannotDoubleApply(t *testing.T) {
-	service, _ := newActivityService(t, func(cfg *ActivityConfig) {
+	service, _ := newActivityService(t, func(cfg *Config) {
 		cfg.Ledger = unmarkableLedger{Store: cfg.Ledger}
 	})
 	ctx := context.Background()
@@ -768,7 +769,7 @@ func TestAnUnmarkedReservationCannotDoubleApply(t *testing.T) {
 // under a race.
 func TestProgressReservesBeforeItApplies(t *testing.T) {
 	log := &storeCallLog{}
-	service, _ := newActivityService(t, func(cfg *ActivityConfig) {
+	service, _ := newActivityService(t, func(cfg *Config) {
 		cfg.Ledger = tracedStore[RequestKey, ProgressReservation]{
 			inner: cfg.Ledger, name: "ledger", log: log,
 		}
@@ -821,7 +822,7 @@ func TestApplyProgressValidatesItsRequest(t *testing.T) {
 
 	for _, testCase := range []struct {
 		label         string
-		key           ActivityKey
+		key           Key
 		participantID string
 		requestID     string
 		delta         ProgressDelta
@@ -834,14 +835,14 @@ func TestApplyProgressValidatesItsRequest(t *testing.T) {
 		{"request id with separator", key, "player-1", "a/b", ProgressDelta{Score: 1}, ErrRequestInvalid},
 		{"negative delta", key, "player-1", "req", ProgressDelta{Score: -1}, ErrRequestInvalid},
 		{"empty delta", key, "player-1", "req", ProgressDelta{}, ErrRequestInvalid},
-		{"unknown activity", activityKey("nope"), "player-1", "req", ProgressDelta{Score: 1}, ErrActivityMissing},
-		{"invalid activity key", ActivityKey{}, "player-1", "req", ProgressDelta{Score: 1}, ErrActivityInvalid},
+		{"unknown activity", activityKey("nope"), "player-1", "req", ProgressDelta{Score: 1}, ErrMissing},
+		{"invalid activity key", Key{}, "player-1", "req", ProgressDelta{Score: 1}, ErrInvalid},
 	} {
 		_, err := service.ApplyProgress(ctx, testCase.key, testCase.participantID, testCase.requestID, testCase.delta)
 		if !errors.Is(err, testCase.want) {
 			t.Fatalf("%s: got %v, want %v", testCase.label, err, testCase.want)
 		}
-		if code := ActivityCode(err); code == errcode.CodeInternal {
+		if code := Code(err); code == errcode.CodeInternal {
 			t.Fatalf("%s: a client mistake reported the internal code", testCase.label)
 		}
 	}
@@ -875,8 +876,8 @@ func TestProgressAfterCompletionIsRefused(t *testing.T) {
 	notify(t, service, key, 1)
 
 	_, err := service.ApplyProgress(ctx, key, "player-1", "req-1", ProgressDelta{Score: 1})
-	if !errors.Is(err, ErrActivityStatus) {
-		t.Fatalf("an apply against a complete aggregation returned %v, want ErrActivityStatus", err)
+	if !errors.Is(err, ErrStatus) {
+		t.Fatalf("an apply against a complete aggregation returned %v, want ErrStatus", err)
 	}
 	if _, found, err := service.LookupParticipant(ctx, key, "player-1"); err != nil || found {
 		t.Fatalf("the refused apply created a participant: found=%v err=%v", found, err)
@@ -1054,7 +1055,7 @@ func TestConcurrentNotificationsLoseNothingAndCompleteOnce(t *testing.T) {
 				t.Errorf("game %d: %v", gameSID, err)
 				return
 			}
-			if activity.Status == ActivityComplete {
+			if activity.Status == StatusComplete {
 				completes++
 			}
 		}(game)
@@ -1079,7 +1080,7 @@ func TestConcurrentNotificationsLoseNothingAndCompleteOnce(t *testing.T) {
 		}
 		seen[gameSID] = true
 	}
-	if current.Status != ActivityComplete || current.CompletionReason != CompletedCollected {
+	if current.Status != StatusComplete || current.CompletionReason != CompletedCollected {
 		t.Fatalf("activity = %+v", current)
 	}
 	for _, gameSID := range expected {
@@ -1201,7 +1202,7 @@ func TestConcurrentAdvanceExpiredHasOneWinner(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("read: found=%v err=%v", found, err)
 	}
-	if current.Status != ActivityComplete || current.CompletionReason != CompletedGraceExpired {
+	if current.Status != StatusComplete || current.CompletionReason != CompletedGraceExpired {
 		t.Fatalf("activity = %+v", current)
 	}
 }
@@ -1249,7 +1250,7 @@ func TestConcurrentNotifyAndSweepAgreeOnOneCompletion(t *testing.T) {
 	}
 	// The notify is past the deadline, so it is refused either way — as late
 	// (the sweep had not run) or as stale (it had). Both are audited.
-	if !errors.Is(notifyErr, ErrNotifyLate) && !errors.Is(notifyErr, ErrActivityStatus) {
+	if !errors.Is(notifyErr, ErrNotifyLate) && !errors.Is(notifyErr, ErrStatus) {
 		t.Fatalf("the late notify returned %v", notifyErr)
 	}
 	audits, err := service.NotifyAudits(ctx, key, 10)
@@ -1266,7 +1267,7 @@ func TestConcurrentNotifyAndSweepAgreeOnOneCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Status != ActivityComplete {
+	if current.Status != StatusComplete {
 		t.Fatalf("activity = %+v", current)
 	}
 	if len(current.NotifiedGameSIDs) != 1 {
@@ -1365,7 +1366,7 @@ func TestReturnedValuesDoNotAliasStoredState(t *testing.T) {
 // unreachable backend, and the client then retries forever a request that can
 // never succeed.
 func TestEveryClientMistakeHasItsOwnCode(t *testing.T) {
-	if ActivityCode(nil) != CodeOK {
+	if Code(nil) != CodeOK {
 		t.Fatal("a nil error is not CodeOK")
 	}
 	codes := map[int32]string{}
@@ -1374,13 +1375,13 @@ func TestEveryClientMistakeHasItsOwnCode(t *testing.T) {
 		err   error
 		want  int32
 	}{
-		{"invalid", ErrActivityInvalid, CodeActivityInvalid},
-		{"missing", ErrActivityMissing, CodeActivityMissing},
-		{"exists", ErrActivityExists, CodeActivityExists},
-		{"status", ErrActivityStatus, CodeActivityStatus},
+		{"invalid", ErrInvalid, CodeInvalid},
+		{"missing", ErrMissing, CodeMissing},
+		{"exists", ErrExists, CodeExists},
+		{"status", ErrStatus, CodeStatus},
 		{"unexpected", ErrNotifyUnexpected, CodeNotifyUnexpected},
 		{"late", ErrNotifyLate, CodeNotifyLate},
-		{"backlog", ErrActivityBacklog, CodeActivityBacklog},
+		{"backlog", ErrBacklog, CodeBacklog},
 		{"participant", ErrParticipantInvalid, CodeParticipantInvalid},
 		{"request", ErrRequestInvalid, CodeRequestInvalid},
 		{"dispatch missing", ErrDispatchMissing, CodeDispatchMissing},
@@ -1388,8 +1389,9 @@ func TestEveryClientMistakeHasItsOwnCode(t *testing.T) {
 		{"dispatch exhausted", ErrDispatchExhausted, CodeDispatchExhausted},
 		{"dispatch not due", ErrDispatchNotDue, CodeDispatchNotDue},
 		{"range", ErrRangeInvalid, CodeRangeInvalid},
+		{"conflict", ErrConflict, CodeConflict},
 	} {
-		if got := ActivityCode(fmt.Errorf("wrapped: %w", testCase.err)); got != testCase.want {
+		if got := Code(fmt.Errorf("wrapped: %w", testCase.err)); got != testCase.want {
 			t.Fatalf("%s: code = %d, want %d", testCase.label, got, testCase.want)
 		}
 		if other, clash := codes[testCase.want]; clash {
@@ -1400,19 +1402,38 @@ func TestEveryClientMistakeHasItsOwnCode(t *testing.T) {
 			t.Fatalf("%s maps to a non-business code", testCase.label)
 		}
 	}
-	// The activity codes continue the routing block rather than reusing it.
-	// CodeRangeInvalid is the one deliberate exception: "your limit is not a
-	// limit" is the same mistake in both halves and splitting it would give a
-	// client two codes for one bug.
-	for code, label := range codes {
-		if code == CodeRangeInvalid {
-			continue
-		}
-		if code < 570112 || code > 570124 {
-			t.Fatalf("%s has code %d, outside the activity block 570112-570124", label, code)
+	// This package's own segment, contiguous from its first code and with
+	// exactly as many entries as are declared.
+	//
+	// Both checks are needed and neither is redundant: contiguity catches a
+	// hole in the middle, and the count catches a truncation at the end, which
+	// contiguity cannot see because a shorter run is still contiguous. A
+	// table-driven test cannot notice its own table shrinking.
+	//
+	// The segment is 6201xx rather than the 5701xx range these codes had while
+	// the service lived inside package global. Sharing one range between two
+	// services is what left global's segment with a permanent hole, and it
+	// made "which package owns this number" a question with two answers.
+	const (
+		segmentFirst     = 620101
+		segmentAllocated = 15
+	)
+	if len(codes) != segmentAllocated {
+		t.Fatalf("%d codes are paired, want %d; a code was added or removed without updating "+
+			"the count", len(codes), segmentAllocated)
+	}
+	ordered := make([]int, 0, len(codes))
+	for code := range codes {
+		ordered = append(ordered, int(code))
+	}
+	sort.Ints(ordered)
+	for index, code := range ordered {
+		if want := segmentFirst + index; code != want {
+			t.Fatalf("the segment has a hole: expected %d at position %d, found %d (%s)",
+				want, index, code, codes[int32(code)])
 		}
 	}
-	if ActivityCode(errors.New("backend is down")) != errcode.CodeInternal {
+	if Code(errors.New("backend is down")) != errcode.CodeInternal {
 		t.Fatal("an unrecognised error is not reported as a store failure")
 	}
 }
@@ -1448,7 +1469,7 @@ func TestNoAPIPathReturnsABareError(t *testing.T) {
 		{"dispatch missing", func() error { _, err := service.AttemptDispatch(ctx, key, 1); return err }},
 		{"ack missing", func() error { _, err := service.AckDispatch(ctx, key, 1, "token"); return err }},
 		{"ack zero game", func() error { _, err := service.AckDispatch(ctx, key, 0, "token"); return err }},
-		{"lookup invalid key", func() error { _, _, err := service.LookupActivity(ctx, ActivityKey{}); return err }},
+		{"lookup invalid key", func() error { _, _, err := service.LookupActivity(ctx, Key{}); return err }},
 		{"due dispatches unknown activity", func() error {
 			_, err := service.DueDispatches(ctx, activityKey("nope"), 10)
 			return err
@@ -1458,7 +1479,7 @@ func TestNoAPIPathReturnsABareError(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: expected a refusal", testCase.label)
 		}
-		if code := ActivityCode(err); code == errcode.CodeInternal {
+		if code := Code(err); code == errcode.CodeInternal {
 			t.Fatalf("%s: %v reached the caller as CodeInternal", testCase.label, err)
 		}
 	}

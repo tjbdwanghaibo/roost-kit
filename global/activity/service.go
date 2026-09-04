@@ -1,4 +1,4 @@
-package global
+package activity
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
 )
 
-// ActivityConfig wires an ActivityService.
+// Config wires an Service.
 //
 // Six stores rather than one, because they are six key spaces with different
 // lifetimes and different bounds: an activity outlives its notifications, the
@@ -24,9 +24,9 @@ import (
 // convention here — the contract has no unconditional write, so the
 // implementation that read-then-wrote in the code this replaces could not be
 // written against it at all.
-type ActivityConfig struct {
+type Config struct {
 	// Activities holds the aggregation records.
-	Activities versionstore.Store[ActivityKey, Activity]
+	Activities versionstore.Store[Key, Activity]
 	// Participants holds per-participant progress.
 	Participants versionstore.Store[ParticipantKey, Participant]
 	// Ledger holds the insert-only progress reservations. Wire it with a TTL
@@ -34,12 +34,12 @@ type ActivityConfig struct {
 	// time and what that costs.
 	Ledger versionstore.Store[RequestKey, ProgressReservation]
 	// Audits holds the append-only refusal log, one record per activity.
-	Audits versionstore.Store[ActivityKey, NotifyAuditLog]
+	Audits versionstore.Store[Key, NotifyAuditLog]
 	// Dispatches holds result deliveries, one per (activity, game).
 	Dispatches versionstore.Store[DispatchKey, Dispatch]
 	// Windows holds the per-group index of unfinished activities that
 	// AdvanceExpired scans.
-	Windows versionstore.Store[string, ActivityWindow]
+	Windows versionstore.Store[string, Window]
 
 	// GraceWindow is how long after the FIRST notify the aggregation waits for
 	// the rest of the expected games. Zero selects DefaultGraceWindow; it must
@@ -95,7 +95,7 @@ const (
 	maxBackoffMultiplier = 10
 )
 
-// ActivityService coordinates cross-server activity aggregation: phase
+// Service coordinates cross-server activity aggregation: phase
 // notifications from games, participant progress, refusal audit, and result
 // dispatch.
 //
@@ -104,53 +104,53 @@ const (
 // answers "has every game reached the phase yet" — and joining them would give
 // the activity half a reason to reach into the lease store, which is the kind
 // of coupling that turns two bounded services into one unbounded one.
-type ActivityService struct {
-	cfg    ActivityConfig
+type Service struct {
+	cfg    Config
 	report servicemetrics.Sink
 }
 
-func NewActivityService(cfg ActivityConfig) (*ActivityService, error) {
+func New(cfg Config) (*Service, error) {
 	if cfg.Activities == nil {
-		return nil, fmt.Errorf("global: activity store is required")
+		return nil, fmt.Errorf("activity: store is required")
 	}
 	if cfg.Participants == nil {
-		return nil, fmt.Errorf("global: participant store is required")
+		return nil, fmt.Errorf("activity: participant store is required")
 	}
 	if cfg.Ledger == nil {
-		return nil, fmt.Errorf("global: progress ledger store is required")
+		return nil, fmt.Errorf("activity: progress ledger store is required")
 	}
 	if cfg.Audits == nil {
 		// Refused notifications must be auditable, so a service configured
 		// without the audit store is not a degraded service, it is the defect
 		// this design exists to remove.
-		return nil, fmt.Errorf("global: notify audit store is required")
+		return nil, fmt.Errorf("activity: notify audit store is required")
 	}
 	if cfg.Dispatches == nil {
-		return nil, fmt.Errorf("global: dispatch store is required")
+		return nil, fmt.Errorf("activity: dispatch store is required")
 	}
 	if cfg.Windows == nil {
-		return nil, fmt.Errorf("global: activity window store is required")
+		return nil, fmt.Errorf("activity: window store is required")
 	}
 	if cfg.GraceWindow < 0 {
-		return nil, fmt.Errorf("global: grace window must not be negative")
+		return nil, fmt.Errorf("activity: grace window must not be negative")
 	}
 	if cfg.GraceWindow == 0 {
 		cfg.GraceWindow = DefaultGraceWindow
 	}
 	if cfg.ReservationTTL < 0 {
-		return nil, fmt.Errorf("global: reservation ttl must not be negative")
+		return nil, fmt.Errorf("activity: reservation ttl must not be negative")
 	}
 	if cfg.ReservationTTL == 0 {
 		cfg.ReservationTTL = DefaultReservationTTL
 	}
 	if cfg.DispatchBackoff < 0 {
-		return nil, fmt.Errorf("global: dispatch backoff must not be negative")
+		return nil, fmt.Errorf("activity: dispatch backoff must not be negative")
 	}
 	if cfg.DispatchBackoff == 0 {
 		cfg.DispatchBackoff = DefaultDispatchBackoff
 	}
 	if cfg.DispatchMaxAttempts < 0 {
-		return nil, fmt.Errorf("global: dispatch max attempts must not be negative")
+		return nil, fmt.Errorf("activity: dispatch max attempts must not be negative")
 	}
 	if cfg.DispatchMaxAttempts == 0 {
 		cfg.DispatchMaxAttempts = DefaultDispatchAttempts
@@ -161,13 +161,13 @@ func NewActivityService(cfg ActivityConfig) (*ActivityService, error) {
 	if cfg.NewDispatchToken == nil {
 		cfg.NewDispatchToken = randomDispatchToken
 	}
-	return &ActivityService{cfg: cfg, report: servicemetrics.Wrap(cfg.Metrics)}, nil
+	return &Service{cfg: cfg, report: servicemetrics.Wrap(cfg.Metrics)}, nil
 }
 
 func randomDispatchToken() (string, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("global: mint dispatch token: %w", err)
+		return "", fmt.Errorf("activity: mint dispatch token: %w", err)
 	}
 	return hex.EncodeToString(buf), nil
 }
@@ -180,9 +180,9 @@ func randomDispatchToken() (string, error) {
 // of a collecting aggregation would un-collect it and narrowing it would
 // complete it behind the games still working.
 //
-// The activity opens in ActivityPending with no grace deadline. Nothing here
+// The activity opens in StatusPending with no grace deadline. Nothing here
 // schedules its advance — the first notify does that.
-func (s *ActivityService) OpenActivity(ctx context.Context, key ActivityKey, expectedGameSIDs []int32) (Activity, error) {
+func (s *Service) OpenActivity(ctx context.Context, key Key, expectedGameSIDs []int32) (Activity, error) {
 	if err := key.Validate(); err != nil {
 		return Activity{}, err
 	}
@@ -190,7 +190,7 @@ func (s *ActivityService) OpenActivity(ctx context.Context, key ActivityKey, exp
 		return Activity{}, err
 	}
 
-	// The window entry goes in first. See ActivityWindow: a window entry with
+	// The window entry goes in first. See Window: a window entry with
 	// no activity is pruned by the next sweep, an activity with no window
 	// entry is never swept at all.
 	if err := s.admitToWindow(ctx, key); err != nil {
@@ -201,7 +201,7 @@ func (s *ActivityService) OpenActivity(ctx context.Context, key ActivityKey, exp
 	activity := Activity{
 		Key:              key,
 		ExpectedGameSIDs: cloneSIDs(expectedGameSIDs),
-		Status:           ActivityPending,
+		Status:           StatusPending,
 		OpenedAtUnix:     nowUnix,
 		UpdatedAtUnix:    nowUnix,
 	}
@@ -210,18 +210,18 @@ func (s *ActivityService) OpenActivity(ctx context.Context, key ActivityKey, exp
 		return Activity{}, err
 	}
 	if !created {
-		return Activity{}, fmt.Errorf("%w: activity %s", ErrActivityExists, key)
+		return Activity{}, fmt.Errorf("%w: activity %s", ErrExists, key)
 	}
 	return stored.Value.clone(), nil
 }
 
 // admitToWindow adds a key to its group's pending window under
 // compare-and-set. It is idempotent, so a retried open does not double-list.
-func (s *ActivityService) admitToWindow(ctx context.Context, key ActivityKey) error {
+func (s *Service) admitToWindow(ctx context.Context, key Key) error {
 	var backlog bool
-	_, _, err := s.cfg.Windows.Update(ctx, key.GroupID, func(current ActivityWindow, found bool) (ActivityWindow, bool, error) {
+	_, _, err := s.cfg.Windows.Update(ctx, key.GroupID, func(current Window, found bool) (Window, bool, error) {
 		backlog = false
-		next := ActivityWindow{GroupID: key.GroupID}
+		next := Window{GroupID: key.GroupID}
 		if found {
 			next = current.clone()
 			next.GroupID = key.GroupID
@@ -245,13 +245,13 @@ func (s *ActivityService) admitToWindow(ctx context.Context, key ActivityKey) er
 	}
 	if backlog {
 		return fmt.Errorf("%w: group %q holds %d unfinished activities",
-			ErrActivityBacklog, key.GroupID, MaxPendingActivities)
+			ErrBacklog, key.GroupID, MaxPendingActivities)
 	}
 	return nil
 }
 
 // LookupActivity reads an aggregation.
-func (s *ActivityService) LookupActivity(ctx context.Context, key ActivityKey) (Activity, bool, error) {
+func (s *Service) LookupActivity(ctx context.Context, key Key) (Activity, bool, error) {
 	if err := key.Validate(); err != nil {
 		return Activity{}, false, err
 	}
@@ -263,11 +263,11 @@ func (s *ActivityService) LookupActivity(ctx context.Context, key ActivityKey) (
 }
 
 // PendingActivities lists a group's unfinished activities, bounded.
-func (s *ActivityService) PendingActivities(ctx context.Context, groupID string, limit int) ([]ActivityKey, error) {
+func (s *Service) PendingActivities(ctx context.Context, groupID string, limit int) ([]Key, error) {
 	if groupID == "" {
-		return nil, fmt.Errorf("%w: group id is empty", ErrActivityInvalid)
+		return nil, fmt.Errorf("%w: group id is empty", ErrInvalid)
 	}
-	if err := validateActivityLimit(limit); err != nil {
+	if err := validateLimit(limit); err != nil {
 		return nil, err
 	}
 	window, found, err := s.cfg.Windows.Get(ctx, groupID)
@@ -275,7 +275,7 @@ func (s *ActivityService) PendingActivities(ctx context.Context, groupID string,
 		return nil, err
 	}
 	keys := window.Value.clone().Keys
-	sortActivityKeys(keys)
+	sortKeys(keys)
 	if len(keys) > limit {
 		keys = keys[:limit]
 	}
@@ -300,12 +300,12 @@ func (s *ActivityService) PendingActivities(ctx context.Context, groupID string,
 // refusals the boundary document requires to be audited — late, stale status,
 // notification from a game outside the expected set — go through refuseNotify,
 // which cannot return without having written the record.
-func (s *ActivityService) NotifyPhase(ctx context.Context, key ActivityKey, gameSID int32) (Activity, error) {
+func (s *Service) NotifyPhase(ctx context.Context, key Key, gameSID int32) (Activity, error) {
 	if err := key.Validate(); err != nil {
 		return Activity{}, err
 	}
 	if gameSID <= 0 {
-		return Activity{}, fmt.Errorf("%w: game sid must be positive, got %d", ErrActivityInvalid, gameSID)
+		return Activity{}, fmt.Errorf("%w: game sid must be positive, got %d", ErrInvalid, gameSID)
 	}
 	now := s.cfg.Now()
 	nowUnix := now.Unix()
@@ -313,7 +313,7 @@ func (s *ActivityService) NotifyPhase(ctx context.Context, key ActivityKey, game
 	var (
 		result        Activity
 		refusal       NotifyRefusal
-		refusedStatus ActivityStatus
+		refusedStatus Status
 		detail        string
 		completed     bool
 	)
@@ -340,7 +340,7 @@ func (s *ActivityService) NotifyPhase(ctx context.Context, key ActivityKey, game
 			detail = fmt.Sprintf("expected %v", current.ExpectedGameSIDs)
 			return current, false, nil
 		}
-		if current.Status == ActivityComplete {
+		if current.Status == StatusComplete {
 			refusal, refusedStatus = RefusalStaleStatus, current.Status
 			detail = fmt.Sprintf("completed at %d as %s", current.CompletedAtUnix, current.CompletionReason)
 			return current, false, nil
@@ -356,15 +356,15 @@ func (s *ActivityService) NotifyPhase(ctx context.Context, key ActivityKey, game
 		}
 
 		next := current.clone()
-		if next.Status == ActivityPending {
-			next.Status = ActivityCollecting
+		if next.Status == StatusPending {
+			next.Status = StatusCollecting
 			next.FirstNotifyAtUnix = nowUnix
 			next.GraceDeadlineUnix = now.Add(s.cfg.GraceWindow).Unix()
 		}
 		next.NotifiedGameSIDs = append(next.NotifiedGameSIDs, gameSID)
 		next.UpdatedAtUnix = nowUnix
 		if next.Collected() {
-			next.Status = ActivityComplete
+			next.Status = StatusComplete
 			next.CompletedAtUnix = nowUnix
 			next.CompletionReason = CompletedCollected
 			completed = true
@@ -402,11 +402,11 @@ func (s *ActivityService) NotifyPhase(ctx context.Context, key ActivityKey, game
 // write. If the audit cannot be written the call fails as a store error rather
 // than as a clean refusal: a refusal that left no trace is the thing being
 // prevented, so it must not be the thing that gets returned.
-func (s *ActivityService) refuseNotify(
+func (s *Service) refuseNotify(
 	ctx context.Context,
-	key ActivityKey,
+	key Key,
 	gameSID int32,
-	status ActivityStatus,
+	status Status,
 	refusal NotifyRefusal,
 	detail string,
 ) error {
@@ -419,32 +419,32 @@ func (s *ActivityService) refuseNotify(
 		Detail:  detail,
 	}
 	if err := s.appendAudit(ctx, key, audit); err != nil {
-		return fmt.Errorf("global: audit %s refusal for activity %s game %d: %w", refusal, key, gameSID, err)
+		return fmt.Errorf("activity: audit %s refusal for activity %s game %d: %w", refusal, key, gameSID, err)
 	}
 	// One report for every refusal, for the same reason the audit is written
 	// here: a per-branch call is a call a new branch forgets.
 	s.report.Refused("notify_phase", string(refusal))
 	switch refusal {
 	case RefusalUnknownActivity:
-		return fmt.Errorf("%w: activity %s", ErrActivityMissing, key)
+		return fmt.Errorf("%w: activity %s", ErrMissing, key)
 	case RefusalUnexpectedGame:
 		return fmt.Errorf("%w: game %d, activity %s", ErrNotifyUnexpected, gameSID, key)
 	case RefusalStaleStatus:
-		return fmt.Errorf("%w: activity %s is %s", ErrActivityStatus, key, status)
+		return fmt.Errorf("%w: activity %s is %s", ErrStatus, key, status)
 	case RefusalLate:
 		return fmt.Errorf("%w: activity %s, game %d", ErrNotifyLate, key, gameSID)
 	default:
 		// A refusal reason with no error would read as success to the caller.
 		// Fail closed instead: an unknown reason is a bug in this package, and
 		// the audit for it has already been written.
-		return fmt.Errorf("%w: activity %s refusal %q has no error mapping", ErrActivityInvalid, key, refusal)
+		return fmt.Errorf("%w: activity %s refusal %q has no error mapping", ErrInvalid, key, refusal)
 	}
 }
 
 // appendAudit appends to the per-activity refusal log under compare-and-set.
 // Entries are never rewritten, and a full log counts what it could not store
 // instead of dropping it silently.
-func (s *ActivityService) appendAudit(ctx context.Context, key ActivityKey, audit NotifyAudit) error {
+func (s *Service) appendAudit(ctx context.Context, key Key, audit NotifyAudit) error {
 	_, _, err := s.cfg.Audits.Update(ctx, key, func(current NotifyAuditLog, found bool) (NotifyAuditLog, bool, error) {
 		next := NotifyAuditLog{Key: key, NextSeq: 1}
 		if found {
@@ -468,11 +468,11 @@ func (s *ActivityService) appendAudit(ctx context.Context, key ActivityKey, audi
 }
 
 // NotifyAudits reads an activity's refusal log, newest first, bounded.
-func (s *ActivityService) NotifyAudits(ctx context.Context, key ActivityKey, limit int) ([]NotifyAudit, error) {
+func (s *Service) NotifyAudits(ctx context.Context, key Key, limit int) ([]NotifyAudit, error) {
 	if err := key.Validate(); err != nil {
 		return nil, err
 	}
-	if err := validateActivityLimit(limit); err != nil {
+	if err := validateLimit(limit); err != nil {
 		return nil, err
 	}
 	current, found, err := s.cfg.Audits.Get(ctx, key)
@@ -491,7 +491,7 @@ func (s *ActivityService) NotifyAudits(ctx context.Context, key ActivityKey, lim
 // because the log was full. Exposed so the drop is observable: design
 // constraint 6 exists because silent paths survive precisely when nothing
 // reports them.
-func (s *ActivityService) AuditOverflow(ctx context.Context, key ActivityKey) (uint64, error) {
+func (s *Service) AuditOverflow(ctx context.Context, key Key) (uint64, error) {
 	if err := key.Validate(); err != nil {
 		return 0, err
 	}
@@ -518,11 +518,11 @@ func (s *ActivityService) AuditOverflow(ctx context.Context, key ActivityKey) (u
 // deadline, and the deadline is set by a game's first notify, so this sweep
 // can only finish a window a game already opened. That is the difference
 // between a back-stop and global driving the activity timeline itself.
-func (s *ActivityService) AdvanceExpired(ctx context.Context, groupID string, limit int) ([]Activity, error) {
+func (s *Service) AdvanceExpired(ctx context.Context, groupID string, limit int) ([]Activity, error) {
 	if groupID == "" {
-		return nil, fmt.Errorf("%w: group id is empty", ErrActivityInvalid)
+		return nil, fmt.Errorf("%w: group id is empty", ErrInvalid)
 	}
-	if err := validateActivityLimit(limit); err != nil {
+	if err := validateLimit(limit); err != nil {
 		return nil, err
 	}
 	window, found, err := s.cfg.Windows.Get(ctx, groupID)
@@ -531,17 +531,17 @@ func (s *ActivityService) AdvanceExpired(ctx context.Context, groupID string, li
 	}
 
 	type candidate struct {
-		key      ActivityKey
+		key      Key
 		deadline int64
 	}
 	var (
 		due   []candidate
-		prune []ActivityKey
+		prune []Key
 		heal  []Activity
 	)
 	nowUnix := s.cfg.Now().Unix()
 	keys := window.Value.clone().Keys
-	sortActivityKeys(keys)
+	sortKeys(keys)
 	for index, key := range keys {
 		if index >= MaxPendingActivities {
 			// The bound is enforced on write, but a record written by an older
@@ -559,14 +559,14 @@ func (s *ActivityService) AdvanceExpired(ctx context.Context, groupID string, li
 		}
 		activity := current.Value
 		switch {
-		case activity.Status == ActivityComplete:
+		case activity.Status == StatusComplete:
 			// Complete but still listed: either the completing call died
 			// before it pruned, or its dispatch creation failed. Both heal
 			// here, because dispatch creation is insert-only and re-running it
 			// cannot duplicate a delivery.
 			heal = append(heal, activity.clone())
 			prune = append(prune, key)
-		case activity.Status == ActivityCollecting && activity.GraceExpired(nowUnix):
+		case activity.Status == StatusCollecting && activity.GraceExpired(nowUnix):
 			due = append(due, candidate{key: key, deadline: activity.GraceDeadlineUnix})
 		}
 	}
@@ -613,7 +613,7 @@ func (s *ActivityService) AdvanceExpired(ctx context.Context, groupID string, li
 // completeExpired finishes one lapsed aggregation. advanced reports whether
 // this call is the one that wrote the completion, which is how concurrent
 // sweeps end up with exactly one winner per activity without a lock.
-func (s *ActivityService) completeExpired(ctx context.Context, key ActivityKey, nowUnix int64) (Activity, bool, error) {
+func (s *Service) completeExpired(ctx context.Context, key Key, nowUnix int64) (Activity, bool, error) {
 	var (
 		result   Activity
 		advanced bool
@@ -623,14 +623,14 @@ func (s *ActivityService) completeExpired(ctx context.Context, key ActivityKey, 
 		if !found {
 			return current, false, nil
 		}
-		if current.Status != ActivityCollecting {
+		if current.Status != StatusCollecting {
 			return current, false, nil
 		}
 		if !current.GraceExpired(nowUnix) {
 			return current, false, nil
 		}
 		next := current.clone()
-		next.Status = ActivityComplete
+		next.Status = StatusComplete
 		next.CompletedAtUnix = nowUnix
 		next.UpdatedAtUnix = nowUnix
 		next.CompletionReason = CompletedGraceExpired
@@ -648,23 +648,23 @@ func (s *ActivityService) completeExpired(ctx context.Context, key ActivityKey, 
 // drop the activity from the sweep's window. In that order, since a window
 // entry for a complete activity is only a wasted read while a missing
 // dispatch is a game that never learns the result.
-func (s *ActivityService) settleCompletion(ctx context.Context, activity Activity) error {
+func (s *Service) settleCompletion(ctx context.Context, activity Activity) error {
 	if err := s.ensureDispatches(ctx, activity); err != nil {
 		return err
 	}
-	return s.pruneWindow(ctx, activity.Key.GroupID, []ActivityKey{activity.Key})
+	return s.pruneWindow(ctx, activity.Key.GroupID, []Key{activity.Key})
 }
 
 // pruneWindow removes keys from a group's window under compare-and-set.
-func (s *ActivityService) pruneWindow(ctx context.Context, groupID string, keys []ActivityKey) error {
+func (s *Service) pruneWindow(ctx context.Context, groupID string, keys []Key) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	remove := make(map[ActivityKey]struct{}, len(keys))
+	remove := make(map[Key]struct{}, len(keys))
 	for _, key := range keys {
 		remove[key] = struct{}{}
 	}
-	_, _, err := s.cfg.Windows.Update(ctx, groupID, func(current ActivityWindow, found bool) (ActivityWindow, bool, error) {
+	_, _, err := s.cfg.Windows.Update(ctx, groupID, func(current Window, found bool) (Window, bool, error) {
 		if !found {
 			return current, false, nil
 		}
@@ -716,9 +716,9 @@ func (s *ActivityService) pruneWindow(ctx context.Context, groupID string, keys 
 // participant's progress. It is client-chosen, which design constraint 4
 // allows exactly because it is reserved through this ledger rather than
 // believed.
-func (s *ActivityService) ApplyProgress(
+func (s *Service) ApplyProgress(
 	ctx context.Context,
-	key ActivityKey,
+	key Key,
 	participantID string,
 	requestID string,
 	delta ProgressDelta,
@@ -740,11 +740,11 @@ func (s *ActivityService) ApplyProgress(
 		return Participant{}, err
 	}
 	if !found {
-		return Participant{}, fmt.Errorf("%w: activity %s", ErrActivityMissing, key)
+		return Participant{}, fmt.Errorf("%w: activity %s", ErrMissing, key)
 	}
-	if activity.Status == ActivityComplete {
+	if activity.Status == StatusComplete {
 		return Participant{}, fmt.Errorf("%w: activity %s completed at %d",
-			ErrActivityStatus, key, activity.CompletedAtUnix)
+			ErrStatus, key, activity.CompletedAtUnix)
 	}
 
 	now := s.cfg.Now()
@@ -826,7 +826,7 @@ func (s *ActivityService) ApplyProgress(
 	return result, nil
 }
 
-func (s *ActivityService) markReservationApplied(ctx context.Context, key RequestKey, nowUnix int64) error {
+func (s *Service) markReservationApplied(ctx context.Context, key RequestKey, nowUnix int64) error {
 	_, _, err := s.cfg.Ledger.Update(ctx, key, func(current ProgressReservation, found bool) (ProgressReservation, bool, error) {
 		if !found {
 			// The entry expired under us. Recreating it here would resurrect a
@@ -845,7 +845,7 @@ func (s *ActivityService) markReservationApplied(ctx context.Context, key Reques
 }
 
 // LookupParticipant reads one participant's standing.
-func (s *ActivityService) LookupParticipant(ctx context.Context, key ActivityKey, participantID string) (Participant, bool, error) {
+func (s *Service) LookupParticipant(ctx context.Context, key Key, participantID string) (Participant, bool, error) {
 	participantKey := ParticipantKey{Activity: key, ParticipantID: participantID}
 	if err := participantKey.Validate(); err != nil {
 		return Participant{}, false, err
@@ -857,7 +857,7 @@ func (s *ActivityService) LookupParticipant(ctx context.Context, key ActivityKey
 	return current.Value.clone(), true, nil
 }
 
-func (s *ActivityService) lookupParticipant(ctx context.Context, key ParticipantKey) (Participant, bool, error) {
+func (s *Service) lookupParticipant(ctx context.Context, key ParticipantKey) (Participant, bool, error) {
 	current, found, err := s.cfg.Participants.Get(ctx, key)
 	if err != nil || !found {
 		return Participant{}, false, err
@@ -868,7 +868,7 @@ func (s *ActivityService) lookupParticipant(ctx context.Context, key Participant
 // Reservation reads one ledger entry. Exposed for operators answering "did
 // request X apply", which is the question a double-count investigation starts
 // from and which the implementation this replaces could not answer at all.
-func (s *ActivityService) Reservation(ctx context.Context, key ActivityKey, participantID, requestID string) (ProgressReservation, bool, error) {
+func (s *Service) Reservation(ctx context.Context, key Key, participantID, requestID string) (ProgressReservation, bool, error) {
 	requestKey := RequestKey{Activity: key, ParticipantID: participantID, RequestID: requestID}
 	if err := requestKey.Validate(); err != nil {
 		return ProgressReservation{}, false, err
@@ -886,10 +886,10 @@ func (s *ActivityService) Reservation(ctx context.Context, key ActivityKey, part
 // aggregation, one per expected game. Insert-only per game, so re-running it
 // after a partial failure cannot duplicate a delivery or, worse, mint a second
 // token and invalidate an ACK that is already in flight.
-func (s *ActivityService) ensureDispatches(ctx context.Context, activity Activity) error {
-	if activity.Status != ActivityComplete {
+func (s *Service) ensureDispatches(ctx context.Context, activity Activity) error {
+	if activity.Status != StatusComplete {
 		return fmt.Errorf("%w: activity %s is %s, dispatch needs a result",
-			ErrActivityStatus, activity.Key, activity.Status)
+			ErrStatus, activity.Key, activity.Status)
 	}
 	result := activity.result()
 	nowUnix := s.cfg.Now().Unix()
@@ -908,7 +908,7 @@ func (s *ActivityService) ensureDispatches(ctx context.Context, activity Activit
 		}
 		if token == "" {
 			// An empty token would authorize every ACK.
-			return fmt.Errorf("global: dispatch token generator returned an empty token")
+			return fmt.Errorf("activity: dispatch token generator returned an empty token")
 		}
 		dispatch := Dispatch{
 			Key:               activity.Key,
@@ -928,12 +928,12 @@ func (s *ActivityService) ensureDispatches(ctx context.Context, activity Activit
 }
 
 // LookupDispatch reads one delivery record.
-func (s *ActivityService) LookupDispatch(ctx context.Context, key ActivityKey, gameSID int32) (Dispatch, bool, error) {
+func (s *Service) LookupDispatch(ctx context.Context, key Key, gameSID int32) (Dispatch, bool, error) {
 	if err := key.Validate(); err != nil {
 		return Dispatch{}, false, err
 	}
 	if gameSID <= 0 {
-		return Dispatch{}, false, fmt.Errorf("%w: game sid must be positive, got %d", ErrActivityInvalid, gameSID)
+		return Dispatch{}, false, fmt.Errorf("%w: game sid must be positive, got %d", ErrInvalid, gameSID)
 	}
 	current, found, err := s.cfg.Dispatches.Get(ctx, DispatchKey{Activity: key, GameSID: gameSID})
 	if err != nil || !found {
@@ -945,11 +945,11 @@ func (s *ActivityService) LookupDispatch(ctx context.Context, key ActivityKey, g
 // DueDispatches lists the deliveries for one activity that may be attempted
 // now, bounded. The scan is over the activity's expected set, which is itself
 // bounded by MaxExpectedGames, so this needs no index of its own.
-func (s *ActivityService) DueDispatches(ctx context.Context, key ActivityKey, limit int) ([]Dispatch, error) {
+func (s *Service) DueDispatches(ctx context.Context, key Key, limit int) ([]Dispatch, error) {
 	if err := key.Validate(); err != nil {
 		return nil, err
 	}
-	if err := validateActivityLimit(limit); err != nil {
+	if err := validateLimit(limit); err != nil {
 		return nil, err
 	}
 	activity, found, err := s.LookupActivity(ctx, key)
@@ -957,7 +957,7 @@ func (s *ActivityService) DueDispatches(ctx context.Context, key ActivityKey, li
 		return nil, err
 	}
 	if !found {
-		return nil, fmt.Errorf("%w: activity %s", ErrActivityMissing, key)
+		return nil, fmt.Errorf("%w: activity %s", ErrMissing, key)
 	}
 	nowUnix := s.cfg.Now().Unix()
 	out := make([]Dispatch, 0, limit)
@@ -988,12 +988,12 @@ func (s *ActivityService) DueDispatches(ctx context.Context, key ActivityKey, li
 // rather than a record that simply stops being picked up — a queue that
 // silently stops draining is exactly the failure the design constraints say
 // survives because nothing reports it.
-func (s *ActivityService) AttemptDispatch(ctx context.Context, key ActivityKey, gameSID int32) (Dispatch, error) {
+func (s *Service) AttemptDispatch(ctx context.Context, key Key, gameSID int32) (Dispatch, error) {
 	if err := key.Validate(); err != nil {
 		return Dispatch{}, err
 	}
 	if gameSID <= 0 {
-		return Dispatch{}, fmt.Errorf("%w: game sid must be positive, got %d", ErrActivityInvalid, gameSID)
+		return Dispatch{}, fmt.Errorf("%w: game sid must be positive, got %d", ErrInvalid, gameSID)
 	}
 	now := s.cfg.Now()
 	nowUnix := now.Unix()
@@ -1065,7 +1065,7 @@ func (s *ActivityService) AttemptDispatch(ctx context.Context, key ActivityKey, 
 // dispatchBackoff grows the delay with the attempt count, capped, so a game
 // that is down is retried less often rather than at a fixed rate that turns a
 // single outage into a hot loop.
-func (s *ActivityService) dispatchBackoff(attempt int) time.Duration {
+func (s *Service) dispatchBackoff(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
@@ -1082,12 +1082,12 @@ func (s *ActivityService) dispatchBackoff(attempt int) time.Duration {
 // activity and a game sid, so without a token any caller could mark another
 // game's settlement processed and the retry would stop before the game ever
 // saw it.
-func (s *ActivityService) AckDispatch(ctx context.Context, key ActivityKey, gameSID int32, token string) (Dispatch, error) {
+func (s *Service) AckDispatch(ctx context.Context, key Key, gameSID int32, token string) (Dispatch, error) {
 	if err := key.Validate(); err != nil {
 		return Dispatch{}, err
 	}
 	if gameSID <= 0 {
-		return Dispatch{}, fmt.Errorf("%w: game sid must be positive, got %d", ErrActivityInvalid, gameSID)
+		return Dispatch{}, fmt.Errorf("%w: game sid must be positive, got %d", ErrInvalid, gameSID)
 	}
 	if token == "" {
 		return Dispatch{}, fmt.Errorf("%w: activity %s game %d", ErrDispatchToken, key, gameSID)
@@ -1145,11 +1145,11 @@ func (s *ActivityService) AckDispatch(ctx context.Context, key ActivityKey, game
 	return result, nil
 }
 
-func cloneActivityKeys(in []ActivityKey) []ActivityKey {
+func cloneActivityKeys(in []Key) []Key {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]ActivityKey, len(in))
+	out := make([]Key, len(in))
 	copy(out, in)
 	return out
 }

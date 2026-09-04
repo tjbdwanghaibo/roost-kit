@@ -19,12 +19,20 @@ const (
 	ModChat      app.ModName = "service.chat"
 	ModDirectory app.ModName = "service.directory"
 	ModGlobal    app.ModName = "service.global"
-	// ModGlobalActivity is a separate capability from ModGlobal because the
-	// two halves share no state — routing and leases answer "where does this
-	// game belong and is it alive", activity coordination answers "has every
-	// game reached the phase yet". A deployment may want one and not the
-	// other, and joining them would give the activity half a reason to reach
+	// ModGlobalActivity is the cross-server activity coordination service. It
+	// is a separate capability from ModGlobal because the two share no state
+	// — routing and leases answer "where does this game belong and is it
+	// alive", activity coordination answers "has every game reached the phase
+	// yet" — and joining them would give the activity side a reason to reach
 	// into the lease store.
+	//
+	// The name keeps "global" because that is what the service coordinates
+	// across, and because it was published under this name. The CODE no
+	// longer lives in package global: two capabilities in one package meant
+	// two things that deploy separately sharing one Go package, since
+	// app.Service is one per process. It is package global/activity, and
+	// activity.CapabilityName is checked against this constant in the
+	// integration tests.
 	ModGlobalActivity app.ModName = "service.global.activity"
 	ModMail           app.ModName = "service.mail"
 	ModMatch          app.ModName = "service.match"
@@ -33,11 +41,21 @@ const (
 	ModSession        app.ModName = "service.session"
 )
 
-// All is every capability name this repository can register.
+// All is every consumer-facing capability name this repository can register.
 //
 // It exists so a test can assert that the table has no duplicates — the one
 // failure a name table is supposed to prevent, and the one that a table
 // nobody checks does not prevent at all.
+//
+// It lists the CONSUMER-facing names only. A service whose transport is
+// generated also publishes an owner-only name derived from this one
+// (<name>.local), which is how a process knows it holds the implementation
+// rather than a client to it; that name is not a lookup any consumer writes,
+// so listing it here would invite one.
+//
+// Each generated service also declares its own CapabilityName constant, so its
+// transport does not depend on this file. That is two literals of the same
+// name, so integration/ asserts they are equal rather than trusting it.
 var All = []app.ModName{
 	ModAccount, ModChat, ModDirectory, ModGlobal, ModGlobalActivity,
 	ModMail, ModMatch, ModPlatform, ModRank, ModSession,

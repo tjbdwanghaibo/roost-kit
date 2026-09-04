@@ -74,7 +74,7 @@ func newService(t *testing.T, mutate ...func(*Config)) (*Service, *clock, Config
 	cfg := Config{
 		Accounts:      versionstore.NewMemoryStore[string, Account](),
 		Roles:         versionstore.NewMemoryStore[int64, Role](),
-		Servers:       versionstore.NewMemoryStore[int32, Server](),
+		Servers:       versionstore.NewMemoryStore[int32, GameServer](),
 		Names:         names,
 		Slots:         versionstore.NewMemoryStore[string, Slot](),
 		Verifier:      acceptingVerifier(),
@@ -90,7 +90,7 @@ func newService(t *testing.T, mutate ...func(*Config)) (*Service, *clock, Config
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.UpsertServer(context.Background(), Server{ID: 1, Name: "s1", Status: ServerOpen}); err != nil {
+	if _, err := service.UpsertServer(context.Background(), GameServer{ID: 1, Name: "s1", Status: ServerOpen}); err != nil {
 		t.Fatal(err)
 	}
 	return service, c, cfg
@@ -106,7 +106,7 @@ func TestNewRefusesAConfigThatCannotAuthenticate(t *testing.T) {
 		return Config{
 			Accounts: versionstore.NewMemoryStore[string, Account](),
 			Roles:    versionstore.NewMemoryStore[int64, Role](),
-			Servers:  versionstore.NewMemoryStore[int32, Server](),
+			Servers:  versionstore.NewMemoryStore[int32, GameServer](),
 			Names:    names, Slots: versionstore.NewMemoryStore[string, Slot](),
 			Verifier: acceptingVerifier(), Allocator: &durableAllocator{},
 			NameRules: simpleNameRules(), SessionSecret: "secret",
@@ -252,7 +252,7 @@ func TestOneRolePerAccountPerServer(t *testing.T) {
 		t.Fatalf("a second role on the same server returned %v, want ErrRoleLimit", err)
 	}
 	// A different server is a different slot.
-	if _, err := service.UpsertServer(ctx, Server{ID: 2, Status: ServerOpen}); err != nil {
+	if _, err := service.UpsertServer(ctx, GameServer{ID: 2, Status: ServerOpen}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.CreateRole(ctx, account.ID, 2, "Carol"); err != nil {
@@ -538,7 +538,7 @@ func TestCreateRoleRequiresAnOpenServerAndAKnownAccount(t *testing.T) {
 		t.Fatalf("an unknown server was accepted: %v", err)
 	}
 	for _, status := range []ServerStatus{ServerMaintenance, ServerFull, ServerClosed} {
-		if _, err := service.UpsertServer(ctx, Server{ID: 5, Status: status}); err != nil {
+		if _, err := service.UpsertServer(ctx, GameServer{ID: 5, Status: status}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := service.CreateRole(ctx, account.ID, 5, "Alice"); !errors.Is(err, ErrServerClosed) {

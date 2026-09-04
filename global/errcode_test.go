@@ -21,28 +21,35 @@ import (
 const (
 	segmentFirst     = 570101
 	segmentLast      = 570199
-	segmentAllocated = 23
+	segmentAllocated = 11
 )
 
 // expectedCodes is this package's allocated set, written out.
 //
-// It is a list rather than a contiguous range because 570111 is a HOLE, and
-// the hole is deliberate: a catch-all "store failed" code used to sit there,
-// between the routing codes and the activity codes, and it has been removed
-// because nothing could produce it deliberately and an unclassified error is
-// honestly CodeInternal.
+// It is a list rather than a contiguous range because 570111 through 570124
+// are a HOLE, and every part of the hole is deliberate:
 //
-// The activity codes are NOT renumbered down into the gap. They were
-// observable in a published release — ActivityCode's hand-written switch
-// really did return 570112 and up — so changing their values would break a
-// client that matched on them. A permanent hole is the smaller cost, and it is
-// cheaper to explain than a silently shifted code.
+//   - 570111 was a catch-all "store failed" code. It was removed because
+//     nothing could produce it deliberately and an unclassified error is
+//     honestly CodeInternal.
+//   - 570112 through 570124 were the ACTIVITY codes. The activity service
+//     lived in this package until the transport generator made the packaging
+//     visible — this package published two capabilities, and app.Service is
+//     one per process, so routing and activity coordination were always two
+//     deployments sharing one Go package. They are now two packages, and the
+//     activity codes moved with the service into its own 6201xx segment.
+//
+// None of the vacated numbers are reused, and CodeRequestInvalid takes 570125
+// past the end of them rather than 570111. Every one of those numbers meant
+// something in a shipped release. Renumbering the activity codes was already
+// a breaking change — so is renaming global.ActivityService to
+// activity.Service — and it is one a major version carries; quietly giving an
+// old number a new meaning is not, because a client that still matches on it
+// gets a wrong answer rather than an error.
 var expectedCodes = []int32{
 	570101, 570102, 570103, 570104, 570105, 570106, 570107, 570108, 570109, 570110,
-	// 570111 is the removed catch-all. Deliberately not reused: a code that
-	// once meant "store failed" should not come back meaning something else.
-	570112, 570113, 570114, 570115, 570116, 570117,
-	570118, 570119, 570120, 570121, 570122, 570123, 570124,
+	// 570111-570124 retired: see above.
+	570125,
 }
 
 // internalReason is what errcode.ClientError returns for anything it cannot
@@ -51,29 +58,17 @@ const internalReason = "server error"
 
 // codedSentinels is the pairing, as data.
 var codedSentinels = map[int32]error{
-	CodeRouteInvalid:       ErrRouteInvalid,
-	CodeRouteMissing:       ErrRouteMissing,
-	CodeRouteStale:         ErrRouteStale,
-	CodeRouteMigrating:     ErrRouteMigrating,
-	CodeLeaseInvalid:       ErrLeaseInvalid,
-	CodeLeaseMissing:       ErrLeaseMissing,
-	CodeLeaseNotHolder:     ErrLeaseNotHolder,
-	CodeLeaseExpired:       ErrLeaseExpired,
-	CodeRangeInvalid:       ErrRangeInvalid,
-	CodeConflict:           ErrConflict,
-	CodeActivityInvalid:    ErrActivityInvalid,
-	CodeActivityMissing:    ErrActivityMissing,
-	CodeActivityExists:     ErrActivityExists,
-	CodeActivityStatus:     ErrActivityStatus,
-	CodeNotifyUnexpected:   ErrNotifyUnexpected,
-	CodeNotifyLate:         ErrNotifyLate,
-	CodeActivityBacklog:    ErrActivityBacklog,
-	CodeParticipantInvalid: ErrParticipantInvalid,
-	CodeRequestInvalid:     ErrRequestInvalid,
-	CodeDispatchMissing:    ErrDispatchMissing,
-	CodeDispatchToken:      ErrDispatchToken,
-	CodeDispatchExhausted:  ErrDispatchExhausted,
-	CodeDispatchNotDue:     ErrDispatchNotDue,
+	CodeRouteInvalid:   ErrRouteInvalid,
+	CodeRouteMissing:   ErrRouteMissing,
+	CodeRouteStale:     ErrRouteStale,
+	CodeRouteMigrating: ErrRouteMigrating,
+	CodeLeaseInvalid:   ErrLeaseInvalid,
+	CodeLeaseMissing:   ErrLeaseMissing,
+	CodeLeaseNotHolder: ErrLeaseNotHolder,
+	CodeLeaseExpired:   ErrLeaseExpired,
+	CodeRangeInvalid:   ErrRangeInvalid,
+	CodeConflict:       ErrConflict,
+	CodeRequestInvalid: ErrRequestInvalid,
 }
 
 // Every sentinel this package returns must carry its own code.

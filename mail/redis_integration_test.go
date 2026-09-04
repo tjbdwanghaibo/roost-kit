@@ -223,7 +223,7 @@ func TestIntegrationTheServiceRunsEndToEndOnRedis(t *testing.T) {
 	sent, err := service.Send(ctx, SendRequest{
 		Audience: AudienceDirect, Recipients: []int64{7},
 		Subject: "reward", Attachment: []byte("100 gold"),
-		ExpiresIn: time.Hour, RequestID: "send-1",
+		ExpiresInSeconds: 3600, RequestID: "send-1",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -233,7 +233,7 @@ func TestIntegrationTheServiceRunsEndToEndOnRedis(t *testing.T) {
 	again, err := service.Send(ctx, SendRequest{
 		Audience: AudienceDirect, Recipients: []int64{7},
 		Subject: "reward", Attachment: []byte("100 gold"),
-		ExpiresIn: time.Hour, RequestID: "send-1",
+		ExpiresInSeconds: 3600, RequestID: "send-1",
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -49,6 +49,15 @@ const (
 	CodeNotPermitted   int32 = 550106
 	CodeTicketMatched  int32 = 550107
 	CodeConflict       int32 = 550108
+	// CodeRequestInvalid is what a malformed request reports — a payload the
+	// transport could not decode.
+	//
+	// It reuses 550109, which briefly held a catch-all "store failed" code.
+	// Reuse is safe here and would not be in every segment: nothing ever
+	// emitted 550109, because this package had no error-to-code mapping at
+	// all until one was added, so no client can have matched on it. Contrast
+	// global's 570111, which WAS observable and is therefore left vacant.
+	CodeRequestInvalid int32 = 550109
 )
 
 var (
@@ -66,6 +75,13 @@ var (
 	ErrNotPermitted  = errcode.Define(CodeNotPermitted, "match: caller does not own this ticket", "")
 	ErrTicketMatched = errcode.Define(CodeTicketMatched, "match: ticket is already matched", "")
 	ErrConflict      = errcode.Define(CodeConflict, "match: conflict", "")
+	// ErrRequestInvalid reports a request the transport could not decode.
+	//
+	// The generated transport expects every service to have it: a malformed
+	// payload is a category every wire surface needs an answer for, and
+	// answering with a code that means something else would mislead a client
+	// that switches on it.
+	ErrRequestInvalid = errcode.Define(CodeRequestInvalid, "match: request is invalid", "")
 )
 
 // Limits bound what a queue may hold. Every one of these is a bound the

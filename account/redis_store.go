@@ -22,7 +22,7 @@ import (
 type RedisStores struct {
 	Accounts versionstore.Store[string, Account]
 	Roles    versionstore.Store[int64, Role]
-	Servers  versionstore.Store[int32, Server]
+	Servers  versionstore.Store[int32, GameServer]
 	Slots    versionstore.Store[string, Slot]
 	Names    directory.Directory
 }
@@ -65,10 +65,10 @@ func NewRedisStores(client versionstore.RedisClient, prefix string, claimTTL tim
 	if err != nil {
 		return RedisStores{}, fmt.Errorf("account: role store: %w", err)
 	}
-	servers, err := versionstore.NewRedisStore(client, versionstore.RedisConfig[int32, Server]{
+	servers, err := versionstore.NewRedisStore(client, versionstore.RedisConfig[int32, GameServer]{
 		Prefix: prefix + ":srv:",
 		KeyOf:  func(id int32) string { return strconv.FormatInt(int64(id), 10) },
-		Codec:  versionstore.JSONCodec[Server]{},
+		Codec:  versionstore.JSONCodec[GameServer]{},
 	})
 	if err != nil {
 		return RedisStores{}, fmt.Errorf("account: server store: %w", err)

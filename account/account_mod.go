@@ -50,7 +50,7 @@ func NewMod(
 }
 
 // Name implements app.Mod.
-func (m *Mod) Name() app.ModName { return servicemods.ModAccount }
+func (m *Mod) Name() app.ModName { return CapabilityName }
 
 // DependsOn implements app.ModDependencyProvider.
 func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
@@ -118,7 +118,10 @@ func (m *Mod) Provide(r *app.Registry) error {
 		return fmt.Errorf("account mod: %w", err)
 	}
 	m.service = service
-	return mods.RegisterAll(r, mods.Capability{Name: servicemods.ModAccount, Value: service})
+	// Two capabilities, from one generated call so they cannot be published
+	// apart: the interface consumers look up, and the owner-only name the
+	// Server looks up to know this process holds the implementation.
+	return mods.RegisterAll(r, OwnerCapabilities(service)...)
 }
 
 // Start implements app.Mod. Nothing to start.

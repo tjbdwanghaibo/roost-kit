@@ -23,7 +23,7 @@ type Config struct {
 	// Accounts, Roles and Servers hold the durable state.
 	Accounts versionstore.Store[string, Account]
 	Roles    versionstore.Store[int64, Role]
-	Servers  versionstore.Store[int32, Server]
+	Servers  versionstore.Store[int32, GameServer]
 
 	// Names reserves display names. Uniqueness is a two-phase claim so a
 	// crash between reserving the name and writing the role releases the name
@@ -470,23 +470,23 @@ func (s *Service) MarkLogout(ctx context.Context, accountID string, playerID int
 }
 
 // UpsertServer records a server. Operator-facing.
-func (s *Service) UpsertServer(ctx context.Context, server Server) (Server, error) {
+func (s *Service) UpsertServer(ctx context.Context, server GameServer) (GameServer, error) {
 	if server.ID == 0 {
-		return Server{}, fmt.Errorf("%w: id is zero", ErrServerInvalid)
+		return GameServer{}, fmt.Errorf("%w: id is zero", ErrServerInvalid)
 	}
 	if server.Status == "" {
 		server.Status = ServerOpen
 	}
 	now := s.cfg.Now()
-	var result Server
-	_, _, err := s.cfg.Servers.Update(ctx, server.ID, func(current Server, _ bool) (Server, bool, error) {
+	var result GameServer
+	_, _, err := s.cfg.Servers.Update(ctx, server.ID, func(current GameServer, _ bool) (GameServer, bool, error) {
 		next := server
 		next.UpdatedAtUnix = now.Unix()
 		result = next
 		return next, true, nil
 	})
 	if err != nil {
-		return Server{}, err
+		return GameServer{}, err
 	}
 	return result, nil
 }

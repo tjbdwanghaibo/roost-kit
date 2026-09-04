@@ -67,6 +67,13 @@ const (
 	CodeSessionInvalid  int32 = 560111
 	CodeRangeInvalid    int32 = 560112
 	CodeConflict        int32 = 560113
+	// CodeRequestInvalid reports a request this service could not even read:
+	// a wire frame that failed to decode. It is last in the segment because
+	// it was added when the generated transport arrived — the generated
+	// handler needs one coded error to answer a frame it cannot decode, and
+	// answering that with CodeInternal would report a caller's malformed
+	// request as a server fault.
+	CodeRequestInvalid int32 = 560114
 )
 
 var (
@@ -86,6 +93,10 @@ var (
 	ErrSessionInvalid = errcode.Define(CodeSessionInvalid, "account: session token is invalid", "")
 	ErrRangeInvalid   = errcode.Define(CodeRangeInvalid, "account: range is invalid", "")
 	ErrConflict       = errcode.Define(CodeConflict, "account: conflict", "")
+	// ErrRequestInvalid reports a request that could not be decoded. The
+	// generated transport returns it for a frame it cannot read, which is the
+	// one refusal the transport itself has to be able to make.
+	ErrRequestInvalid = errcode.Define(CodeRequestInvalid, "account: request is invalid", "")
 )
 
 // Error maps an error to the code and reason a client sees.
@@ -201,8 +212,13 @@ const (
 // acceptsNewRoles reports whether a role may be created on this server.
 func (s ServerStatus) acceptsNewRoles() bool { return s == ServerOpen }
 
-// Server is one game server a role can live on.
-type Server struct {
+// GameServer is one game server a role can live on.
+//
+// It is not the generated Server in this package, which is the process host
+// for the account service. The two would collide as type names, and a game
+// server record and a service process are about as different as two things in
+// one package get — so this one carries the longer name.
+type GameServer struct {
 	ID     int32        `json:"id"`
 	Name   string       `json:"name"`
 	Status ServerStatus `json:"status"`

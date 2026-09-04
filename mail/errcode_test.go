@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/tjbdwanghaibo/roost-core/errcode"
 )
@@ -164,14 +163,14 @@ func TestErrorsFromRealCallPathsCarryTheirCodes(t *testing.T) {
 		}, CodeRequestInvalid},
 		{"mail with no expiry", func() error {
 			req := directTo(1)
-			req.ExpiresIn = 0
+			req.ExpiresInSeconds = 0
 			_, err := h.service.Send(ctx, req)
 			return err
 		}, CodeMailInvalid},
 		{"broadcast with no deliverer", func() error {
 			_, err := h.service.Send(ctx, SendRequest{
 				Audience: AudienceBroadcast, Subject: "s",
-				ExpiresIn: time.Hour, RequestID: "b1",
+				ExpiresInSeconds: 3600, RequestID: "b1",
 			})
 			return err
 		}, CodeAudienceInvalid},

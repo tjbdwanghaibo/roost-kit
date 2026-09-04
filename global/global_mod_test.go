@@ -3,7 +3,6 @@ package global
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/spf13/viper"
 	"github.com/tjbdwanghaibo/roost-core/app"
@@ -15,30 +14,28 @@ import (
 func modConfig() *viper.Viper {
 	cfg := viper.New()
 	cfg.Set("global.key_prefix", "roost:global")
-	cfg.Set("global.reservation_ttl", 30*time.Minute)
 	return cfg
 }
 
-// The reservation ttl has no default. It must exceed the longest client retry
-// horizon: past it a replayed progress request is indistinguishable from a new
-// one and the progress is applied twice.
-func TestModRequiresAReservationTTL(t *testing.T) {
-	cfg := viper.New()
-	cfg.Set("global.key_prefix", "roost:global")
-	if err := NewMod(nil).Init(cfg); err == nil {
-		t.Fatal("Init accepted a missing reservation ttl")
-	}
-	cfg.Set("global.reservation_ttl", time.Duration(0))
-	if err := NewMod(nil).Init(cfg); err == nil {
-		t.Fatal("Init accepted a zero reservation ttl")
+// The activity settings this Mod used to read — reservation_ttl,
+// grace_window, dispatch_attempts, dispatch_backoff — moved with the service
+// to activity.Mod, and so did the tests that pin their contracts. What is left
+// here has to keep requiring the key prefix, which has no default in any
+// service: a defaulted prefix is two deployments quietly sharing a keyspace.
+func TestModRequiresAKeyPrefix(t *testing.T) {
+	if err := NewMod(nil).Init(viper.New()); err == nil {
+		t.Fatal("Init accepted a missing key prefix")
 	}
 }
 
-func TestModRefusesANonPositiveDispatchBudget(t *testing.T) {
+// The activity keys are no longer read from this section. A deployment that
+// still sets them gets no error — viper ignores unknown keys — so this pins
+// that they are also not silently REQUIRED here any more, which is what would
+// keep a split deployment from starting.
+func TestModIgnoresTheActivitySettingsThatMovedOut(t *testing.T) {
 	cfg := modConfig()
-	cfg.Set("global.dispatch_attempts", 0)
-	if err := NewMod(nil).Init(cfg); err == nil {
-		t.Fatal("Init accepted a zero dispatch budget; an unbounded retry queue never drains")
+	if err := NewMod(nil).Init(cfg); err != nil {
+		t.Fatalf("Init failed with only the routing settings: %v", err)
 	}
 }
 
@@ -49,6 +46,9 @@ func TestModInitAndProvideContract(t *testing.T) {
 	}
 	if got := mod.Name(); got != servicemods.ModGlobal {
 		t.Fatalf("the mod is named %q", got)
+	}
+	if got := mod.Name(); got != CapabilityName {
+		t.Fatalf("the mod is named %q but publishes %q", got, CapabilityName)
 	}
 	var asAny any = mod
 	provider, ok := asAny.(app.ModDependencyProvider)
