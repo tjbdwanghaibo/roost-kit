@@ -3,7 +3,7 @@ module github.com/tjbdwanghaibo/roost-kit
 go 1.27.0
 
 require (
-	github.com/nats-io/nats.go v1.52.0
+	github.com/nats-io/nats.go v1.53.1
 	github.com/quic-go/quic-go v0.59.1
 	github.com/redis/go-redis/v9 v9.19.0
 	github.com/spf13/viper v1.21.0
