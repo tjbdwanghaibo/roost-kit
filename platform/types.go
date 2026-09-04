@@ -56,6 +56,17 @@ const (
 	CodeDeliveryFailed   int32 = 600108
 	CodeDeliveryExpired  int32 = 600109
 	CodeConflict         int32 = 600110
+	// CodeNotResolvable and CodeAdminNoteRequired belong to the operator
+	// surface in admin.go. They are separate codes because they are separate
+	// answers: "this order is not in a state a human may change" and "you did
+	// not say why".
+	CodeNotResolvable     int32 = 600111
+	CodeAdminNoteRequired int32 = 600112
+	// CodeOrderSettled reports an order a human resolved out of band. It is
+	// distinct from CodeDeliveryExpired (attempts ran out) and from
+	// CodeDeliveryHeld (an attempt is in flight) because a caller acts on it
+	// differently: stop, rather than retry later.
+	CodeOrderSettled int32 = 600113
 )
 
 var (
@@ -82,6 +93,21 @@ var (
 	ErrDeliveryFailed  = errcode.Define(CodeDeliveryFailed, "platform: delivery failed", "")
 	ErrDeliveryExpired = errcode.Define(CodeDeliveryExpired, "platform: delivery attempts are exhausted", "")
 	ErrConflict        = errcode.Define(CodeConflict, "platform: conflict", "")
+
+	// ErrNotResolvable reports that an order is not in a state an operator may
+	// change. It is what refuses reopening a DELIVERED order, which would
+	// grant the goods a second time — the defect this package exists to make
+	// unrepresentable, reached through the operator door instead of the
+	// provider's.
+	ErrNotResolvable = errcode.Define(CodeNotResolvable, "platform: order is not in a resolvable state", "")
+	// ErrAdminNoteRequired reports a missing or oversized operator note.
+	ErrAdminNoteRequired = errcode.Define(CodeAdminNoteRequired, "platform: an operator note is required", "")
+	// ErrOrderSettled reports that this order was resolved outside the
+	// service. Without it a settled order fell through to ErrDeliveryHeld —
+	// "a delivery is in flight: order o1 until 0" — which the retry hook
+	// treats as benign, so a refunded order would be retried forever and the
+	// nonsense message would be the only clue.
+	ErrOrderSettled = errcode.Define(CodeOrderSettled, "platform: order was settled out of band", "")
 )
 
 // Error maps an error to the code and reason a client sees.
@@ -167,6 +193,11 @@ const (
 	// DeliveryExhausted means the attempt budget is spent. It is terminal and
 	// needs an operator: the player paid and did not receive the goods.
 	DeliveryExhausted DeliveryState = "exhausted"
+	// DeliverySettled means a human resolved this order outside the service —
+	// refunded, or granted by hand. It is distinct from DeliveryDelivered on
+	// purpose: a reconciliation that counted it as delivered would report a
+	// fulfilment that did not happen.
+	DeliverySettled DeliveryState = "settled"
 )
 
 // Order is one paid purchase and its delivery state.
@@ -219,11 +250,23 @@ type Order struct {
 	CreatedAtUnix   int64 `json:"created_at_unix"`
 	DeliveredAtUnix int64 `json:"delivered_at_unix,omitempty"`
 	UpdatedAtUnix   int64 `json:"updated_at_unix"`
+
+	// Reopens counts how many times an operator returned this order to the
+	// retry queue. It is kept rather than reset because "we reopened this five
+	// times and it still fails" is the fact that stops someone reopening it a
+	// sixth time, and resetting Attempts alone would erase it.
+	Reopens int32 `json:"reopens,omitempty"`
+	// AdminNote and AdminActionAtUnix record the last operator intervention.
+	// The note is required by admin.go: an intervention on a paid order with
+	// no recorded reason cannot be reviewed.
+	AdminNote         string `json:"admin_note,omitempty"`
+	AdminActionAtUnix int64  `json:"admin_action_at_unix,omitempty"`
 }
 
 // Terminal reports whether the order needs no further delivery work.
 func (o Order) Terminal() bool {
-	return o.State == DeliveryDelivered || o.State == DeliveryExhausted
+	return o.State == DeliveryDelivered || o.State == DeliveryExhausted ||
+		o.State == DeliverySettled
 }
 
 // Due reports whether a delivery attempt may run now.

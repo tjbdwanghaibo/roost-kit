@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -35,6 +36,20 @@ const SweepBatch = 100
 func (s *Server) run(ctx context.Context) error {
 	ticker := time.NewTicker(SweepInterval)
 	defer ticker.Stop()
+	// Resolved ONCE, before the loop, and that placement is the lesson rather
+	// than a tidy-up. This used to be a bare `s.Service().(*Service)` inside
+	// the ticker body — so when the owning Mod briefly published a capability
+	// WRAPPER under the owner-only name, this did not fail at startup: it
+	// panicked thirty seconds in, and only in a deployment that had actually
+	// supplied owners to sweep. A lazy assertion moves a wiring error out of
+	// startup and into production traffic.
+	service, ok := s.Service().(*Service)
+	if !ok {
+		// The Server only starts on the local implementation, so this cannot
+		// happen — and if it ever does, sweeping nothing silently is how a run
+		// deadline stops being enforced with nothing failing.
+		return fmt.Errorf("session server: the local capability is not a *Service, so no run deadline is being enforced")
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -44,7 +59,7 @@ func (s *Server) run(ctx context.Context) error {
 			if len(owners) == 0 {
 				continue
 			}
-			resolved, err := s.Service().(*Service).Sweep(ctx, owners, SweepBatch)
+			resolved, err := service.Sweep(ctx, owners, SweepBatch)
 			if err != nil {
 				// Reported, not returned: a sweep that failed is retried on
 				// the next tick, and taking the process down for it would

@@ -55,8 +55,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/subosito/gotenv v1.6.0 h1:9NlTDc1FTs4qu0DDq7AEtTPNw6SVm7uBMsUCUjABIf8=
 github.com/subosito/gotenv v1.6.0/go.mod h1:Dk4QP5c2W3ibzajGcXpNraDfq2IrhjMIvMSWPKKo0FU=
-github.com/tjbdwanghaibo/roost-codegen v1.12.0 h1:itrNb59Cc9QrEuh9P2c5bzQBreGjBleO+of9BpjEiP8=
-github.com/tjbdwanghaibo/roost-codegen v1.12.0/go.mod h1:e7y5ynIDCAZd+xXkktd3oL4FBPOxkagVxLmoZ6denH0=
+github.com/tjbdwanghaibo/roost-codegen v1.12.1 h1:0EANdkIBxJ+xGVAF5OnqxI/XX507kYAAAvq3WrYJpsA=
+github.com/tjbdwanghaibo/roost-codegen v1.12.1/go.mod h1:R4rEROIbUDQDSaRl9OSq2QnvTf/ZQ9IBtMCEUgpRDwY=
 github.com/tjbdwanghaibo/roost-core v1.11.2 h1:CxSAtfpIEYia+miuVRkrJH4oHbfybTD15fvwPmqK73c=
 github.com/tjbdwanghaibo/roost-core v1.11.2/go.mod h1:H2826BUpQnG2c9CpCuaRjNmvRI0JYrI6jzE2RUgY6qI=
 github.com/tjbdwanghaibo/roost-kit v1.11.2 h1:hFH96zoYJ5ypdWGqy2uHQltzL9kHDfPB+l2RgaLSCtM=

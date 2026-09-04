@@ -208,6 +208,60 @@
   nil，所以那个变异是空操作。优先级并非我的代码实现的——**确立它的是 `chat.denied`
   的 wrap 顺序**（`%w: %w`，拒绝在前）。改那个顺序才真的变红。
 
+### 运维面（`admin.go`）
+
+三个服务有**真正的死路** —— 自动路径已经放弃、而在此之前没有任何代码路径能改变它的
+终态。不是补齐对称性:
+
+- **`platform`**：订单尝试耗尽 = 玩家付了钱、货永远不发。`AttemptDelivery` 正确地拒绝
+  它（否则重试预算就不是预算），唯一痕迹是一行 `slog.Error` —— 不是工作队列，也活不过
+  日志轮转。新增 `ReopenDelivery`（重回重试队列，**只允许 exhausted**）与
+  `SettleOutOfBand`（已退款/人工发货）。
+
+  `DeliverySettled` 是**第三个终态**而不是复用 `DeliveryDelivered`：一次把人工退款算成
+  已发货的对账，会报出本服务并没有完成的履约。
+
+  加这个状态时自己引入并抓到一个 bug：`AttemptDelivery` 会让 settled 落进"不到期"分支
+  并报 `ErrDeliveryHeld`（"a delivery is in flight: order o1 until 0"），而重试钩子把它
+  当成正常 —— **一笔已退款的订单会被每 tick 重试到永远**。现在它有自己的
+  `ErrOrderSettled`。
+
+- **`global/activity`**：dispatch 尝试耗尽 = 某个 game 服永远收不到活动结果，两条自动
+  路径都拒绝它。新增 `ReopenDispatch`。
+
+  **ACK 令牌在重开时不换**，这是这里最容易反过来做错的一条：game 可能已经收到并应用了
+  结果、只是确认丢了，之后 dispatch 耗尽；重开会再投一次，而 game 唯一能去重的键就是
+  令牌。换新令牌 = 恰好坑掉那些做对了事的调用方。这是 mail 的 claim token 那条规则。
+
+- **`session`**：Releaser 永远不可能成功的资源（副本被带外删了）与暂时故障完全无法
+  区分，sweep 永远重试。新增 `ForceRelease` —— 它**不调用** Releaser，因为运维之所以
+  在这里就是因为它不可能成功；调了再忽略错误会让"尝试过并已完成"看起来成立。
+
+  后果比看起来严重，而且从 `Run.Live` 上看不出来：`Enter` → claim 被占 →
+  `resolveClaim` → run 不 live → 释放资源失败 → **claim 永不释放**。claim 是故意在清理
+  成功后才释放的（对的），代价是一个永远无法成功的释放 = 一个**永远进不去的玩家**。
+  规划时我把这条说反了（"owner 不会被挡"）——挡住 Enter 的是 claim，不是 Live。
+
+三条共同的约束：**不上总线**（都没有 `//roost:rpc`；集成测试双向钉住"公开 capability
+不满足 `Admin`、owner-only capability 必须满足"）、**note 必填无默认**（没有记录理由的
+干预无法复核）、**不做枚举**。
+
+不做枚举是对规划时一个说法的更正："找不到耗尽的订单"听起来像问题，其实**支付渠道手里
+有权威清单**，运维真正问的是"渠道说收了钱的这些单，我们发货了吗"——`Service.Order`
+已经按 id 回答了。在这里建索引是重复一份本服务不拥有的事实来源，而且必须写在设置终态
+的那次 CAS 之外，于是它可以和它索引的记录不一致。
+
+**核实后不是死路的两条**（也是我规划时说错的）：`global` 卡在 migrating 用现成的
+`AbortMigration` 就能救回（epoch 从 `Resolve` 拿，而且它本来就在跨进程接口上）；
+`mail` 满邮箱是有文档的上界、`chat` 超期未裁剪是存储成本，都不是"没有任何路可走"。
+
+三个包共 22 条变异验证。其中**六条一开始是绿的**，全部是测试自身的问题，值得记：
+"重开清空退避"那行其实是**冗余的**（耗尽路径已经把它置零了），所以删掉它什么都不变 ——
+改成钉住"重开后立刻到期"这个性质，设一个未来时间的变异才会红；`Reopens`/`ForcedReleases`
+的累加在只干预一次的测试里看不出来（补了跨多次干预的断言）；而"顺手调一次 Releaser
+并忽略错误"这条**连续两次是绿的** —— 第一次因为 fake 只数成功不数调用，第二次因为我
+在干预**之后**才读基线，那次多出来的调用已经被算进基线里了。
+
 ### 跨进程传输层（`servicerpc` 生成器）
 
 - **九个服务各有一个手写接口 + 一份生成的传输层**（`directory` 故意没有：它是被
@@ -267,14 +321,44 @@
 
   接进来时先撞到一件事：`go mod tidy` 把本仓的 go 指令从 1.25.0 顶到 **1.26.5**（
   roost-codegen v1.12.0 的 go 指令），而且**手工按回去不管用**——下次 tidy 又顶回来。
-  也就是说一个生成器的 go 指令是每个消费方都要满足的下限。**已按"四仓统一到最新"
-  处理**：core / kit / codegen / service 与 `go.work` 全部改为 `go 1.27.0`，于是
-  tidy 稳定不再动它。这条代价记在 roost-codegen 的 CHANGELOG 里：1.25.x / 1.26.x
-  两条 consumer lane 因此没了。
+  也就是说一个生成器的 go 指令是每个消费方都要满足的下限。**已按"五仓统一到最新"
+  处理**：core / kit / codegen / service / skill 与 `go.work` 全部改为 `go 1.27.0`，
+  于是 tidy 稳定不再动它。这条代价记在 roost-codegen 的 CHANGELOG 里：1.25.x /
+  1.26.x 两条 consumer lane 因此没了。
+
+  工具依赖钉在 **v1.12.1**。v1.12.0 是不能用的：它的模板在 owner-only 名下注册
+  capability 包装器，所以 `GOWORK=off go generate` 会**静默把五个服务的进程级修复
+  改回去**（实测过，它把 mail 改回 `Value: wrapped` 并报"generated"）。现在发布态
+  `go generate` 报九个 `up to date`，发布态 `-check` 面对一个手改过的生成文件会
+  `STALE` + 非零退出。
 
 
 
 ### 集成测试
+
+- **补上了缺失的那条测试:每个拥有者进程真的能 `Serve`。** 它的缺席藏了一个五个包
+  都中的进程级致命 bug。
+
+  拥有者 Mod 发布的是 capability **包装器**（这是消费方绑不到实现类型的原因），
+  `Server.Service()` 把这个值交给手写的 `run` 钩子——而钩子**必须**断言具体类型，
+  因为它要调的正是那些**刻意不上总线**的拥有者专属方法。于是
+  `match`/`platform`/`chat`/`global/activity` 的 `Serve` 直接失败、进程起不来;
+  `session` 那条是**写在 ticker 里的裸断言**,30 秒后 panic,而且只在真的配了
+  owner 的部署里 panic。
+
+  没有测试抓到,因为**没有测试调用过 `Serve`**——只测了 `Init`,而 `Init` 恰好是
+  好的那半。修法在生成器侧（owner-only 名下放未包装的实现，见 roost-codegen
+  CHANGELOG），这里补两条断言:`TestEveryServerServesInTheOwningProcess`（九个包
+  都能 Serve）与 `TestTheOwnerOnlyCapabilityHoldsTheImplementation`（直接钉住修法，
+  对那四个今天不需要具体类型的包也成立）。两个方向的变异都验证变红。
+
+  `session` 的断言同时**从 ticker 里提到循环之前**。这是这件事真正的教训:惰性断言
+  把一个接线错误从启动挪到了生产流量里。提上来之后,那条变异从抓四个变成抓五个。
+
+- `global/activity` 缺了兄弟包都有的错误码测试。缺的两条恰好包括**外部 sentinel 映射**
+  （`versionstore.ErrConflict` → `CodeConflict`）——而那段 `errors.Is` 分支是拆包时
+  **新写的**,拆之前它借用 global 的 `Error`,所以从来没有被任何测试碰过。这个包每次
+  存储调用都走 versionstore,不是冷路径。
 
 - **默认跳过。** 没有 `REDIS_ADDR` 时 `integration/` 全部 `t.Skip`，本轮因此抓到一件
   事：`session`/`rank`/`match`/`platform` 四个包里断言**具体类型**的集成子测试

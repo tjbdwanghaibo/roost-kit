@@ -304,11 +304,33 @@ func Capability(service Platform) Platform { return capability{inner: service} }
 // registered the first and not the second would serve requests it cannot
 // answer locally; one that registered the second and not the first would own a
 // service nothing can find.
+//
+// The two hold DIFFERENT values, and the asymmetry is the point:
+//
+//   - CapabilityName holds the wrapper, so a consumer cannot bind to the
+//     implementation type and then break on the day this service moves out.
+//     This is the name every consumer uses.
+//   - LocalCapabilityName holds the implementation ITSELF, unwrapped. It is
+//     the owning process's handle on its own service, and the Server's run
+//     hook needs it: the periodic work a service owns — sweeping expired
+//     entries, retrying a failed delivery, pruning retained messages — is
+//     deliberately NOT on the cross-process interface, so the hook has to
+//     reach the concrete type to call it.
+//
+// Registering the wrapper under both names is what the first version did, and
+// it made every run hook that reaches an owner-only method fail: four services
+// returned an error from Serve and could not start, and one asserted lazily
+// inside a ticker and panicked thirty seconds in. Nothing caught it because
+// nothing called Serve — only Init, which is the half that worked.
+//
+// This does not weaken the consumer guarantee. LocalCapabilityName exists only
+// in the owning process; a consumer that looked it up to get the concrete type
+// would find nothing at all in a split deployment, which fails loudly at
+// lookup rather than quietly at the type assertion.
 func OwnerCapabilities(service Platform) []mods.Capability {
-	wrapped := Capability(service)
 	return []mods.Capability{
-		{Name: CapabilityName, Value: wrapped},
-		{Name: LocalCapabilityName, Value: wrapped},
+		{Name: CapabilityName, Value: Capability(service)},
+		{Name: LocalCapabilityName, Value: service},
 	}
 }
 

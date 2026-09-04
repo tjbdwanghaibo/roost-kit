@@ -21,7 +21,7 @@ import (
 const (
 	segmentFirst     = 600101
 	segmentLast      = 600199
-	segmentAllocated = 10
+	segmentAllocated = 13
 )
 
 // internalReason is what errcode.ClientError returns for anything it cannot
@@ -30,16 +30,19 @@ const internalReason = "server error"
 
 // codedSentinels is the pairing, as data.
 var codedSentinels = map[int32]error{
-	CodeRequestInvalid:   ErrRequestInvalid,
-	CodeSignatureInvalid: ErrSignatureInvalid,
-	CodeIdentityDenied:   ErrIdentityDenied,
-	CodeVerifierDown:     ErrVerifierDown,
-	CodeOrderInvalid:     ErrOrderInvalid,
-	CodeOrderMismatch:    ErrOrderMismatch,
-	CodeDeliveryHeld:     ErrDeliveryHeld,
-	CodeDeliveryFailed:   ErrDeliveryFailed,
-	CodeDeliveryExpired:  ErrDeliveryExpired,
-	CodeConflict:         ErrConflict,
+	CodeRequestInvalid:    ErrRequestInvalid,
+	CodeSignatureInvalid:  ErrSignatureInvalid,
+	CodeIdentityDenied:    ErrIdentityDenied,
+	CodeVerifierDown:      ErrVerifierDown,
+	CodeOrderInvalid:      ErrOrderInvalid,
+	CodeOrderMismatch:     ErrOrderMismatch,
+	CodeDeliveryHeld:      ErrDeliveryHeld,
+	CodeDeliveryFailed:    ErrDeliveryFailed,
+	CodeDeliveryExpired:   ErrDeliveryExpired,
+	CodeConflict:          ErrConflict,
+	CodeNotResolvable:     ErrNotResolvable,
+	CodeAdminNoteRequired: ErrAdminNoteRequired,
+	CodeOrderSettled:      ErrOrderSettled,
 }
 
 // Every sentinel this package returns must carry its own code.

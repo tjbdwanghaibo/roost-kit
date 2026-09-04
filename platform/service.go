@@ -413,6 +413,14 @@ func (s *Service) AttemptDelivery(ctx context.Context, orderID string) (Receipt,
 		case current.State == DeliveryExhausted:
 			claimed, outcome = current, "exhausted"
 			return current, false, nil
+		case current.State == DeliverySettled:
+			// Terminal, and NOT the same answer as "held". A settled order has
+			// Due() false because it is Terminal, so without this case it fell
+			// through to the not-due branch and reported ErrDeliveryHeld —
+			// which the retry hook treats as benign, so a refunded order would
+			// be retried on every tick forever.
+			claimed, outcome = current, "settled"
+			return current, false, nil
 		case !current.Due(nowUnix):
 			// Either a backoff that has not elapsed or another attempt in
 			// flight. Both mean "not now", and both are the same refusal.
@@ -441,6 +449,8 @@ func (s *Service) AttemptDelivery(ctx context.Context, orderID string) (Receipt,
 		return Receipt{}, err
 	}
 	switch outcome {
+	case "settled":
+		return Receipt{Order: claimed}, fmt.Errorf("%w: order %s", ErrOrderSettled, orderID)
 	case "already_delivered":
 		s.report.Replayed("deliver")
 		return Receipt{Order: claimed, Replayed: true, Delivered: true}, nil

@@ -904,3 +904,149 @@ func TestEveryOwnerOnlyCapabilityIsThePublicNamePlusLocal(t *testing.T) {
 		seen[pair.local] = pair.pkg
 	}
 }
+
+// The operator surface is reachable in the owning process and NOWHERE ELSE.
+//
+// Each Admin method is more dangerous than anything on its service's
+// cross-process interface — one can cause a second grant of paid goods, one
+// re-delivers an activity result, one declares an external resource gone —
+// and the bus carries no caller identity these services can verify. So none of
+// them has a //roost:rpc marker, and the capability other processes hold must
+// not satisfy Admin.
+//
+// Asserted from the registry rather than in each package's own tests, because
+// the property being checked is about what the MOD PUBLISHED: a package test
+// can only look at a value it constructed itself.
+func TestTheOperatorSurfacesAreNotReachableThroughTheBusCapability(t *testing.T) {
+	registry, _ := bootstrap(t)
+	for _, probe := range []struct {
+		pkg string
+		// public is the name every consumer looks up; asAdmin tries to reach
+		// the operator surface through it.
+		public  app.ModName
+		asAdmin func(*app.Registry, app.ModName) bool
+		// local is the owner-only name, where the implementation lives and
+		// where Admin IS expected to be reachable.
+		local app.ModName
+	}{
+		{"platform", servicemods.ModPlatform, has[platform.Admin], platform.LocalCapabilityName},
+		{"session", servicemods.ModSession, has[session.Admin], session.LocalCapabilityName},
+		{"activity", servicemods.ModGlobalActivity, has[activity.Admin], activity.LocalCapabilityName},
+	} {
+		t.Run(probe.pkg, func(t *testing.T) {
+			if probe.asAdmin(registry, probe.public) {
+				t.Fatalf("%s's PUBLIC capability %q satisfies Admin; any process on the bus "+
+					"could reach the operator surface, and the bus carries no identity this "+
+					"service can verify", probe.pkg, probe.public)
+			}
+			// And the owning process CAN reach it — otherwise the surface
+			// exists but nothing can call it, which is the dead end again.
+			if !probe.asAdmin(registry, probe.local) {
+				t.Fatalf("%s's owner-only capability %q does not satisfy Admin; the operator "+
+					"surface exists but the owning process cannot reach it", probe.pkg, probe.local)
+			}
+		})
+	}
+}
+
+// The owner-only capability holds the IMPLEMENTATION, not the wrapper.
+//
+// This pins the fix directly rather than through a run hook, which matters
+// because it holds for the packages whose hooks do not need the concrete type
+// today — account, global, mail, rank. A future hook there that reaches an
+// owner-only method must not be the thing that discovers this.
+//
+// The two halves together are the whole contract: the PUBLIC name must not
+// resolve as the implementation (a consumer would bind to it and break on the
+// day the service moves out), and the OWNER-ONLY name must. Asserting only one
+// side leaves the other free to drift, and the first version of this design
+// had the wrapper under both names.
+func TestTheOwnerOnlyCapabilityHoldsTheImplementation(t *testing.T) {
+	registry, _ := bootstrap(t)
+	for _, probe := range []struct {
+		pkg   string
+		local app.ModName
+		// asImpl looks the owner-only name up as the implementation type.
+		asImpl func(*app.Registry, app.ModName) bool
+	}{
+		{"account", account.LocalCapabilityName, has[*account.Service]},
+		{"activity", activity.LocalCapabilityName, has[*activity.Service]},
+		{"chat", chat.LocalCapabilityName, has[*chat.Service]},
+		{"global", global.LocalCapabilityName, has[*global.Service]},
+		{"mail", mail.LocalCapabilityName, has[*mail.Service]},
+		{"match", match.LocalCapabilityName, has[match.Store]},
+		{"platform", platform.LocalCapabilityName, has[*platform.Service]},
+		{"rank", rank.LocalCapabilityName, has[rank.Store]},
+		{"session", session.LocalCapabilityName, has[*session.Service]},
+	} {
+		t.Run(probe.pkg, func(t *testing.T) {
+			if !probe.asImpl(registry, probe.local) {
+				t.Fatalf("owner-only capability %q does not resolve as %s's implementation "+
+					"type; the run hook cannot reach the owner-only methods that are "+
+					"deliberately kept off the cross-process interface — sweeps, retries, "+
+					"pruning — so Serve fails and the owning process cannot start",
+					probe.local, probe.pkg)
+			}
+		})
+	}
+}
+
+// EVERY owning process can actually Serve.
+//
+// This is the test that was missing, and its absence hid a process-fatal bug in
+// five packages.
+//
+// The owning Mod publishes a capability WRAPPER (see the test above: that is
+// what stops a consumer binding to the implementation type). Server.Init takes
+// that value out of the registry and Service() hands it to the hand-written
+// run hook — so a hook that asserts the concrete type, which it must in order
+// to reach the owner-only methods deliberately kept off the cross-process
+// interface, was asserting against the wrapper and failing. match, platform,
+// chat and global/activity returned an error from run, meaning Serve failed
+// and the process could not start. session's was a BARE assertion inside the
+// sweep ticker, so it panicked thirty seconds in — and only in a deployment
+// that had supplied owners to sweep, which is worse rather than better.
+//
+// Nothing caught it because nothing ever called Serve. TestOnlyTheMailServer…
+// covers Init for one package, and Init is exactly the half that worked.
+//
+// The context is cancelled almost immediately: what is under test is that the
+// hook can resolve its implementation at all, which every hook now does before
+// entering its loop. A hook that resolves lazily inside a ticker would pass
+// this and still fail in production, so "resolve up front" is part of the
+// contract, not an accident of how this test is written.
+func TestEveryServerServesInTheOwningProcess(t *testing.T) {
+	registry, cfg := bootstrap(t)
+	if err := registry.Register(kitmods.ModBus, &countingBus{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = cfg
+	for _, probe := range []struct {
+		pkg    string
+		server app.Service
+	}{
+		{"account", account.NewServer()},
+		{"activity", activity.NewServer()},
+		{"chat", chat.NewServer()},
+		{"global", global.NewServer()},
+		{"mail", mail.NewServer()},
+		{"match", match.NewServer()},
+		{"platform", platform.NewServer()},
+		{"rank", rank.NewServer()},
+		{"session", session.NewServer()},
+	} {
+		t.Run(probe.pkg, func(t *testing.T) {
+			if err := probe.server.Init(registry); err != nil {
+				t.Fatalf("%s Server.Init: %v", probe.pkg, err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if err := probe.server.Serve(ctx); err != nil {
+				t.Fatalf("%s Server.Serve returned %v; the owning process cannot start", probe.pkg, err)
+			}
+			if err := probe.server.Shutdown(context.Background()); err != nil {
+				t.Fatalf("%s Server.Shutdown: %v", probe.pkg, err)
+			}
+		})
+	}
+}

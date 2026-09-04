@@ -51,6 +51,14 @@ func (s *Server) run(ctx context.Context) error {
 				switch {
 				case errors.Is(err, ErrDeliveryHeld):
 					// Another attempt holds the reservation. Not an error.
+				case errors.Is(err, ErrOrderSettled):
+					// A human resolved this order out of band. Logged at info
+					// rather than skipped silently: the order is still in
+					// retryOrders, so whatever supplies that list has not been
+					// told, and a settled order reappearing every tick is the
+					// signal that it needs to be.
+					slog.Info("platform server: skipping an order settled out of band",
+						"order_id", orderID)
 				case errors.Is(err, ErrDeliveryExpired):
 					slog.Error("platform server: delivery attempts exhausted; a paid order will not be delivered",
 						"order_id", orderID)

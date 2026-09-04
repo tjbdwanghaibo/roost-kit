@@ -1390,6 +1390,8 @@ func TestEveryClientMistakeHasItsOwnCode(t *testing.T) {
 		{"dispatch not due", ErrDispatchNotDue, CodeDispatchNotDue},
 		{"range", ErrRangeInvalid, CodeRangeInvalid},
 		{"conflict", ErrConflict, CodeConflict},
+		{"not resolvable", ErrNotResolvable, CodeNotResolvable},
+		{"admin note", ErrAdminNoteRequired, CodeAdminNoteRequired},
 	} {
 		if got := Code(fmt.Errorf("wrapped: %w", testCase.err)); got != testCase.want {
 			t.Fatalf("%s: code = %d, want %d", testCase.label, got, testCase.want)
@@ -1416,7 +1418,7 @@ func TestEveryClientMistakeHasItsOwnCode(t *testing.T) {
 	// made "which package owns this number" a question with two answers.
 	const (
 		segmentFirst     = 620101
-		segmentAllocated = 15
+		segmentAllocated = 17
 	)
 	if len(codes) != segmentAllocated {
 		t.Fatalf("%d codes are paired, want %d; a code was added or removed without updating "+

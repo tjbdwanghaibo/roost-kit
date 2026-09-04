@@ -67,6 +67,10 @@ const (
 	CodeRequestInvalid  int32 = 610109
 	CodeRangeInvalid    int32 = 610110
 	CodeConflict        int32 = 610111
+	// CodeNotResolvable and CodeAdminNoteRequired belong to the operator
+	// surface in admin.go.
+	CodeNotResolvable     int32 = 610112
+	CodeAdminNoteRequired int32 = 610113
 )
 
 var (
@@ -87,6 +91,14 @@ var (
 	ErrRequestInvalid  = errcode.Define(CodeRequestInvalid, "session: request is invalid", "")
 	ErrRangeInvalid    = errcode.Define(CodeRangeInvalid, "session: range is invalid", "")
 	ErrConflict        = errcode.Define(CodeConflict, "session: conflict", "")
+
+	// ErrNotResolvable reports a resource that is not in a state an operator
+	// may force. It refuses forcing a resource that was ALREADY released,
+	// which would overwrite the timestamp of a real release and make the
+	// history unreadable.
+	ErrNotResolvable = errcode.Define(CodeNotResolvable, "session: resource is not in a resolvable state", "")
+	// ErrAdminNoteRequired reports a missing or oversized operator note.
+	ErrAdminNoteRequired = errcode.Define(CodeAdminNoteRequired, "session: an operator note is required", "")
 )
 
 // Error maps an error to the code and reason a client sees.
@@ -198,6 +210,12 @@ type Resource struct {
 	// ReleasedAtUnix is set when the resource has been handed back, so a
 	// retried release is a no-op rather than a second free.
 	ReleasedAtUnix int64 `json:"released_at_unix,omitempty"`
+	// ForcedRelease records that this resource was marked released by an
+	// operator WITHOUT the Releaser succeeding. It is kept beside the
+	// timestamp rather than folded into it because "handed back" and "declared
+	// gone by a human" are different facts, and a reader summing them would
+	// report resources as reclaimed that nothing reclaimed.
+	ForcedRelease bool `json:"forced_release,omitempty"`
 }
 
 // Released reports whether this resource has already been handed back.
@@ -244,6 +262,15 @@ type Run struct {
 	DeadlineUnix   int64 `json:"deadline_unix"`
 	FinishedAtUnix int64 `json:"finished_at_unix,omitempty"`
 	UpdatedAtUnix  int64 `json:"updated_at_unix"`
+
+	// ForcedReleases counts resources an operator declared gone without the
+	// Releaser succeeding, and AdminNote/AdminActionAtUnix record the last
+	// such intervention. A run with forced releases is a run whose resource
+	// accounting is no longer automatic, and the next reader needs to know
+	// that without reading a log.
+	ForcedReleases    int32  `json:"forced_releases,omitempty"`
+	AdminNote         string `json:"admin_note,omitempty"`
+	AdminActionAtUnix int64  `json:"admin_action_at_unix,omitempty"`
 }
 
 // Expired reports whether an open run's deadline has passed.

@@ -83,6 +83,10 @@ const (
 	// about the other's holes.
 	CodeRangeInvalid int32 = 620114
 	CodeConflict     int32 = 620115
+	// CodeNotResolvable and CodeAdminNoteRequired belong to the operator
+	// surface in admin.go.
+	CodeNotResolvable     int32 = 620116
+	CodeAdminNoteRequired int32 = 620117
 )
 
 var (
@@ -138,6 +142,13 @@ var (
 	// ErrConflict is what compare-and-set exhaustion under contention reaches
 	// a caller as. It is retryable, which is why it is not CodeInternal.
 	ErrConflict = errcode.Define(CodeConflict, "activity: conflict", "")
+
+	// ErrNotResolvable reports a dispatch that is not in a state an operator
+	// may change. It is what refuses reopening an ACKED dispatch, which would
+	// ask a game server to apply a result it already applied.
+	ErrNotResolvable = errcode.Define(CodeNotResolvable, "activity: dispatch is not in a resolvable state", "")
+	// ErrAdminNoteRequired reports a missing or oversized operator note.
+	ErrAdminNoteRequired = errcode.Define(CodeAdminNoteRequired, "activity: an operator note is required", "")
 )
 
 // Error maps an error to the code and reason a client sees.
@@ -679,6 +690,15 @@ type Dispatch struct {
 	LastAttemptAtUnix int64 `json:"last_attempt_at_unix,omitempty"`
 	AckedAtUnix       int64 `json:"acked_at_unix,omitempty"`
 	ExhaustedAtUnix   int64 `json:"exhausted_at_unix,omitempty"`
+
+	// Reopens counts how many times an operator returned this dispatch to the
+	// retry queue, and AdminNote/AdminActionAtUnix record the last such
+	// intervention. Reopens accumulates rather than resetting: "we reopened
+	// this four times and the game still never acked" is the fact that stops
+	// someone reopening it a fifth time.
+	Reopens           int32  `json:"reopens,omitempty"`
+	AdminNote         string `json:"admin_note,omitempty"`
+	AdminActionAtUnix int64  `json:"admin_action_at_unix,omitempty"`
 }
 
 // Due reports whether a pending dispatch may be attempted now.

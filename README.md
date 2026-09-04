@@ -70,19 +70,19 @@ roost 框架的**通用服务层**：与玩法无关的公共服务，作为库�
 | `match/` | 匹配：入队、分组、原子成组提交、超时执行。整个队列状态在一个版本化条目里，成组提交是一次 CAS | 29 | 10 |
 | `account/` | 账号与角色目录、角色会话令牌。`IdentityVerifier`/`PlayerIDAllocator`/`NameValidator` 必填且**无默认实现** | 32 | 11 |
 | `global/` | 跨服路由绑定（epoch CAS 迁移）、游戏服租约（incarnation fence） | 26 | 13† |
-| `global/activity/` | 跨服活动协调：首个 notify 起算的宽限窗、先预留后应用的进度 ledger、拒绝即审计、带 ACK 令牌的结果投递 | 35 | 13† |
+| `global/activity/` | 跨服活动协调：首个 notify 起算的宽限窗、先预留后应用的进度 ledger、拒绝即审计、带 ACK 令牌的结果投递 | 47 | 13† |
 | `chat/` | 频道消息：发布/历史/保留。`PublishRequest` 里**没有**发送者或可信字段；系统消息只能经 `PublishSystem` + 服务端签发的 `SystemToken` | 39 | 8 |
 | `mail/` | 邮件：信封、按玩家的已读/领取状态、把附件恰好交付一次的三段式领取。**claim token 由服务端生成且对同一封邮件恒定**——重试换不出新的幂等键 | 82 | 20 |
-| `platform/` | 渠道边缘：凭证换会话、支付回调换恰好一次发货。**验签是必要而不充分的**，订单是仅插入的持久记录 | 40 | 13 |
-| `session/` | 有界 run 原语（从副本服务中抽出）：幂等 Enter、每 owner 一个活 run、资源恰好释放一次、截止时间真的被读 | 39 | 13 |
+| `platform/` | 渠道边缘：凭证换会话、支付回调换恰好一次发货。**验签是必要而不充分的**，订单是仅插入的持久记录 | 51 | 21 |
+| `session/` | 有界 run 原语（从副本服务中抽出）：幂等 Enter、每 owner 一个活 run、资源恰好释放一次、截止时间真的被读 | 48 | 20 |
 | `servicemetrics/` | 全仓共享的上报 seam 与测试用 `Recorder` | 8 | 3 |
 | `servicemods/` | capability 名字表与各 Mod 共用的配置读取 | 12 | — |
-| `integration/` | 跨服务的真实后端测试：十个包在一个活 Redis 上装起来跑通、key 命名空间不冲突、以及**整套 Mod 生命周期端到端** | 43 真实 Redis | 25 |
+| `integration/` | 跨服务的真实后端测试：十个包在一个活 Redis 上装起来跑通、key 命名空间不冲突、以及**整套 Mod 生命周期端到端** | 67 真实 Redis | 30 |
 
 † `global/activity/` 从 `global/` 拆出（见下），拆分前那 13 条变异验证是合并记录的，
 没有事后拆开归属——凭印象分摊会得到一个看起来精确其实是编的数字。
 
-合计 398 条单测 + 43 条真实 Redis 集成测试，`-race` 全绿（单测与集成测试都跑过 `-race`）。
+合计 430 条单测 + 67 条真实 Redis 集成测试，`-race` 全绿（单测与集成测试都跑过 `-race`）。
 
 **集成测试默认是跳过的**：没有 `REDIS_ADDR` 时 `integration/` 全部 `t.Skip`。这不是
 细节——本轮就是因为这个，`session`/`rank`/`match`/`platform` 四个包里断言**具体类型**
@@ -99,7 +99,8 @@ REDIS_ADDR=127.0.0.1:6379 go test -race -tags integration ./integration/
 go generate ./...
 ```
 
-`-check` 模式给 CI 用，生成物与源码不一致时非零退出：
+`-check` 给 CI 用:生成并逐字节比对，任何差异非零退出（它一度只跑拒绝规则、
+不比对生成物，于是永远退出 0——见 roost-codegen CHANGELOG）：
 
 ```bash
 go tool servicerpc -dir ./mail -check
@@ -157,6 +158,69 @@ go tool servicerpc -dir ./mail -check
 `chat.PublishSystem` **在**接口里,这条值得单独说,因为这个包存在的主要理由就是删掉一个"客户端传来的 `Trusted` bool 是系统消息的全部授权"。把系统路径放上总线的答案是:**关于信任的判断没有任何一部分上线**。`SystemPublishRequest` 带频道、actor 标签、类型、正文、幂等键,**不带令牌**;令牌是在**拥有者**那边、由部署提供的 `SystemAuthenticator` 从 handler 自己 ctx 里的传输身份铸出来的。所以总线情形是**fail closed**:如果某个部署的总线不带 authenticator 能背书的调用方身份,它就签不出令牌,`PublishSystem` 直接以 `ErrSystemDenied` 拒绝。**缺一块拼图产生的是拒绝,不是许可**——那个 `Trusted` bool 恰好搞反了这件事。
 
 有一件事**是**被信任的,应该说出来而不是留在暗处:`Publish`/`History`/`Conversation`/`Scrollback` 都把调用方身份作为**参数**收下,所以跨进程时是**调用方进程**在声明发送者/观看者是谁。进程内这个参数来自会话;跨进程它来自持有会话的那个进程——一个已经认证过玩家的网关。chat 信它。这是内部总线的信任模型,不特属于这个方法或这个服务,也正是总线不能从部署外可达的原因。这个设计买到的是:身份是独立的**实参**而不是请求体的字段,所以一个原样转发的玩家包造不出身份来。
+
+## 运维面：`admin.go`
+
+三个服务有**真正的死路** —— 自动路径已经放弃、而在此之前**没有任何代码路径能改变它**
+的终态。不是补齐对称性，每一条都点名了后果：
+
+| 服务 | 死路 | 操作 |
+| --- | --- | --- |
+| `platform` | 订单尝试耗尽 → **玩家付了钱、货永远不发**。`AttemptDelivery` 正确地拒绝它（否则预算就不是预算），唯一痕迹是一行 `slog.Error` —— 那不是工作队列，也活不过日志轮转 | `ReopenDelivery`（重回重试队列）、`SettleOutOfBand`（已退款/已人工发货） |
+| `global/activity` | dispatch 尝试耗尽 → 某个 game 服**永远收不到**它的玩家参与过的活动结果。两条自动路径都拒绝它：`AttemptDispatch` 不再发，`AckDispatch` 拒绝迟到的确认 | `ReopenDispatch` |
+| `session` | Releaser 永远不可能成功的资源（副本被带外删了、id 从来无效）→ 与暂时故障**完全无法区分**，sweep 永远重试 | `ForceRelease` |
+
+`session` 那条的后果比看起来严重得多，而且从 `Run.Live` 上**看不出来**：
+
+```
+Enter → owner 的 claim 被占 → resolveClaim → run 不 live
+      → resolve() 释放资源 → 释放失败
+      → resolveClaim 返回错误 → claim 永不释放
+```
+
+claim 是**故意**在清理成功之后才释放的（"claim 绝不能比清理活得更久"，这是对的），
+代价就是:一个永远无法成功的释放 = 一个**永远进不去的玩家**。我一开始把这条说反了
+（"owner 不会被挡，因为 Live 不看 pending 资源"）—— 挡住 Enter 的是 claim，不是 Live。
+现在有测试钉住真实行为。
+
+### 三条共同的约束
+
+- **不上总线。** 三个 `Admin` 都**没有** `//roost:rpc` 标记。它们比各自接口上的任何
+  方法都危险（一个能造成二次发放、一个重投结果、一个宣称外部资源已消失），而总线不带
+  这些服务能验证的调用方身份。只有**拥有者进程**摸得到 —— 人怎么摸到那个进程（内部
+  listener、对着同一个 Redis 的 CLI、部署自己认证的运维 RPC）是部署决策，做在凭据所在
+  的地方。这一条由集成测试双向钉住:公开 capability **不能**满足 `Admin`，owner-only
+  capability **必须**满足。
+- **note 必填、无默认。** 一次在已付款订单上、没有记录理由的干预是**无法复核**的 ——
+  下一个看这条记录的人只知道有人改过，查不到为什么、也查不到是否有意。
+- **不做枚举。** 这是对我自己规划时一个说法的**更正**。"找不到那些耗尽的订单"听起来像
+  问题，其实不是:**支付渠道手里有权威清单**（每家都出对账报表），运维真正问的是"渠道
+  说收了钱的这些单，我们发货了吗" —— `Service.Order` 已经按 id 回答了。在这里建索引是
+  重复一份本服务并不拥有的事实来源，而且它必须写在设置终态的那次 CAS 之外，于是它可以
+  和它索引的记录不一致。真正的缺口窄得多:**拿到 id 之后没有路可走**。
+
+### 两条最容易反过来做错的
+
+- **重开时 ACK 令牌不换。** game 服可能已经收到并应用了结果，只是确认丢了（响应丢包、
+  两步之间重启），之后 dispatch 耗尽。重开会把同一份结果再投一次,而 game 唯一能去重
+  的键就是令牌。换一个新令牌 = 把同一份结果换个身份递过去,**恰好坑掉那些做对了事的
+  调用方**。这是 mail 的 claim token 那条规则:服务端生成、对同一个东西恒定，重试换不出
+  新的幂等键。
+- **`settled` 是第三个终态，不是复用 `delivered`。** 一次把人工退款算成已发货的对账，
+  会报出本服务并没有完成的履约。"发货方成功了"/"我们放弃了"/"有人在别处解决了"是关于
+  这笔钱的三个不同事实，合并任意两个都会让支付账目不再可审计。
+
+顺手抓到一个自己引入的 bug:加了 `DeliverySettled` 之后，`AttemptDelivery` 会让它落进
+"不到期"分支并报 `ErrDeliveryHeld` —— "a delivery is in flight: order o1 until 0"。
+重试钩子把这个当成正常，于是**一笔已退款的订单会被每 tick 重试到永远**，而那句胡话是
+唯一线索。现在它有自己的 `ErrOrderSettled`。
+
+### 已核实**不是**死路的（我规划时说错的两条）
+
+- `global` 卡在 migrating:`AbortMigration` 就能救回 —— 状态必须是 `RouteMigrating`,
+  epoch 从 `Resolve` 拿，两个条件都满足，而且它**本来就在**跨进程接口上。
+- `mail` 满了的邮箱 / `chat` 超期未裁剪:前者是有文档的上界（淘汰最旧），后者是存储成本。
+  都不是"没有任何路可走"。
 
 ## 装配：每个服务一个 `app.Mod`
 

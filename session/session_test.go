@@ -36,17 +36,29 @@ func (c *clock) advance(d time.Duration) {
 type recordingReleaser struct {
 	mu       sync.Mutex
 	releases map[string]int
+	attempts map[string]int
 	failFor  map[string]int
 }
 
 func newReleaser() *recordingReleaser {
-	return &recordingReleaser{releases: map[string]int{}, failFor: map[string]int{}}
+	return &recordingReleaser{releases: map[string]int{}, failFor: map[string]int{}, attempts: map[string]int{}}
+}
+
+// attempted counts CALLS, not successes. It exists because a mutation that
+// called the Releaser and ignored its error was invisible to a test that only
+// counted successes: a permanently failing releaser increments nothing either
+// way.
+func (r *recordingReleaser) attempted(kind, id string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.attempts[kind+":"+id]
 }
 
 func (r *recordingReleaser) Release(_ context.Context, _ Run, resource Resource) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	key := resource.Kind + ":" + resource.ID
+	r.attempts[key]++
 	if remaining := r.failFor[key]; remaining > 0 {
 		r.failFor[key] = remaining - 1
 		return fmt.Errorf("scene manager is down")
