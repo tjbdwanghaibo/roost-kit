@@ -28,29 +28,79 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/tjbdwanghaibo/roost-core/errcode"
+	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+)
+
+// Error codes.
+//
+// This package had none until now: it had sentinels and no codes at all, so
+// every one of its refusals reached a client as errcode.CodeInternal —
+// "server error" for "that name is taken", which is the least actionable
+// answer a service can give for the most ordinary thing that happens to it.
+const (
+	CodeOK int32 = 0
+
+	CodeKeyTaken      int32 = 530101
+	CodeClaimNotFound int32 = 530102
+	CodeClaimStale    int32 = 530103
+	CodeOwnerMismatch int32 = 530104
+	CodeKeyEmpty      int32 = 530105
+	CodeOwnerEmpty    int32 = 530106
 )
 
 var (
 	// ErrKeyTaken reports that the key is reserved or committed to a
 	// different owner.
-	ErrKeyTaken = errors.New("directory: key is taken")
+	ErrKeyTaken = errcode.Define(CodeKeyTaken, "directory: key is taken", "")
 
 	// ErrClaimNotFound reports that no reservation matches the claim — it was
 	// cancelled, it expired, or it was never made.
-	ErrClaimNotFound = errors.New("directory: claim not found")
+	ErrClaimNotFound = errcode.Define(CodeClaimNotFound, "directory: claim not found", "")
 
 	// ErrClaimStale reports that a reservation exists for the key but not for
 	// this claim: the caller's token no longer matches. Returned rather than
 	// silently succeeding, because "commit something someone else reserved"
 	// must never look like success.
-	ErrClaimStale = errors.New("directory: claim is stale")
+	ErrClaimStale = errcode.Define(CodeClaimStale, "directory: claim is stale", "")
 
 	// ErrOwnerMismatch reports that the entry belongs to a different owner.
-	ErrOwnerMismatch = errors.New("directory: owner mismatch")
+	ErrOwnerMismatch = errcode.Define(CodeOwnerMismatch, "directory: owner mismatch", "")
 
-	ErrKeyEmpty   = errors.New("directory: key is empty")
-	ErrOwnerEmpty = errors.New("directory: owner is empty")
+	ErrKeyEmpty   = errcode.Define(CodeKeyEmpty, "directory: key is empty", "")
+	ErrOwnerEmpty = errcode.Define(CodeOwnerEmpty, "directory: owner is empty", "")
 )
+
+// Error maps an error to the code and reason a client sees.
+//
+// It matches roost-kit's servicerpc.Error convention, which is what an RPC
+// envelope is filled from. The sentinels carry their own codes, so there is no
+// per-sentinel table here to keep in step.
+//
+// An error this package cannot classify reports errcode.CodeInternal. There is
+// deliberately no code of its own for that: answering with a service-specific
+// "store failed" code would claim a diagnosis nothing established.
+func Error(err error) (int32, string) {
+	if err == nil {
+		return CodeOK, ""
+	}
+	// versionstore.ErrVersionMismatch is a foreign sentinel: it carries no
+	// code of this package's. A release or cancel that lost its
+	// compare-and-set is an owner mismatch as far as a caller is concerned —
+	// someone else holds the key now — so it is mapped deliberately rather
+	// than arriving as "server error".
+	if errors.Is(err, versionstore.ErrVersionMismatch) {
+		return errcode.ClientError(ErrOwnerMismatch)
+	}
+	return errcode.ClientError(err)
+}
+
+// Code is Error without the reason, for callers that only switch on the code.
+func Code(err error) int32 {
+	code, _ := Error(err)
+	return code
+}
 
 // State is where a directory key is in its lifecycle.
 type State string

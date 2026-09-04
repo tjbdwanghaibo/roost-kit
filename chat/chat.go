@@ -76,15 +76,21 @@ import (
 	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
 
 	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+
+	"github.com/tjbdwanghaibo/roost-core/errcode"
 )
 
 // Error codes.
 //
 // Written out rather than derived with iota, and every business failure has
 // one: a client mistake must be answerable with a code the client can match
-// on, never with the internal-failure code. CodeStoreFailed is the only
-// internal one, and Code returns it only for an error this package did not
-// classify.
+// on, never with the internal-failure code.
+//
+// There is no code of this package's for an internal failure. Code returns
+// errcode.CodeInternal for an error it did not classify, which is the honest
+// answer — a service-specific "store failed" code, which this block used to
+// carry, claims a diagnosis nothing established and nothing could produce
+// deliberately.
 const (
 	CodeOK int32 = 0
 
@@ -99,77 +105,85 @@ const (
 	CodeSystemDenied     int32 = 580109
 	CodeAlreadyPublished int32 = 580110
 	CodeConflict         int32 = 580111
-	CodeStoreFailed      int32 = 580112
 )
 
 var (
-	ErrChannelInvalid = errors.New("chat: channel is invalid")
-	ErrSenderInvalid  = errors.New("chat: sender is invalid")
-	ErrMessageInvalid = errors.New("chat: message is invalid")
+	ErrChannelInvalid = errcode.Define(CodeChannelInvalid, "chat: channel is invalid", "")
+	ErrSenderInvalid  = errcode.Define(CodeSenderInvalid, "chat: sender is invalid", "")
+	ErrMessageInvalid = errcode.Define(CodeMessageInvalid, "chat: message is invalid", "")
 	// ErrTypeUnknown reports that no BodyValidator is registered for the
 	// message type. Refusing an unregistered type is what keeps gameplay out
 	// of this package: the service does not know what a "battle report share"
 	// is, it only knows that the game registered a validator for that type.
-	ErrTypeUnknown = errors.New("chat: message type is not registered")
+	ErrTypeUnknown = errcode.Define(CodeTypeUnknown, "chat: message type is not registered", "")
 	// ErrNotPermitted reports that the channel policy, or a system-only
 	// channel or message type, refused this sender. It wraps the policy's own
 	// error, so a game can carry its reason ("muted", "not a guild member")
 	// through without this package knowing any of them.
-	ErrNotPermitted = errors.New("chat: sender may not do that on this channel")
+	ErrNotPermitted = errcode.Define(CodeNotPermitted, "chat: sender may not do that on this channel", "")
 	// ErrRequestInvalid reports a missing or malformed idempotency key. Publish
 	// requires one because the transport is at-least-once: the implementation
 	// this replaces had no key and stored a second copy on every redelivery.
-	ErrRequestInvalid = errors.New("chat: idempotency key is invalid")
-	ErrCursorInvalid  = errors.New("chat: cursor is invalid")
-	ErrRangeInvalid   = errors.New("chat: range is invalid")
+	ErrRequestInvalid = errcode.Define(CodeRequestInvalid, "chat: idempotency key is invalid", "")
+	ErrCursorInvalid  = errcode.Define(CodeCursorInvalid, "chat: cursor is invalid", "")
+	ErrRangeInvalid   = errcode.Define(CodeRangeInvalid, "chat: range is invalid", "")
 	// ErrSystemDenied reports that the privileged entry point refused the
 	// caller — either the service is wired without a system authenticator, or
 	// the transport identity is not trusted infrastructure. This is the error a
 	// client-side Trusted bool used to bypass.
-	ErrSystemDenied = errors.New("chat: caller is not trusted infrastructure")
+	ErrSystemDenied = errcode.Define(CodeSystemDenied, "chat: caller is not trusted infrastructure", "")
 	// ErrAlreadyPublished reports that the idempotency key was already used and
 	// the message it produced is no longer retained, so it cannot be returned.
 	// The publish happened: a consumer must ack, not retry. It exists so a
 	// redelivery outside the dedup window is refused rather than silently
 	// stored a second time.
-	ErrAlreadyPublished = errors.New("chat: idempotency key was already published and its message is no longer retained")
-	ErrConflict         = errors.New("chat: conflict")
+	ErrAlreadyPublished = errcode.Define(CodeAlreadyPublished, "chat: idempotency key was already published and its message is no longer retained", "")
+	ErrConflict         = errcode.Define(CodeConflict, "chat: conflict", "")
 )
 
-// Code maps an error to the numbered code a client sees.
+// Error maps an error to the code and reason a client sees.
 //
-// The order matters: ErrNotPermitted is checked first because a denial wraps
-// the policy's own error, which may itself be any of the others, and the
-// denial is what the client must be told.
-func Code(err error) int32 {
-	switch {
-	case err == nil:
-		return CodeOK
-	case errors.Is(err, ErrNotPermitted):
-		return CodeNotPermitted
-	case errors.Is(err, ErrSystemDenied):
-		return CodeSystemDenied
-	case errors.Is(err, ErrChannelInvalid):
-		return CodeChannelInvalid
-	case errors.Is(err, ErrSenderInvalid):
-		return CodeSenderInvalid
-	case errors.Is(err, ErrMessageInvalid):
-		return CodeMessageInvalid
-	case errors.Is(err, ErrTypeUnknown):
-		return CodeTypeUnknown
-	case errors.Is(err, ErrRequestInvalid):
-		return CodeRequestInvalid
-	case errors.Is(err, ErrCursorInvalid):
-		return CodeCursorInvalid
-	case errors.Is(err, ErrRangeInvalid):
-		return CodeRangeInvalid
-	case errors.Is(err, ErrAlreadyPublished):
-		return CodeAlreadyPublished
-	case errors.Is(err, ErrConflict), errors.Is(err, versionstore.ErrConflict):
-		return CodeConflict
-	default:
-		return CodeStoreFailed
+// It matches roost-kit's servicerpc.Error convention, which is what an RPC
+// envelope is filled from.
+//
+// It is short because the sentinels carry their own codes: errcode.ClientError
+// finds the code through any depth of fmt.Errorf wrapping, so there is no
+// per-sentinel table here to keep in step with the one above. A hand-written
+// switch over every sentinel is the shape this replaces, and it is a second
+// list that a newly added error silently falls off.
+//
+// Two behaviours are relied on rather than incidental:
+//
+//   - When an error wraps two coded errors with "%w: %w", the FIRST one wins.
+//     That is what makes a refusal which wraps a caller's own reason report
+//     the refusal, which is what the client has to be told.
+//   - An error this package cannot classify reports errcode.CodeInternal, not
+//     a code of its own. Answering "the store failed" for an unclassified bug
+//     is a guess presented as a diagnosis — and a catch-all code of that shape
+//     is what the previous constant block had, with nothing able to produce it
+//     deliberately.
+func Error(err error) (int32, string) {
+	if err == nil {
+		return CodeOK, ""
 	}
+	// versionstore.ErrConflict is a FOREIGN sentinel: it belongs to roost-kit
+	// and carries no code of this package's, so errcode.ClientError would
+	// report it as CodeInternal. Compare-and-set exhaustion under contention
+	// is a real, retryable outcome a caller can act on, and "server error" is
+	// not an answer it can act on — so it is mapped deliberately here.
+	//
+	// This is the only kind of case a table is still needed for, and it is
+	// why Error is a function rather than a bare call to errcode.
+	if errors.Is(err, versionstore.ErrConflict) {
+		return errcode.ClientError(ErrConflict)
+	}
+	return errcode.ClientError(err)
+}
+
+// Code is Error without the reason, for callers that only switch on the code.
+func Code(err error) int32 {
+	code, _ := Error(err)
+	return code
 }
 
 // Bounds. Every one of these is a limit the implementation this replaces did

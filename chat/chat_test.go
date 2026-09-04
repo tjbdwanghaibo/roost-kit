@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tjbdwanghaibo/roost-core/errcode"
 	"github.com/tjbdwanghaibo/roost-kit/versionstore"
 
 	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
@@ -593,7 +594,7 @@ func TestHistoryIsCursorBasedAndBounded(t *testing.T) {
 		if !errors.Is(err, testCase.want) {
 			t.Fatalf("%s: err = %v, want %v", testCase.label, err, testCase.want)
 		}
-		if code := Code(err); code == CodeStoreFailed {
+		if code := Code(err); code == errcode.CodeInternal {
 			t.Fatalf("%s: a client mistake returned the internal code", testCase.label)
 		}
 	}
@@ -1296,7 +1297,7 @@ func TestCodeMapsEveryBusinessErrorToItsOwnCode(t *testing.T) {
 		if testCase.err == nil {
 			continue
 		}
-		if got == CodeStoreFailed {
+		if got == errcode.CodeInternal {
 			t.Fatalf("business error %v maps to the internal code", testCase.err)
 		}
 		if got < 580101 || got > 580199 {
@@ -1314,8 +1315,14 @@ func TestCodeMapsEveryBusinessErrorToItsOwnCode(t *testing.T) {
 	if got := Code(fmt.Errorf("publish: %w", ErrCursorInvalid)); got != CodeCursorInvalid {
 		t.Fatalf("a wrapped error mapped to %d", got)
 	}
-	if got := Code(errors.New("redis: connection refused")); got != CodeStoreFailed {
-		t.Fatalf("an unclassified error mapped to %d, want %d", got, CodeStoreFailed)
+	if got := Code(errors.New("redis: connection refused")); got != errcode.CodeInternal {
+		t.Fatalf("an unclassified error mapped to %d, want CodeInternal (%d)", got, errcode.CodeInternal)
+	}
+	// And a foreign sentinel this package maps deliberately does NOT fall
+	// through to the internal code: compare-and-set exhaustion is a real,
+	// retryable outcome a caller can act on.
+	if got := Code(fmt.Errorf("append: %w", versionstore.ErrConflict)); got != CodeConflict {
+		t.Fatalf("versionstore contention mapped to %d, want %d", got, CodeConflict)
 	}
 	// A denial that wraps another sentinel is still reported as a denial.
 	if got := Code(denied(ErrChannelInvalid)); got != CodeNotPermitted {
@@ -1333,8 +1340,8 @@ func TestBackendFailuresAreReportedAsStoreFailuresAndConflictsAreCounted(t *test
 	if !errors.Is(err, failure) {
 		t.Fatalf("publish error = %v, want the backend failure", err)
 	}
-	if got := Code(err); got != CodeStoreFailed {
-		t.Fatalf("a backend failure mapped to %d, want %d", got, CodeStoreFailed)
+	if got := Code(err); got != errcode.CodeInternal {
+		t.Fatalf("a backend failure mapped to %d, want CodeInternal (%d)", got, errcode.CodeInternal)
 	}
 	if _, err := h.service.History(ctx, role(1), HistoryQuery{Channel: world(), Limit: 5}); !errors.Is(err, failure) {
 		t.Fatalf("history error = %v, want the backend failure", err)

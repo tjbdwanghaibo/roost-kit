@@ -23,8 +23,9 @@
 package rank
 
 import (
-	"errors"
 	"fmt"
+
+	"github.com/tjbdwanghaibo/roost-core/errcode"
 )
 
 // Error codes. Every business failure has one: a caller must be able to tell
@@ -41,17 +42,16 @@ const (
 	CodeNotFound       int32 = 540106
 	CodeSeasonInvalid  int32 = 540107
 	CodeConflict       int32 = 540108
-	CodeStoreFailed    int32 = 540109
 )
 
 var (
-	ErrBoardInvalid   = errors.New("rank: board is invalid")
-	ErrOwnerInvalid   = errors.New("rank: owner id must be non-zero")
-	ErrRangeInvalid   = errors.New("rank: range is invalid")
-	ErrScoreInvalid   = errors.New("rank: score is invalid")
-	ErrRequestInvalid = errors.New("rank: request id is required")
-	ErrNotFound       = errors.New("rank: not found")
-	ErrSeasonInvalid  = errors.New("rank: season is invalid")
+	ErrBoardInvalid   = errcode.Define(CodeBoardInvalid, "rank: board is invalid", "")
+	ErrOwnerInvalid   = errcode.Define(CodeOwnerInvalid, "rank: owner id must be non-zero", "")
+	ErrRangeInvalid   = errcode.Define(CodeRangeInvalid, "rank: range is invalid", "")
+	ErrScoreInvalid   = errcode.Define(CodeScoreInvalid, "rank: score is invalid", "")
+	ErrRequestInvalid = errcode.Define(CodeRequestInvalid, "rank: request id is required", "")
+	ErrNotFound       = errcode.Define(CodeNotFound, "rank: not found", "")
+	ErrSeasonInvalid  = errcode.Define(CodeSeasonInvalid, "rank: season is invalid", "")
 )
 
 // MaxPageSize bounds one page. A caller cannot exceed it, and — the part that
@@ -176,4 +176,38 @@ type Page struct {
 	Entries []Entry `json:"entries"`
 	// Total is the board size at the time of the read.
 	Total int64 `json:"total"`
+}
+
+// Error maps an error to the code and reason a client sees.
+//
+// It matches roost-kit's servicerpc.Error convention, which is what an RPC
+// envelope is filled from.
+//
+// It is short because the sentinels carry their own codes: errcode.ClientError
+// finds the code through any depth of fmt.Errorf wrapping, so there is no
+// per-sentinel table here to keep in step with the one above. A hand-written
+// switch over every sentinel is the shape this replaces, and it is a second
+// list that a newly added error silently falls off.
+//
+// Two behaviours are relied on rather than incidental:
+//
+//   - When an error wraps two coded errors with "%w: %w", the FIRST one wins.
+//     That is what makes a refusal which wraps a caller's own reason report
+//     the refusal, which is what the client has to be told.
+//   - An error this package cannot classify reports errcode.CodeInternal, not
+//     a code of its own. Answering "the store failed" for an unclassified bug
+//     is a guess presented as a diagnosis — and a catch-all code of that shape
+//     is what the previous constant block had, with nothing able to produce it
+//     deliberately.
+func Error(err error) (int32, string) {
+	if err == nil {
+		return CodeOK, ""
+	}
+	return errcode.ClientError(err)
+}
+
+// Code is Error without the reason, for callers that only switch on the code.
+func Code(err error) int32 {
+	code, _ := Error(err)
+	return code
 }

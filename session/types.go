@@ -47,6 +47,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/tjbdwanghaibo/roost-core/errcode"
+	"github.com/tjbdwanghaibo/roost-kit/versionstore"
 )
 
 // Error codes.
@@ -64,28 +67,72 @@ const (
 	CodeRequestInvalid  int32 = 610109
 	CodeRangeInvalid    int32 = 610110
 	CodeConflict        int32 = 610111
-	CodeStoreFailed     int32 = 610112
 )
 
 var (
-	ErrRunInvalid = errors.New("session: run is invalid")
-	ErrRunMissing = errors.New("session: run not found")
+	ErrRunInvalid = errcode.Define(CodeRunInvalid, "session: run is invalid", "")
+	ErrRunMissing = errcode.Define(CodeRunMissing, "session: run not found", "")
 	// ErrNotOwner reports that the caller does not own this run. The service
 	// this replaces checked ownership on one of its four entry points.
-	ErrNotOwner = errors.New("session: caller does not own this run")
+	ErrNotOwner = errcode.Define(CodeNotOwner, "session: caller does not own this run", "")
 	// ErrAlreadyRunning reports that the owner already holds a live run. Its
 	// absence is what let repeated Enter calls allocate unbounded scenes.
-	ErrAlreadyRunning = errors.New("session: owner already holds a live run")
-	ErrRunTerminal    = errors.New("session: run has already finished")
+	ErrAlreadyRunning = errcode.Define(CodeAlreadyRunning, "session: owner already holds a live run", "")
+	ErrRunTerminal    = errcode.Define(CodeRunTerminal, "session: run has already finished", "")
 	// ErrRunExpired reports that the run's deadline has passed. The service
 	// this replaces computed a deadline that nothing ever read.
-	ErrRunExpired      = errors.New("session: run deadline has passed")
-	ErrNotAttached     = errors.New("session: run has no attachment")
-	ErrAlreadyAttached = errors.New("session: run is already attached")
-	ErrRequestInvalid  = errors.New("session: request is invalid")
-	ErrRangeInvalid    = errors.New("session: range is invalid")
-	ErrConflict        = errors.New("session: conflict")
+	ErrRunExpired      = errcode.Define(CodeRunExpired, "session: run deadline has passed", "")
+	ErrNotAttached     = errcode.Define(CodeNotAttached, "session: run has no attachment", "")
+	ErrAlreadyAttached = errcode.Define(CodeAlreadyAttached, "session: run is already attached", "")
+	ErrRequestInvalid  = errcode.Define(CodeRequestInvalid, "session: request is invalid", "")
+	ErrRangeInvalid    = errcode.Define(CodeRangeInvalid, "session: range is invalid", "")
+	ErrConflict        = errcode.Define(CodeConflict, "session: conflict", "")
 )
+
+// Error maps an error to the code and reason a client sees.
+//
+// It matches roost-kit's servicerpc.Error convention, which is what an RPC
+// envelope is filled from.
+//
+// It is short because the sentinels carry their own codes: errcode.ClientError
+// finds the code through any depth of fmt.Errorf wrapping, so there is no
+// per-sentinel table here to keep in step with the one above. A hand-written
+// switch over every sentinel is the shape this replaces, and it is a second
+// list that a newly added error silently falls off.
+//
+// Two behaviours are relied on rather than incidental:
+//
+//   - When an error wraps two coded errors with "%w: %w", the FIRST one wins.
+//     That is what makes a refusal which wraps a caller's own reason report
+//     the refusal, which is what the client has to be told.
+//   - An error this package cannot classify reports errcode.CodeInternal, not
+//     a code of its own. Answering "the store failed" for an unclassified bug
+//     is a guess presented as a diagnosis — and a catch-all code of that shape
+//     is what the previous constant block had, with nothing able to produce it
+//     deliberately.
+func Error(err error) (int32, string) {
+	if err == nil {
+		return CodeOK, ""
+	}
+	// versionstore.ErrConflict is a FOREIGN sentinel: it belongs to roost-kit
+	// and carries no code of this package's, so errcode.ClientError would
+	// report it as CodeInternal. Compare-and-set exhaustion under contention
+	// is a real, retryable outcome a caller can act on, and "server error" is
+	// not an answer it can act on — so it is mapped deliberately here.
+	//
+	// This is the only kind of case a table is still needed for, and it is
+	// why Error is a function rather than a bare call to errcode.
+	if errors.Is(err, versionstore.ErrConflict) {
+		return errcode.ClientError(ErrConflict)
+	}
+	return errcode.ClientError(err)
+}
+
+// Code is Error without the reason, for callers that only switch on the code.
+func Code(err error) int32 {
+	code, _ := Error(err)
+	return code
+}
 
 // Bounds.
 const (

@@ -1,10 +1,11 @@
 package global
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/tjbdwanghaibo/roost-core/errcode"
 )
 
 // This file is the cross-server activity coordination half of the package:
@@ -62,102 +63,62 @@ const (
 )
 
 var (
-	ErrActivityInvalid = errors.New("global: activity request is invalid")
-	ErrActivityMissing = errors.New("global: activity not found")
-	ErrActivityExists  = errors.New("global: activity already open")
+	ErrActivityInvalid = errcode.Define(CodeActivityInvalid, "global: activity request is invalid", "")
+	ErrActivityMissing = errcode.Define(CodeActivityMissing, "global: activity not found", "")
+	ErrActivityExists  = errcode.Define(CodeActivityExists, "global: activity already open", "")
 	// ErrActivityStatus reports that the activity is not in a status the
 	// operation applies to — a notify or a progress apply against an
 	// aggregation that already completed. It is distinct from ErrNotifyLate so
 	// an operator can tell "the window closed while you were away" from "the
 	// result was already dispatched".
-	ErrActivityStatus = errors.New("global: activity is not in a status that allows this")
+	ErrActivityStatus = errcode.Define(CodeActivityStatus, "global: activity is not in a status that allows this", "")
 	// ErrNotifyUnexpected reports a notification from a game server that is
 	// not in the activity's expected set. The expected set is fixed when the
 	// activity opens and is never taken from a notify, because an aggregation
 	// whose membership can be widened by the notification itself can always be
 	// completed by whoever notifies last.
-	ErrNotifyUnexpected = errors.New("global: notifying game is not expected by this activity")
+	ErrNotifyUnexpected = errcode.Define(CodeNotifyUnexpected, "global: notifying game is not expected by this activity", "")
 	// ErrNotifyLate reports a notification that arrived after the grace
 	// deadline. Accepting it would make the aggregated result depend on
 	// whether the sweep happened to have run yet, so the same interleaving
 	// would produce different results on different days.
-	ErrNotifyLate = errors.New("global: notification arrived after the grace window closed")
+	ErrNotifyLate = errcode.Define(CodeNotifyLate, "global: notification arrived after the grace window closed", "")
 	// ErrActivityBacklog reports that the group's pending window is full.
 	// Refusing to open is deliberate: the window is what the sweep scans, so
 	// an activity that is not in it would never be back-stopped, and silently
 	// opening one outside the window would trade a loud refusal for a
 	// permanently stranded aggregation.
-	ErrActivityBacklog = errors.New("global: pending activity window is full")
+	ErrActivityBacklog = errcode.Define(CodeActivityBacklog, "global: pending activity window is full", "")
 
-	ErrParticipantInvalid = errors.New("global: participant is invalid")
+	ErrParticipantInvalid = errcode.Define(CodeParticipantInvalid, "global: participant is invalid", "")
 	// ErrRequestInvalid reports a malformed idempotency key, or one that was
 	// reserved for a different delta. Reusing a request id for different
 	// arguments cannot be resolved by applying either of them, and applying
 	// both is the double count this ledger exists to prevent.
-	ErrRequestInvalid = errors.New("global: progress request is invalid")
+	ErrRequestInvalid = errcode.Define(CodeRequestInvalid, "global: progress request is invalid", "")
 
-	ErrDispatchMissing = errors.New("global: dispatch not found")
+	ErrDispatchMissing = errcode.Define(CodeDispatchMissing, "global: dispatch not found", "")
 	// ErrDispatchToken reports an ACK that did not present the token the
 	// dispatch was delivered with. It never echoes the expected token: the
 	// token is the whole authorization, so a wrong guess must not teach the
 	// caller the right one.
-	ErrDispatchToken = errors.New("global: dispatch ack token does not match")
+	ErrDispatchToken = errcode.Define(CodeDispatchToken, "global: dispatch ack token does not match", "")
 	// ErrDispatchExhausted reports a dispatch whose attempt budget is spent.
 	// It is terminal on purpose. Quietly accepting an ACK after the budget was
 	// spent would erase the evidence that delivery to that game never worked,
 	// which is precisely the class of silent path the design constraints call
 	// out as able to survive for years.
-	ErrDispatchExhausted = errors.New("global: dispatch attempts are exhausted")
-	ErrDispatchNotDue    = errors.New("global: dispatch is not due for another attempt")
+	ErrDispatchExhausted = errcode.Define(CodeDispatchExhausted, "global: dispatch attempts are exhausted", "")
+	ErrDispatchNotDue    = errcode.Define(CodeDispatchNotDue, "global: dispatch is not due for another attempt", "")
 )
 
-// ActivityCode maps a failure to its wire code.
+// ActivityCode maps an activity error to its code.
 //
-// It exists so the pairing between sentinel and code is one testable table
-// instead of a switch in each transport: a business failure that reaches a
-// client as CodeStoreFailed is indistinguishable from an unreachable backend,
-// and the client then retries a request that can never succeed. Anything not
-// listed here is a store or transport failure, and there is a test that walks
-// every client-mistake path in this file and asserts none of them land in that
-// default.
-func ActivityCode(err error) int32 {
-	switch {
-	case err == nil:
-		return CodeOK
-	case errors.Is(err, ErrActivityInvalid):
-		return CodeActivityInvalid
-	case errors.Is(err, ErrActivityMissing):
-		return CodeActivityMissing
-	case errors.Is(err, ErrActivityExists):
-		return CodeActivityExists
-	case errors.Is(err, ErrActivityStatus):
-		return CodeActivityStatus
-	case errors.Is(err, ErrNotifyUnexpected):
-		return CodeNotifyUnexpected
-	case errors.Is(err, ErrNotifyLate):
-		return CodeNotifyLate
-	case errors.Is(err, ErrActivityBacklog):
-		return CodeActivityBacklog
-	case errors.Is(err, ErrParticipantInvalid):
-		return CodeParticipantInvalid
-	case errors.Is(err, ErrRequestInvalid):
-		return CodeRequestInvalid
-	case errors.Is(err, ErrDispatchMissing):
-		return CodeDispatchMissing
-	case errors.Is(err, ErrDispatchToken):
-		return CodeDispatchToken
-	case errors.Is(err, ErrDispatchExhausted):
-		return CodeDispatchExhausted
-	case errors.Is(err, ErrDispatchNotDue):
-		return CodeDispatchNotDue
-	case errors.Is(err, ErrRangeInvalid):
-		return CodeRangeInvalid
-	case errors.Is(err, ErrConflict):
-		return CodeConflict
-	default:
-		return CodeStoreFailed
-	}
-}
+// It delegates to global.Code, which covers this package's route, lease and
+// activity sentinels alike — they share one code segment and one error
+// vocabulary, so two mapping functions would be two places for a new sentinel
+// to be forgotten in. It stays for the callers that named it.
+func ActivityCode(err error) int32 { return Code(err) }
 
 // Bounds. Every one of these is a bound a zero value cannot bypass: a limit of
 // zero is an error rather than "unlimited", and a size a caller controls is

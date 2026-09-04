@@ -32,6 +32,9 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/tjbdwanghaibo/roost-core/errcode"
+	"github.com/tjbdwanghaibo/roost-kit/versionstore"
 )
 
 // Error codes.
@@ -46,24 +49,23 @@ const (
 	CodeNotPermitted   int32 = 550106
 	CodeTicketMatched  int32 = 550107
 	CodeConflict       int32 = 550108
-	CodeStoreFailed    int32 = 550109
 )
 
 var (
-	ErrQueueInvalid   = errors.New("match: queue is invalid")
-	ErrSubjectInvalid = errors.New("match: subject is invalid")
-	ErrTicketInvalid  = errors.New("match: ticket is invalid")
-	ErrTicketMissing  = errors.New("match: ticket not found")
+	ErrQueueInvalid   = errcode.Define(CodeQueueInvalid, "match: queue is invalid", "")
+	ErrSubjectInvalid = errcode.Define(CodeSubjectInvalid, "match: subject is invalid", "")
+	ErrTicketInvalid  = errcode.Define(CodeTicketInvalid, "match: ticket is invalid", "")
+	ErrTicketMissing  = errcode.Define(CodeTicketMissing, "match: ticket not found", "")
 	// ErrAlreadyQueued reports that the subject already holds a live ticket.
 	// A subject with two live tickets is what allowed one player to be
 	// committed into two matches.
-	ErrAlreadyQueued = errors.New("match: subject is already queued")
+	ErrAlreadyQueued = errcode.Define(CodeAlreadyQueued, "match: subject is already queued", "")
 	// ErrNotPermitted reports that the caller does not own the ticket. Every
 	// operation naming a ticket also names its subject, so a guessable id is
 	// not enough to act on someone else's ticket.
-	ErrNotPermitted  = errors.New("match: caller does not own this ticket")
-	ErrTicketMatched = errors.New("match: ticket is already matched")
-	ErrConflict      = errors.New("match: conflict")
+	ErrNotPermitted  = errcode.Define(CodeNotPermitted, "match: caller does not own this ticket", "")
+	ErrTicketMatched = errcode.Define(CodeTicketMatched, "match: ticket is already matched", "")
+	ErrConflict      = errcode.Define(CodeConflict, "match: conflict", "")
 )
 
 // Limits bound what a queue may hold. Every one of these is a bound the
@@ -211,4 +213,49 @@ type Match struct {
 	// are recorded so a match can be reconciled against its tickets.
 	TicketIDs     []string `json:"ticket_ids"`
 	CreatedAtUnix int64    `json:"created_at_unix"`
+}
+
+// Error maps an error to the code and reason a client sees.
+//
+// It matches roost-kit's servicerpc.Error convention, which is what an RPC
+// envelope is filled from.
+//
+// It is short because the sentinels carry their own codes: errcode.ClientError
+// finds the code through any depth of fmt.Errorf wrapping, so there is no
+// per-sentinel table here to keep in step with the one above. A hand-written
+// switch over every sentinel is the shape this replaces, and it is a second
+// list that a newly added error silently falls off.
+//
+// Two behaviours are relied on rather than incidental:
+//
+//   - When an error wraps two coded errors with "%w: %w", the FIRST one wins.
+//     That is what makes a refusal which wraps a caller's own reason report
+//     the refusal, which is what the client has to be told.
+//   - An error this package cannot classify reports errcode.CodeInternal, not
+//     a code of its own. Answering "the store failed" for an unclassified bug
+//     is a guess presented as a diagnosis — and a catch-all code of that shape
+//     is what the previous constant block had, with nothing able to produce it
+//     deliberately.
+func Error(err error) (int32, string) {
+	if err == nil {
+		return CodeOK, ""
+	}
+	// versionstore.ErrConflict is a FOREIGN sentinel: it belongs to roost-kit
+	// and carries no code of this package's, so errcode.ClientError would
+	// report it as CodeInternal. Compare-and-set exhaustion under contention
+	// is a real, retryable outcome a caller can act on, and "server error" is
+	// not an answer it can act on — so it is mapped deliberately here.
+	//
+	// This is the only kind of case a table is still needed for, and it is
+	// why Error is a function rather than a bare call to errcode.
+	if errors.Is(err, versionstore.ErrConflict) {
+		return errcode.ClientError(ErrConflict)
+	}
+	return errcode.ClientError(err)
+}
+
+// Code is Error without the reason, for callers that only switch on the code.
+func Code(err error) int32 {
+	code, _ := Error(err)
+	return code
 }

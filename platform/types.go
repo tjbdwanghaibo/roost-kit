@@ -37,6 +37,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/tjbdwanghaibo/roost-core/errcode"
+	"github.com/tjbdwanghaibo/roost-kit/versionstore"
 )
 
 // Error codes.
@@ -53,34 +56,78 @@ const (
 	CodeDeliveryFailed   int32 = 600108
 	CodeDeliveryExpired  int32 = 600109
 	CodeConflict         int32 = 600110
-	CodeStoreFailed      int32 = 600111
 )
 
 var (
-	ErrRequestInvalid = errors.New("platform: request is invalid")
+	ErrRequestInvalid = errcode.Define(CodeRequestInvalid, "platform: request is invalid", "")
 	// ErrSignatureInvalid reports that the payload's signature did not verify.
 	// It is deliberately indistinguishable to the caller from a malformed
 	// payload of the right shape: a provider integration that is misconfigured
 	// and an attacker probing the endpoint should not get different answers.
-	ErrSignatureInvalid = errors.New("platform: payload signature is invalid")
-	ErrIdentityDenied   = errors.New("platform: identity was denied by the channel")
+	ErrSignatureInvalid = errcode.Define(CodeSignatureInvalid, "platform: payload signature is invalid", "")
+	ErrIdentityDenied   = errcode.Define(CodeIdentityDenied, "platform: identity was denied by the channel", "")
 	// ErrVerifierDown reports that the channel could not be reached. It is
 	// distinct from ErrIdentityDenied on purpose: telling a player their
 	// credential is bad when the channel is merely unreachable is a support
 	// ticket, and it is the answer a service gives when it collapses the two.
-	ErrVerifierDown = errors.New("platform: identity channel is unavailable")
+	ErrVerifierDown = errcode.Define(CodeVerifierDown, "platform: identity channel is unavailable", "")
 
-	ErrOrderInvalid = errors.New("platform: order is invalid")
+	ErrOrderInvalid = errcode.Define(CodeOrderInvalid, "platform: order is invalid", "")
 	// ErrOrderMismatch reports that one order id arrived twice with different
 	// contents. Neither answer is right and delivering both is the double
 	// grant, so it is refused.
-	ErrOrderMismatch = errors.New("platform: order id was reserved for different contents")
+	ErrOrderMismatch = errcode.Define(CodeOrderMismatch, "platform: order id was reserved for different contents", "")
 	// ErrDeliveryHeld reports that a delivery for this order is in flight.
-	ErrDeliveryHeld    = errors.New("platform: a delivery is in flight")
-	ErrDeliveryFailed  = errors.New("platform: delivery failed")
-	ErrDeliveryExpired = errors.New("platform: delivery attempts are exhausted")
-	ErrConflict        = errors.New("platform: conflict")
+	ErrDeliveryHeld    = errcode.Define(CodeDeliveryHeld, "platform: a delivery is in flight", "")
+	ErrDeliveryFailed  = errcode.Define(CodeDeliveryFailed, "platform: delivery failed", "")
+	ErrDeliveryExpired = errcode.Define(CodeDeliveryExpired, "platform: delivery attempts are exhausted", "")
+	ErrConflict        = errcode.Define(CodeConflict, "platform: conflict", "")
 )
+
+// Error maps an error to the code and reason a client sees.
+//
+// It matches roost-kit's servicerpc.Error convention, which is what an RPC
+// envelope is filled from.
+//
+// It is short because the sentinels carry their own codes: errcode.ClientError
+// finds the code through any depth of fmt.Errorf wrapping, so there is no
+// per-sentinel table here to keep in step with the one above. A hand-written
+// switch over every sentinel is the shape this replaces, and it is a second
+// list that a newly added error silently falls off.
+//
+// Two behaviours are relied on rather than incidental:
+//
+//   - When an error wraps two coded errors with "%w: %w", the FIRST one wins.
+//     That is what makes a refusal which wraps a caller's own reason report
+//     the refusal, which is what the client has to be told.
+//   - An error this package cannot classify reports errcode.CodeInternal, not
+//     a code of its own. Answering "the store failed" for an unclassified bug
+//     is a guess presented as a diagnosis — and a catch-all code of that shape
+//     is what the previous constant block had, with nothing able to produce it
+//     deliberately.
+func Error(err error) (int32, string) {
+	if err == nil {
+		return CodeOK, ""
+	}
+	// versionstore.ErrConflict is a FOREIGN sentinel: it belongs to roost-kit
+	// and carries no code of this package's, so errcode.ClientError would
+	// report it as CodeInternal. Compare-and-set exhaustion under contention
+	// is a real, retryable outcome a caller can act on, and "server error" is
+	// not an answer it can act on — so it is mapped deliberately here.
+	//
+	// This is the only kind of case a table is still needed for, and it is
+	// why Error is a function rather than a bare call to errcode.
+	if errors.Is(err, versionstore.ErrConflict) {
+		return errcode.ClientError(ErrConflict)
+	}
+	return errcode.ClientError(err)
+}
+
+// Code is Error without the reason, for callers that only switch on the code.
+func Code(err error) int32 {
+	code, _ := Error(err)
+	return code
+}
 
 // Bounds.
 const (

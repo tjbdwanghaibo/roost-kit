@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tjbdwanghaibo/roost-core/errcode"
 	"github.com/tjbdwanghaibo/roost-kit/versionstore"
 )
 
@@ -840,8 +841,8 @@ func TestApplyProgressValidatesItsRequest(t *testing.T) {
 		if !errors.Is(err, testCase.want) {
 			t.Fatalf("%s: got %v, want %v", testCase.label, err, testCase.want)
 		}
-		if code := ActivityCode(err); code == CodeStoreFailed {
-			t.Fatalf("%s: a client mistake reported the store-failure code", testCase.label)
+		if code := ActivityCode(err); code == errcode.CodeInternal {
+			t.Fatalf("%s: a client mistake reported the internal code", testCase.label)
 		}
 	}
 
@@ -1395,7 +1396,7 @@ func TestEveryClientMistakeHasItsOwnCode(t *testing.T) {
 			t.Fatalf("%s and %s share code %d", testCase.label, other, testCase.want)
 		}
 		codes[testCase.want] = testCase.label
-		if testCase.want == CodeStoreFailed || testCase.want == CodeOK {
+		if testCase.want == errcode.CodeInternal || testCase.want == CodeOK {
 			t.Fatalf("%s maps to a non-business code", testCase.label)
 		}
 	}
@@ -1411,7 +1412,7 @@ func TestEveryClientMistakeHasItsOwnCode(t *testing.T) {
 			t.Fatalf("%s has code %d, outside the activity block 570112-570124", label, code)
 		}
 	}
-	if ActivityCode(errors.New("backend is down")) != CodeStoreFailed {
+	if ActivityCode(errors.New("backend is down")) != errcode.CodeInternal {
 		t.Fatal("an unrecognised error is not reported as a store failure")
 	}
 }
@@ -1457,8 +1458,8 @@ func TestNoAPIPathReturnsABareError(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: expected a refusal", testCase.label)
 		}
-		if code := ActivityCode(err); code == CodeStoreFailed {
-			t.Fatalf("%s: %v reached the caller as CodeStoreFailed", testCase.label, err)
+		if code := ActivityCode(err); code == errcode.CodeInternal {
+			t.Fatalf("%s: %v reached the caller as CodeInternal", testCase.label, err)
 		}
 	}
 	_ = c

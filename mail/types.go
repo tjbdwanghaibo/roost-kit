@@ -40,9 +40,19 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/tjbdwanghaibo/roost-core/errcode"
+	"github.com/tjbdwanghaibo/roost-kit/versionstore"
 )
 
 // Error codes.
+//
+// Every one of them is attached to a sentinel below through errcode.Define, so
+// an error this package returns carries its code all the way to an RPC
+// boundary. A code constant with no sentinel would be a code nothing can ever
+// produce, and a sentinel with no code becomes CodeInternal at that boundary —
+// which is the confirmed defect this answers: a service whose "board id is
+// empty" reached the client as "server error".
 const (
 	CodeOK int32 = 0
 
@@ -60,36 +70,113 @@ const (
 	CodeRangeInvalid    int32 = 590112
 	CodeRequestInvalid  int32 = 590113
 	CodeConflict        int32 = 590114
-	CodeStoreFailed     int32 = 590115
-	CodeDeliveryRefused int32 = 590116
 )
 
+// The sentinels. Each carries its code, so errors.Is keeps working unchanged
+// at every existing call site and errcode.ClientError finds the code through
+// any depth of fmt.Errorf wrapping.
+//
+// The text lives in the NAME rather than the message, because errcode renders
+// "name: message: cause" and a message would duplicate what the name already
+// says. errcode.ClientError falls back to the name for its reason, so a client
+// receives the same string this package logs.
 var (
-	ErrMailInvalid     = errors.New("mail: mail is invalid")
-	ErrMailMissing     = errors.New("mail: mail not found")
-	ErrBodyInvalid     = errors.New("mail: body is invalid")
-	ErrAudienceInvalid = errors.New("mail: audience is invalid")
+	ErrMailInvalid     = errcode.Define(CodeMailInvalid, "mail: mail is invalid", "")
+	ErrMailMissing     = errcode.Define(CodeMailMissing, "mail: mail not found", "")
+	ErrBodyInvalid     = errcode.Define(CodeBodyInvalid, "mail: body is invalid", "")
+	ErrAudienceInvalid = errcode.Define(CodeAudienceInvalid, "mail: audience is invalid", "")
 	// ErrNotRecipient reports that the caller is not among this envelope's
 	// recipients. The implementation this replaces took the player id from the
 	// request body, so there was no caller to compare against and this error
 	// had no reason to exist.
-	ErrNotRecipient   = errors.New("mail: caller is not a recipient")
-	ErrExpired        = errors.New("mail: mail has expired")
-	ErrNoAttachment   = errors.New("mail: mail has no attachment")
-	ErrAlreadyClaimed = errors.New("mail: attachment is already claimed")
+	ErrNotRecipient   = errcode.Define(CodeNotRecipient, "mail: caller is not a recipient", "")
+	ErrExpired        = errcode.Define(CodeExpired, "mail: mail has expired", "")
+	ErrNoAttachment   = errcode.Define(CodeNoAttachment, "mail: mail has no attachment", "")
+	ErrAlreadyClaimed = errcode.Define(CodeAlreadyClaimed, "mail: attachment is already claimed", "")
 	// ErrClaimHeld reports that a claim is in flight and its deadline has not
 	// passed. It is distinct from ErrAlreadyClaimed: "someone is delivering
 	// this right now" and "this was delivered" call for different client
 	// behaviour — wait against give up.
-	ErrClaimHeld = errors.New("mail: a claim is in flight")
+	ErrClaimHeld = errcode.Define(CodeClaimHeld, "mail: a claim is in flight", "")
 	// ErrClaimTokenWrong reports that a commit or cancel presented a token
 	// that is not the one this mailbox holds.
-	ErrClaimTokenWrong = errors.New("mail: claim token does not match")
-	ErrMailboxFull     = errors.New("mail: mailbox is full")
-	ErrRangeInvalid    = errors.New("mail: range is invalid")
-	ErrRequestInvalid  = errors.New("mail: request is invalid")
-	ErrConflict        = errors.New("mail: conflict")
+	ErrClaimTokenWrong = errcode.Define(CodeClaimTokenWrong, "mail: claim token does not match", "")
+	ErrMailboxFull     = errcode.Define(CodeMailboxFull, "mail: mailbox is full", "")
+	ErrRangeInvalid    = errcode.Define(CodeRangeInvalid, "mail: range is invalid", "")
+	ErrRequestInvalid  = errcode.Define(CodeRequestInvalid, "mail: request is invalid", "")
+	ErrConflict        = errcode.Define(CodeConflict, "mail: conflict", "")
 )
+
+// codeBySentinel is the pairing above, as data, so a test can check it rather
+// than a reader having to.
+//
+// Two codes that were declared here before this pairing existed are gone:
+// a "store failed" code, because a store failure is not a client error and
+// belongs at CodeInternal; and a "delivery refused" code, because a broadcast
+// whose fanout failed is reported as ErrConflict and never had a distinct
+// error to attach to. A code nothing can produce is worse than no code: it
+// reads as coverage.
+var codeBySentinel = map[int32]error{
+	CodeMailInvalid:     ErrMailInvalid,
+	CodeMailMissing:     ErrMailMissing,
+	CodeBodyInvalid:     ErrBodyInvalid,
+	CodeAudienceInvalid: ErrAudienceInvalid,
+	CodeNotRecipient:    ErrNotRecipient,
+	CodeExpired:         ErrExpired,
+	CodeNoAttachment:    ErrNoAttachment,
+	CodeAlreadyClaimed:  ErrAlreadyClaimed,
+	CodeClaimHeld:       ErrClaimHeld,
+	CodeClaimTokenWrong: ErrClaimTokenWrong,
+	CodeMailboxFull:     ErrMailboxFull,
+	CodeRangeInvalid:    ErrRangeInvalid,
+	CodeRequestInvalid:  ErrRequestInvalid,
+	CodeConflict:        ErrConflict,
+}
+
+// Error maps an error to the code and reason a client sees.
+//
+// It matches roost-kit's servicerpc.Error convention, which is what an RPC
+// envelope is filled from.
+//
+// It is short because the sentinels carry their own codes: errcode.ClientError
+// finds the code through any depth of fmt.Errorf wrapping, so there is no
+// per-sentinel table here to keep in step with the one above. A hand-written
+// switch over every sentinel is the shape this replaces, and it is a second
+// list that a newly added error silently falls off.
+//
+// Two behaviours are relied on rather than incidental:
+//
+//   - When an error wraps two coded errors with "%w: %w", the FIRST one wins.
+//     That is what makes a refusal which wraps a caller's own reason report
+//     the refusal, which is what the client has to be told.
+//   - An error this package cannot classify reports errcode.CodeInternal, not
+//     a code of its own. Answering "the store failed" for an unclassified bug
+//     is a guess presented as a diagnosis — and a catch-all code of that shape
+//     is what the previous constant block had, with nothing able to produce it
+//     deliberately.
+func Error(err error) (int32, string) {
+	if err == nil {
+		return CodeOK, ""
+	}
+	// versionstore.ErrConflict is a FOREIGN sentinel: it belongs to roost-kit
+	// and carries no code of this package's, so errcode.ClientError would
+	// report it as CodeInternal. Compare-and-set exhaustion under contention
+	// is a real, retryable outcome a caller can act on, and "server error" is
+	// not an answer it can act on — so it is mapped deliberately here.
+	//
+	// This is the only kind of case a table is still needed for, and it is
+	// why Error is a function rather than a bare call to errcode.
+	if errors.Is(err, versionstore.ErrConflict) {
+		return errcode.ClientError(ErrConflict)
+	}
+	return errcode.ClientError(err)
+}
+
+// Code is Error without the reason, for callers that only switch on the code.
+func Code(err error) int32 {
+	code, _ := Error(err)
+	return code
+}
 
 // Bounds. None of them can be bypassed with a zero value.
 const (

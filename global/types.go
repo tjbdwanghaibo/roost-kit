@@ -33,6 +33,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/tjbdwanghaibo/roost-core/errcode"
+	"github.com/tjbdwanghaibo/roost-kit/versionstore"
 )
 
 // Error codes.
@@ -49,29 +52,28 @@ const (
 	CodeLeaseExpired   int32 = 570108
 	CodeRangeInvalid   int32 = 570109
 	CodeConflict       int32 = 570110
-	CodeStoreFailed    int32 = 570111
 )
 
 var (
-	ErrRouteInvalid = errors.New("global: route is invalid")
-	ErrRouteMissing = errors.New("global: route binding not found")
+	ErrRouteInvalid = errcode.Define(CodeRouteInvalid, "global: route is invalid", "")
+	ErrRouteMissing = errcode.Define(CodeRouteMissing, "global: route binding not found", "")
 	// ErrRouteStale reports that a rebind presented an epoch that is no
 	// longer current. It is the epoch CAS the boundary document required and
 	// the implementation enforced with an in-process lock, which is no
 	// guarantee across instances.
-	ErrRouteStale     = errors.New("global: route epoch is stale")
-	ErrRouteMigrating = errors.New("global: route binding is migrating")
+	ErrRouteStale     = errcode.Define(CodeRouteStale, "global: route epoch is stale", "")
+	ErrRouteMigrating = errcode.Define(CodeRouteMigrating, "global: route binding is migrating", "")
 
-	ErrLeaseInvalid = errors.New("global: lease is invalid")
-	ErrLeaseMissing = errors.New("global: lease not found")
+	ErrLeaseInvalid = errcode.Define(CodeLeaseInvalid, "global: lease is invalid", "")
+	ErrLeaseMissing = errcode.Define(CodeLeaseMissing, "global: lease not found", "")
 	// ErrLeaseNotHolder reports that the caller presented an incarnation
 	// token that is not the current holder's. This is the check whose absence
 	// let a previous incarnation's late heartbeat overwrite a live lease.
-	ErrLeaseNotHolder = errors.New("global: caller does not hold this lease")
-	ErrLeaseExpired   = errors.New("global: lease has expired")
+	ErrLeaseNotHolder = errcode.Define(CodeLeaseNotHolder, "global: caller does not hold this lease", "")
+	ErrLeaseExpired   = errcode.Define(CodeLeaseExpired, "global: lease has expired", "")
 
-	ErrRangeInvalid = errors.New("global: range is invalid")
-	ErrConflict     = errors.New("global: conflict")
+	ErrRangeInvalid = errcode.Define(CodeRangeInvalid, "global: range is invalid", "")
+	ErrConflict     = errcode.Define(CodeConflict, "global: conflict", "")
 )
 
 // MaxPageSize bounds a listing, and cannot be bypassed with a zero limit.
@@ -205,4 +207,49 @@ func cloneLoad(load map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+// Error maps an error to the code and reason a client sees.
+//
+// It matches roost-kit's servicerpc.Error convention, which is what an RPC
+// envelope is filled from.
+//
+// It is short because the sentinels carry their own codes: errcode.ClientError
+// finds the code through any depth of fmt.Errorf wrapping, so there is no
+// per-sentinel table here to keep in step with the one above. A hand-written
+// switch over every sentinel is the shape this replaces, and it is a second
+// list that a newly added error silently falls off.
+//
+// Two behaviours are relied on rather than incidental:
+//
+//   - When an error wraps two coded errors with "%w: %w", the FIRST one wins.
+//     That is what makes a refusal which wraps a caller's own reason report
+//     the refusal, which is what the client has to be told.
+//   - An error this package cannot classify reports errcode.CodeInternal, not
+//     a code of its own. Answering "the store failed" for an unclassified bug
+//     is a guess presented as a diagnosis — and a catch-all code of that shape
+//     is what the previous constant block had, with nothing able to produce it
+//     deliberately.
+func Error(err error) (int32, string) {
+	if err == nil {
+		return CodeOK, ""
+	}
+	// versionstore.ErrConflict is a FOREIGN sentinel: it belongs to roost-kit
+	// and carries no code of this package's, so errcode.ClientError would
+	// report it as CodeInternal. Compare-and-set exhaustion under contention
+	// is a real, retryable outcome a caller can act on, and "server error" is
+	// not an answer it can act on — so it is mapped deliberately here.
+	//
+	// This is the only kind of case a table is still needed for, and it is
+	// why Error is a function rather than a bare call to errcode.
+	if errors.Is(err, versionstore.ErrConflict) {
+		return errcode.ClientError(ErrConflict)
+	}
+	return errcode.ClientError(err)
+}
+
+// Code is Error without the reason, for callers that only switch on the code.
+func Code(err error) int32 {
+	code, _ := Error(err)
+	return code
 }

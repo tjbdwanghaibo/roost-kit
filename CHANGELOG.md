@@ -166,6 +166,42 @@
   ——把 payment secret 接到 session secret 的位置，签发与校验仍然自洽，只有对着配置
   里的值独立验签才抓得到。
 
+### errcode 接线
+
+- **九个包的 error code 此前全部没有接上 sentinel。** 115 个常量声明在那里，
+  而任何 RPC 边界上每个错误都会变成 `CodeInternal`——正是本文档记在 rank 名下
+  的那条缺陷（"连 board id 为空这种纯客户端错误都返回 CodeInternal"）。
+  两处例外要说清：`chat` 与 `global` 各有一张**手写的 `errors.Is` 映射表**，
+  我第一次审计时的 grep 没匹配到，先前的汇报因此不准确。
+
+- 改法是把 sentinel 本身变成 `errcode.Define(Code…, 文本, "")`。
+  `errcode.ClientError` 用 `errors.As` 穿透任意层 `fmt.Errorf` 找到 code，因此
+  **所有调用点零改动**——mail 转换后 43 条测试原样通过。文本放在 `name` 而不是
+  `message`，因为 errcode 渲染 "name: message: cause"，两个都填会重复。
+
+  那两张手写表删掉了：一张逐 sentinel 的表是第二份清单，新增的错误会从上面静默
+  掉下去。仍然需要函数的唯一理由是**外部 sentinel**——`versionstore.ErrConflict`
+  不带本包的 code，CAS 竞争耗尽是调用方能据以重试的真实结果，"server error"
+  不是它能据以行动的答案，所以显式映射进本段。
+
+- **每个包的 `CodeStoreFailed` 都删了。** 未分类的错误诚实地报 `errcode.CodeInternal`；
+  为任何一个未分类的 bug 回答"存储失败"，是把猜测当成诊断。九个包里这个常量都在，
+  而九个包里都没有能产生它的 sentinel。
+
+- `directory` 此前**只有 sentinel、零 code**——"这个名字被占了"这种最日常的拒绝
+  一路以 "server error" 到达客户端。现在分配了 530101-530106 段。
+
+- `global` 的段里留下一个**刻意的洞 570111**（原兜底码的位置）。活动码没有向下
+  重编号：它们在已发布版本里是**可观测的**（`ActivityCode` 的手写 switch 真的会
+  返回 570112 起），改值会破坏按码匹配的客户端。一个有文档的洞比一个静默移位的码
+  代价小，而且 570111 不再复用——一个曾经意味着"存储失败"的码，改成别的含义比留
+  着空档更坏。
+
+- 八条变异验证。其中一条一度是绿的，原因值得记：我用"返回最内层 code"去变异优先级，
+  但 `fmt.Errorf` 双 `%w` 返回的是 `Unwrap() []error`，`errors.Unwrap` 对它返回
+  nil，所以那个变异是空操作。优先级并非我的代码实现的——**确立它的是 `chat.denied`
+  的 wrap 顺序**（`%w: %w`，拒绝在前）。改那个顺序才真的变红。
+
 ### 依赖的框架能力
 
 本仓依赖 `roost-kit` 的三个包，它们是为本仓补的前置：`versionstore`（版本化状态契约，
