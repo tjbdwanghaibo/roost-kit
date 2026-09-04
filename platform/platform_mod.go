@@ -1,0 +1,151 @@
+package platform
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/spf13/viper"
+	"github.com/tjbdwanghaibo/roost-core/app"
+	"github.com/tjbdwanghaibo/roost-kit/mods"
+
+	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
+	"github.com/tjbdwanghaibo/roost-service/servicemods"
+)
+
+// Mod wires a platform Service into an app and registers it as a capability.
+//
+// Three collaborators are required constructor arguments with no defaults, and
+// this is the file where that matters most in the whole repository. The
+// implementation this replaces signed a session token for whatever player id
+// arrived in the request body — there was no verifier, and the ABSENCE looked
+// exactly like a default. So:
+//
+//   - Verifier checks a credential with its channel. A permissive default is
+//     total account takeover.
+//   - Players maps a verified identity to a player id. A default would either
+//     invent ids or read them from the request.
+//   - Deliver grants the goods for a paid order. A default that did nothing
+//     would take money and deliver nothing, silently.
+//
+// The two secrets come from configuration and are refused when empty, at Init.
+type Mod struct {
+	verifier Verifier
+	players  PlayerResolver
+	deliver  Deliverer
+	metrics  servicemetrics.Reporter
+
+	prefix        string
+	sessionSecret string
+	paymentSecret string
+	sessionTTL    time.Duration
+	attempts      int
+	backoff       time.Duration
+	service       *Service
+}
+
+// NewMod returns a platform Mod. All three collaborators are required.
+func NewMod(verifier Verifier, players PlayerResolver, deliver Deliverer, reporter servicemetrics.Reporter) *Mod {
+	return &Mod{verifier: verifier, players: players, deliver: deliver, metrics: reporter}
+}
+
+// Name implements app.Mod.
+func (m *Mod) Name() app.ModName { return servicemods.ModPlatform }
+
+// DependsOn implements app.ModDependencyProvider.
+func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
+
+// Init reads configuration.
+//
+//	platform:
+//	  key_prefix: roost:platform   # required, no default
+//	  session_secret: "..."        # required, non-empty
+//	  payment_secret: "..."        # required, non-empty
+//	  session_ttl: 30m             # optional
+//	  delivery_attempts: 8         # optional
+//	  delivery_backoff: 5s         # optional
+func (m *Mod) Init(cfg *viper.Viper) error {
+	missing := []string{}
+	if m.verifier == nil {
+		missing = append(missing, "identity verifier")
+	}
+	if m.players == nil {
+		missing = append(missing, "player resolver")
+	}
+	if m.deliver == nil {
+		missing = append(missing, "recharge deliverer")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("platform mod: %v are required and have no defaults; a permissive "+
+			"verifier is account takeover and a no-op deliverer takes money without delivering", missing)
+	}
+	prefix, err := servicemods.KeyPrefix(cfg, "platform")
+	if err != nil {
+		return err
+	}
+	// Refused at Init, not at call time. An unset payment secret in the
+	// implementation this replaces turned every provider callback into an
+	// invalid-signature refusal: a silent outage that looked like an attack.
+	sessionSecret, err := servicemods.Secret(cfg, "platform.session_secret")
+	if err != nil {
+		return err
+	}
+	paymentSecret, err := servicemods.Secret(cfg, "platform.payment_secret")
+	if err != nil {
+		return err
+	}
+	sessionTTL, err := servicemods.Duration(cfg, "platform.session_ttl", DefaultSessionTTL)
+	if err != nil {
+		return err
+	}
+	backoff, err := servicemods.Duration(cfg, "platform.delivery_backoff", DefaultDeliveryBackoff)
+	if err != nil {
+		return err
+	}
+	attempts := MaxDeliveryAttempts
+	if cfg.IsSet("platform.delivery_attempts") {
+		attempts = cfg.GetInt("platform.delivery_attempts")
+		if attempts <= 0 {
+			return fmt.Errorf("platform mod: platform.delivery_attempts must be positive, got %d", attempts)
+		}
+	}
+	m.prefix, m.sessionSecret, m.paymentSecret = prefix, sessionSecret, paymentSecret
+	m.sessionTTL, m.attempts, m.backoff = sessionTTL, attempts, backoff
+	return nil
+}
+
+// Provide builds the service and registers it.
+func (m *Mod) Provide(r *app.Registry) error {
+	client, err := servicemods.Redis(r)
+	if err != nil {
+		return err
+	}
+	orders, err := NewRedisOrders(client, m.prefix)
+	if err != nil {
+		return fmt.Errorf("platform mod: %w", err)
+	}
+	service, err := New(Config{
+		Orders: orders, Deliver: m.deliver, Verifier: m.verifier, Players: m.players,
+		SessionSecret: m.sessionSecret, SessionTTL: m.sessionTTL,
+		PaymentSecret:    m.paymentSecret,
+		DeliveryAttempts: m.attempts, DeliveryBackoff: m.backoff,
+		Metrics: m.metrics,
+	})
+	if err != nil {
+		return fmt.Errorf("platform mod: %w", err)
+	}
+	m.service = service
+	return mods.RegisterAll(r, mods.Capability{Name: servicemods.ModPlatform, Value: service})
+}
+
+// Start implements app.Mod.
+//
+// Nothing is started. Orders whose delivery failed are retried by
+// AttemptDelivery, which the caller drives — the retry cadence is a
+// deployment decision, and a payment retry loop nobody can see is worse than
+// none.
+func (m *Mod) Start() error { return nil }
+
+// Stop implements app.Mod. Nothing to stop.
+func (m *Mod) Stop() {}
+
+var _ app.Mod = (*Mod)(nil)
