@@ -22,6 +22,13 @@
 
 ### Fixed
 
+- **platform：`HandleCallback` 首次路径丢掉 `Receipt.Replayed`**。`AttemptDelivery` 的契约要求"我发了货"
+  与"货已被别人发过"可区分（`Replayed`），当一次慢投递被过了退避期的重试超车时它确实置位——但
+  `HandleCallback` 为首次回调构造 Receipt 时只抄了 `Order` 和 `Delivered`，回调驱动的投递从来看不到
+  这个信号（指标 `conflict:deliver` 仍在，所以只有 Receipt 这一层丢）。对 platform 五条注释承诺逐项
+  临时回退：两条已有测试变红；三条全绿——"记录的是投递方的错误原因而非常量"、"被超车的提交不移动
+  送达时间并计为 conflict"、"领取时预算已耗尽要落成 exhausted 而非原地拒绝"。三条测试补上
+  （`race_test.go` 的 `blockingDeliverer` 制造超车），其中第二条顺带暴露了上面的丢字段。收敛单元 U-0018。
 - **rank：`TestIntegrationConcurrentAddsAgainstRealRedis` 在 v1.5.1 的 tag CI 上偶发红**
   （`submit lost 8 compare-and-swaps for owner 1`）。八个 writer 对同一 owner 用 CAS 累加，
   `Submit` 按契约在 8 次失败后返回 `ErrConflict`（哨兵注释写明"重试即可"），测试却把它当作失败。

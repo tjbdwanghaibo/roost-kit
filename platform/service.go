@@ -361,7 +361,12 @@ func (s *Service) HandleCallback(ctx context.Context, raw []byte, signature stri
 		// "received" and still see that delivery is outstanding.
 		return Receipt{Order: order}, err
 	}
-	return Receipt{Order: attempt.Order, Delivered: attempt.Delivered}, nil
+	// Replayed travels with the receipt: when this attempt was overtaken by a
+	// retry that committed first, the caller must be able to tell "I granted
+	// the goods" from "they were already granted" — the distinction this
+	// function's own contract insists on. Dropping the flag here erased it
+	// for every callback-driven delivery (U-0018).
+	return Receipt{Order: attempt.Order, Delivered: attempt.Delivered, Replayed: attempt.Replayed}, nil
 }
 
 // AttemptDelivery drives one delivery attempt for one order.

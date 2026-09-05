@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -370,6 +371,13 @@ func TestAFailedDeliveryIsRecordedNotDiscarded(t *testing.T) {
 	}
 	if order.LastError == "" {
 		t.Fatal("a failed delivery recorded no error; a payment that fails silently is the defect this answers")
+	}
+	// The CAUSE is recorded, not a constant standing in for it: "game is
+	// down" is what the deliverer said, and it is what an operator needs.
+	// Replacing the recorded error with a fixed string kept this test green
+	// until this assertion existed (U-0018).
+	if !strings.Contains(order.LastError, "game is down") {
+		t.Fatalf("the recorded error %q does not carry the deliverer's cause", order.LastError)
 	}
 	if order.Attempts != 1 {
 		t.Fatalf("the order records %d attempts, want 1", order.Attempts)
