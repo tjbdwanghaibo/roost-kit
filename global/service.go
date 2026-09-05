@@ -168,7 +168,9 @@ func (s *Service) BeginMigration(ctx context.Context, gameSID int32, targetGloba
 func (s *Service) CompleteMigration(ctx context.Context, gameSID int32, expectEpoch uint64) (RouteBinding, error) {
 	now := s.cfg.Now()
 	var result RouteBinding
+	var replayed bool
 	_, _, err := s.cfg.Routes.Update(ctx, gameSID, func(current RouteBinding, found bool) (RouteBinding, bool, error) {
+		replayed = false
 		if !found {
 			return current, false, fmt.Errorf("%w: game %d", ErrRouteMissing, gameSID)
 		}
@@ -181,7 +183,7 @@ func (s *Service) CompleteMigration(ctx context.Context, gameSID int32, expectEp
 			// Idempotent when already complete at this epoch: a retried
 			// completion must not fail, and it cannot be confused with a new
 			// migration because the epoch would have moved.
-			result = current
+			result, replayed = current, true
 			return current, false, nil
 		}
 		next := current
@@ -196,7 +198,11 @@ func (s *Service) CompleteMigration(ctx context.Context, gameSID int32, expectEp
 	if err != nil {
 		return RouteBinding{}, err
 	}
-	s.report.Accepted("complete_migration")
+	if replayed {
+		s.report.Replayed("complete_migration")
+	} else {
+		s.report.Accepted("complete_migration")
+	}
 	return result, nil
 }
 
@@ -237,9 +243,10 @@ func (s *Service) AbortMigration(ctx context.Context, gameSID int32, expectEpoch
 // AcquireLease takes the lease for a game server and returns the incarnation
 // token that authorizes renewals.
 //
-// It succeeds when there is no lease, when the existing lease has lapsed, or
-// when it is being re-taken by the same incarnation. It refuses to displace a
-// live lease held by a different incarnation: two processes claiming to be the
+// It succeeds when there is no lease or when the existing lease has lapsed
+// or was released. There is no "re-take by the same incarnation": the caller
+// presents no token here, so a live lease is refused whoever asks — a holder
+// that wants to keep its lease renews it. It refuses to displace a live lease: two processes claiming to be the
 // same game server is a deployment fault, and silently letting the second one
 // win is how a lease's start time and load become fiction.
 func (s *Service) AcquireLease(ctx context.Context, gameSID int32) (GameLease, error) {

@@ -22,6 +22,12 @@
 
 ### Fixed
 
+- **global：重试的 `CompleteMigration` 被计为 `accepted`**。同 epoch 的重复完成按注释是幂等回放，
+  但上报走的是 accepted，迁移速率指标会高于实际迁移数。现在回放计 `replayed:complete_migration`。
+  对 global 九条注释承诺逐项临时回退：七条已有测试变红；两条全绿——"非持有者的拒绝不泄露当前
+  incarnation"与上面这条——补测试；"incarnation 在 CAS 重试间只铸一次"原回退编译失败无结论，
+  用先输一次 CAS 的替身直接验证为一次。顺带修正 `AcquireLease` 注释里"同 incarnation 可重取"
+  的承诺：该方法不接收 token，从未有过这条路径。收敛单元 U-0019。
 - **platform：`HandleCallback` 首次路径丢掉 `Receipt.Replayed`**。`AttemptDelivery` 的契约要求"我发了货"
   与"货已被别人发过"可区分（`Replayed`），当一次慢投递被过了退避期的重试超车时它确实置位——但
   `HandleCallback` 为首次回调构造 Receipt 时只抄了 `Order` 和 `Delivered`，回调驱动的投递从来看不到
