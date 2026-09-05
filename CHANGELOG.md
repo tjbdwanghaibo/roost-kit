@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **dataengine / saga / remoteentity 三个 Mod 在真实进程里装配不起来**（U-0025，C4）。它们的 `DependsOn`
+  写的是 `mods.ModHealth`（app.Registry 的内建项，不是 Mod）和 `mods.ModNatsJetStream`（nats Mod 发布的
+  capability，不是 Mod），而 app 按 Mod **名字**解析依赖：任何带数据引擎的进程启动即
+  `mod dataengine depends on health: unknown mod dependency "health"`。本仓的集成测试都是手工 Init/Provide、
+  不经 app 的依赖排序，所以从未发现；roost-codegen 生成的工程第一次真的启动 game 进程时暴露（默认 mods 含
+  nest → dataengine，也就是**默认生成的工程一个都起不来**）。现在依赖只写 Mod 名（dataengine 无硬依赖、
+  可选 mongo / nats / remote_entity；saga 依赖 mongo / nats；remote_entity 依赖 redis / room[/ mongo]）。
+  根目录 `mod_dependencies_test.go` 构造全部 14 个 kit Mod，钉住"每个依赖名都是某个 kit Mod 的 Name()"。
+
 ### Added
 
 - **remoteentity：真实 Mongo 上的 fence 竞争测试**（`mongo_committer_integration_test.go`，`integration` 标签，
