@@ -22,6 +22,13 @@
 
 ### Fixed
 
+- **所有生成的 ClientMod 在真实进程里装配不起来**。八个 `*_rpc_gen.go` 的 `ClientMod.DependsOn` 返回的是
+  总线的 capability 名 `bus`，而 app 按 Mod **名字**解析依赖，没有任何 Mod 叫 `bus`：任何把
+  `xxx.NewClientMod()` 和 kit 的 nats Mod 装进同一个进程的程序启动即失败——
+  `unknown mod dependency "bus"`。本仓自己的集成测试手工 Init/Provide、从不经过 app 的依赖排序，所以
+  从未发现；roost-codegen 新的 game 模板第一次真的启动 game 进程时暴露。用修正后的生成器（roost-codegen
+  U-0024）重生成八个包，依赖改为发布总线的 `nats` Mod；`integration/client_mods_test.go` 钉住全部八个。
+  `go.mod` 的 `tool` 指令仍指向 v1.12.1，下一次 codegen 发布后再对齐。
 - **chat / match：后台保留与过期扫描此前从未执行**（B-09）。两个 Server 的 run 钩子遍历的是一个返回硬编码
   `nil` 的方法，且没有任何配置入口：chat 的 `retention_age` 没有执行者，match 的 `ticket_ttl` 只在读写时内联
   兜底。现在由部署提供枚举：chat 读 `chat.prune_channels`（`kind:target` 的共享频道列表，Provide 时逐条

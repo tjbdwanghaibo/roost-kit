@@ -494,7 +494,14 @@ func NewClientMod(options ...servicerpc.Option) *ClientMod {
 func (m *ClientMod) Name() app.ModName { return CapabilityName }
 
 // DependsOn implements app.ModDependencyProvider.
-func (m *ClientMod) DependsOn() []app.ModName { return []app.ModName{mods.ModBus} }
+//
+// It names the Mod that publishes the bus — kit's NATS mod — not the bus
+// capability. app resolves dependencies by Mod NAME, so a ClientMod that
+// depended on mods.ModBus ("bus", a capability nobody is named after) could
+// never be assembled in a real process: "unknown mod dependency \"bus\"".
+// That shipped in every generated client until a generated game template
+// tried to start (roost-codegen U-0024).
+func (m *ClientMod) DependsOn() []app.ModName { return []app.ModName{mods.ModNats} }
 
 // Init reads configuration.
 //
