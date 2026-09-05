@@ -285,14 +285,16 @@ func TestAroundCentresOnTheOwnerAndIsBounded(t *testing.T) {
 	if len(page.Entries) != 5 {
 		t.Fatalf("radius 2 returned %d entries, want 5", len(page.Entries))
 	}
-	found := false
-	for _, entry := range page.Entries {
-		if entry.Score.OwnerID == 10 {
-			found = true
-		}
+	// Centred means the owner sits in the middle with radius entries either
+	// side, ranks contiguous — not merely somewhere in the window. Owner 10
+	// holds rank 11 (owners 20..11 rank above it), so the window is 9..13.
+	if page.Entries[2].Score.OwnerID != 10 {
+		t.Fatalf("the requested owner is not at the centre of its window: %+v", page.Entries)
 	}
-	if !found {
-		t.Fatalf("the requested owner is not in its own window: %+v", page.Entries)
+	for index, entry := range page.Entries {
+		if want := int64(9 + index); entry.Rank != want {
+			t.Fatalf("window position %d has rank %d, want %d", index, entry.Rank, want)
+		}
 	}
 	for _, radius := range []int{0, -1, MaxPageSize} {
 		if _, err := store.Around(ctx, arena(), 10, radius); !errors.Is(err, ErrRangeInvalid) {
@@ -554,5 +556,25 @@ func TestANilReporterDoesNotAffectBehaviour(t *testing.T) {
 	}
 	if _, err := store.Page(ctx, arena(), 0, 5); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Contention is a business outcome with its own code, not a server fault.
+// Every other service in this module pairs CodeConflict with a coded
+// sentinel; rank declared the code, then reported exhaustion through a plain
+// errors.New, so the RPC envelope told the caller "server error" for the one
+// failure mode the doc on ErrConflictSentinel promises is distinguishable.
+func TestSubmitContentionReportsCodeConflict(t *testing.T) {
+	store, fake := newStore(t)
+	fake.swapAlwaysLoses = true
+	_, err := store.Submit(context.Background(), arena(), Score{OwnerID: 2, Value: 1}, UpdateSet, "")
+	if err == nil {
+		t.Fatal("the submit succeeded despite never winning the swap")
+	}
+	if code, reason := Error(err); code != CodeConflict {
+		t.Fatalf("exhausted compare-and-swap reports code %d (%q), want CodeConflict %d", code, reason, CodeConflict)
+	}
+	if !errors.Is(err, ErrConflictSentinel) {
+		t.Fatal("the exported sentinel no longer matches the conflict error")
 	}
 }

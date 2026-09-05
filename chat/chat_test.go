@@ -399,12 +399,17 @@ func TestOnlyThePrivilegedEntryPointSendsSystemMessages(t *testing.T) {
 		t.Fatalf("from = %+v, want role 0 named gm-console", message.From)
 	}
 	// A privileged publish still needs an actor and an idempotency key.
-	for label, req := range map[string]SystemPublishRequest{
-		"no actor": {Channel: Channel{Kind: ChannelSystem}, Type: typeNotice, Body: []byte("x"), RequestID: "r6"},
-		"no key":   {Channel: Channel{Kind: ChannelSystem}, Actor: "gm", Type: typeNotice, Body: []byte("x")},
+	// Each refusal names what is missing with its own code; "any error" is
+	// the assertion that lets a refusal for the wrong reason through.
+	for label, testCase := range map[string]struct {
+		req  SystemPublishRequest
+		want error
+	}{
+		"no actor": {SystemPublishRequest{Channel: Channel{Kind: ChannelSystem}, Type: typeNotice, Body: []byte("x"), RequestID: "r6"}, ErrSenderInvalid},
+		"no key":   {SystemPublishRequest{Channel: Channel{Kind: ChannelSystem}, Actor: "gm", Type: typeNotice, Body: []byte("x")}, ErrRequestInvalid},
 	} {
-		if _, err := h.service.PublishSystem(ctx, req); err == nil {
-			t.Fatalf("%s was accepted", label)
+		if _, err := h.service.PublishSystem(ctx, testCase.req); !errors.Is(err, testCase.want) {
+			t.Fatalf("%s: err = %v, want %v", label, err, testCase.want)
 		}
 	}
 	// A role message never gets the system origin.
@@ -780,6 +785,61 @@ func TestReplayOutsideTheRetainedWindowIsRefusedNotDuplicated(t *testing.T) {
 	}
 	if got, want := bodies(page), []string{"m4", "m5", "m6"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("the refused replay changed history to %v, want %v", got, want)
+	}
+}
+
+// An idempotency key belongs to the sender that used it. Keys are scoped per
+// channel, and clients mint them independently, so two players on one channel
+// can collide on a key by accident — a per-client counter, a short random
+// string. Before this, the second publish was answered with the FIRST sender's
+// message and reported success: the second player's message was dropped, and
+// nothing said so. A replay is only a replay when it comes from the same
+// sender; anyone else reusing the key is refused.
+func TestAnIdempotencyKeyIsBoundToItsSender(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	first := mustPublish(t, h, role(1), text("hello from 1", "shared-key", world()))
+
+	_, err := h.service.Publish(ctx, role(2), text("hello from 2", "shared-key", world()))
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("another sender reusing the key got %v, want ErrConflict; a nil error here means "+
+			"role 2 was told its message was published when role 1's was returned instead", err)
+	}
+	if got := Code(err); got != CodeConflict {
+		t.Fatalf("code = %d, want %d", got, CodeConflict)
+	}
+	// The original sender's replay is still a replay.
+	again := mustPublish(t, h, role(1), text("hello from 1", "shared-key", world()))
+	if again.Seq != first.Seq {
+		t.Fatalf("the owner's replay stored a second copy (seq %d vs %d)", again.Seq, first.Seq)
+	}
+	// Nothing was stored for the intruding sender.
+	page, err := h.service.History(ctx, role(1), HistoryQuery{Channel: world(), Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bodies(page); !reflect.DeepEqual(got, []string{"hello from 1"}) {
+		t.Fatalf("history = %v", got)
+	}
+	// A role cannot claim a system message's key either, nor the reverse: the
+	// game and a player are different senders even on the same channel.
+	sys, err := h.service.PublishSystem(ctx, SystemPublishRequest{
+		Channel: world(), Actor: "gm", Type: typeNotice, Body: []byte("notice"), RequestID: "sys-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.service.Publish(ctx, role(1), text("mine", "sys-key", world())); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a role reused a system message's key: %v", err)
+	}
+	if _, err := h.service.PublishSystem(ctx, SystemPublishRequest{
+		Channel: world(), Actor: "gm", Type: typeNotice, Body: []byte("x"), RequestID: "shared-key",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("the game reused a role's key: %v", err)
+	}
+	_ = sys
+	if got := h.metrics.Count("refused:" + publishOp(ChannelWorld) + ":key_reused"); got != 3 {
+		t.Fatalf("key reuse reported %d refusals, want 3; %s", got, h.metrics.Events())
 	}
 }
 

@@ -89,7 +89,7 @@ func TestTicketIDsAreServerMintedAndDistinct(t *testing.T) {
 	store, _ := newStore(t)
 	seen := map[string]bool{}
 	for id := int64(1); id <= 32; id++ {
-		ticket := enqueue(t, newStoreEach(t, store), ranked(), player(id, 0), "")
+		ticket := enqueue(t, store, ranked(), player(id, 0), "")
 		if ticket.ID == "" {
 			t.Fatal("the service minted an empty ticket id")
 		}
@@ -101,13 +101,6 @@ func TestTicketIDsAreServerMintedAndDistinct(t *testing.T) {
 		}
 		seen[ticket.ID] = true
 	}
-}
-
-// newStoreEach keeps the single-live-ticket rule from interfering with the id
-// uniqueness check above.
-func newStoreEach(t *testing.T, store Store) Store {
-	t.Helper()
-	return store
 }
 
 // Enqueue is idempotent per request id: a retry returns the ticket it already
@@ -189,6 +182,50 @@ func TestTicketDeadlineIsEnforcedOnReadAndBySweep(t *testing.T) {
 	// And the subject may queue again, because expiry released its slot.
 	if _, err := store.Enqueue(ctx, ranked(), player(1, 100), ""); err != nil {
 		t.Fatalf("the expired ticket did not release the subject: %v", err)
+	}
+}
+
+// A mutation that declines to save must leave stored state exactly as it
+// found it. versionstore's Mutate contract says so — the callback may run more
+// than once and must be pure — and the memory implementation hands out the
+// stored value itself, so an in-place edit followed by "do not save" is a
+// write that bypassed the version. The shape that made this visible: a
+// replayed enqueue first resolved an expired ticket by shifting Waiting in
+// place, then returned the existing ticket without saving. The stored slice
+// kept its old length over the shifted array, so its tail was duplicated and
+// Candidates handed out one ticket twice — which Commit then refused as a
+// duplicate, stalling the queue until the next successful write.
+func TestAnAbortedMutationLeavesStoredStateUntouched(t *testing.T) {
+	store, c := newStore(t, func(cfg *Config) { cfg.TicketTTL = time.Minute })
+	ctx := context.Background()
+	queue := Queue{Mode: "ranked", GroupSize: 4, Partition: "eu"}
+
+	enqueue(t, store, queue, player(1, 0), "")
+	c.advance(30 * time.Second)
+	second := enqueue(t, store, queue, player(2, 0), "req-2")
+	// Player 1 has expired, player 2 has not.
+	c.advance(45 * time.Second)
+
+	// The replay: the mutation expires player 1 and then declines to save.
+	again := enqueue(t, store, queue, player(2, 0), "req-2")
+	if again.ID != second.ID {
+		t.Fatalf("the replay returned ticket %s, want %s", again.ID, second.ID)
+	}
+
+	candidates, err := store.Candidates(ctx, queue, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]int{}
+	for _, candidate := range candidates {
+		seen[candidate.ID]++
+	}
+	if len(candidates) != 1 || seen[second.ID] != 1 {
+		t.Fatalf("candidates after an aborted mutation = %d entries, ticket %s seen %d times; "+
+			"an in-place edit leaked into stored state", len(candidates), second.ID, seen[second.ID])
+	}
+	if length, _ := store.QueueLength(ctx, queue); length != 1 {
+		t.Fatalf("queue length = %d, want 1", length)
 	}
 }
 

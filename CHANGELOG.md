@@ -9,6 +9,60 @@
 里各自重现的缺陷模式（见 README）。因此每个包都是重新实现，且每条设计约束都对应一类
 已确认的缺陷。
 
+### Fixed
+
+- **rank：CAS 耗尽的冲突错误没有错误码**。`types.go` 声明了 `CodeConflict = 540108`，但从未
+  用 `errcode.Define` 接上；`Submit` 输掉全部 8 次 compare-and-swap 时返回的是一个普通的
+  `errors.New`，于是生成的 RPC 信封把它报成 `CodeInternal` / "server error"——恰恰是那个哨兵
+  自己的注释承诺"与存储故障可区分"的失败模式。本模块其余九个服务都把 `CodeConflict` 与带码
+  哨兵配对，rank 是唯一的例外。现在 `ErrConflict = errcode.Define(CodeConflict, ...)`，
+  `ErrConflictSentinel` 保留为它的别名（Deprecated），`errors.Is` 调用方不受影响。
+  同时补上 `errcode_test.go` 的配对表（`segmentAllocated` 7 → 8）：那张表是手写的，它漏掉的
+  正是这一项，所以"每个哨兵都带码"的测试对"有码无哨兵"看不见；并把
+  `TestAroundCentresOnTheOwnerAndIsBounded` 名字里承诺却没断言的"居中"补成断言。
+  收敛单元 U-0004，见 roost-core `docs/history/ledger.md`。
+- **account：超长 profile 被报成 `CodeConflict`**。`UpdateProfile` 对超过 `MaxProfileBytes` 的载荷返回
+  `ErrConflict`（560113），客户端会把它当"重试即可"；而本包为此定义、配对、测过"带码"的
+  `ErrRangeInvalid`（560112）从没有任何生产路径返回过它。现在超长 profile 返回 `ErrRangeInvalid`。
+  **线上可见的变化**：这一种失败的错误码从 560113 变为 560112。原测试只断言 `err != nil`，
+  这正是错码能通过的原因；现在断言具体哨兵。
+- **account：`TestSelectRoleDoesNotPersistWhenSigningFails` 是空测试**。它用不存在的 player id 0
+  触发失败，失败发生在角色查找、签名从未被调用，然后检查一个无关角色的版本没变——无论
+  "先签名后落库"还是反过来它都绿（把 `SelectRole` 的两步临时倒过来，它仍然通过）。改为直接在
+  store 里种一个 id 为 0 的角色：core 拒绝签这个 id，于是签名真的失败，断言该角色版本与
+  登录时间戳都未变。倒序时它变红。收敛单元 U-0005。
+- **mail：投递失败后的重试从不重新投递**。`Send` 在投递失败时把错误返回给调用方，注释承诺
+  "重试是一次会重新尝试投递的回放"——但回放路径只查账本、取回信封、直接返回成功，从不再
+  调用投递。于是一次 fanout 失败的广播被永久记为"已发送"，此后每次重试都答 OK；直投邮件
+  对某个收件人失败（如信箱已满）也一样，重试永远到不了那个人。现在 `SentRecord` 带
+  `delivered_at_unix`：投递成功才盖戳，回放时未盖戳就先投递（按信箱幂等，设计上允许重复
+  尝试）再答复。旧账本记录没有该字段，读作未投递，下次回放多做一次幂等投递后盖戳。
+  **行为变化**：直投部分失败时 `Send` 现在连信封一起返回错误（此前返回空信封）；直投失败
+  新增 `refused:send:delivery_failed` 计数。
+- **mail：翻页游标邮件被删后列表提前结束**。`NextCursor` 只是上一页最后一封的 id，下一页按
+  id 相等定位；那封邮件在两页之间被删除后找不到，返回空页且无游标，客户端以为看完了——正是
+  本包要消灭的"短页 + 完整计数"缺陷，只是从翻页这一侧进来。现在游标编码为
+  `<delivered_at>|<mail_id>` 的位置，下一页从"严格在此之后"处恢复，与那封邮件是否还在无关。
+  旧的纯 id 游标仍按相等定位（只影响升级瞬间客户端手里的游标）。
+  同时把 `TestAnOversizedLimitIsClamped` 的"不超过上限"收紧为"恰好等于上限"：信箱里的邮件
+  多于一页时，少于上限就是短页，`>` 放它过去。收敛单元 U-0006。
+- **chat：幂等键不绑定发送者，撞键会静默丢消息**。去重账本按频道保存 `request_id → seq`，但不记谁用的。
+  两个玩家在同一频道各自生成的键撞上（客户端本地计数器、短随机串都会），第二个人的 `Publish`
+  拿回**第一个人的消息**且报成功——他的消息被丢了，没有任何信号；角色也能"回放"系统消息的键。
+  现在同键只有同一发送者（角色按 id、系统按 origin + actor）才算回放，其他人复用键返回
+  `ErrConflict`，并计入 `refused:publish.<kind>:key_reused`。存储格式不变，旧账本记录照常识别。
+  同时把 `TestOnlyThePrivilegedEntryPointSendsSystemMessages` 里"缺 actor / 缺键"两处只断言
+  `err != nil` 收紧为断言具体哨兵。收敛单元 U-0007。
+- **match：Mutate 回调不纯，被放弃的变更会污染内存后端的存储值**。四个 `Update` 回调都先就地
+  改 `current`（过期票据处理会原位挪移 `Waiting` 切片），再决定是否保存。kit `versionstore`
+  的契约写明回调可能重跑、必须是纯函数，而它的 MemoryStore 直接交出存储值：一次回放式
+  `Enqueue`（处理了一张过期票、然后"不保存"）让存储里的 `Waiting` 头部长度不变、底层数组已
+  被挪动，尾部重复——`Candidates` 把同一张票给出两次，`Commit` 随即以"重复票据"拒绝，队列
+  卡到下一次成功写入。Redis 后端每次重新解码所以看不到，但契约违背是真的。现在每个回调
+  先 `clone()` 再改，与 chat 的做法一致。另删掉 `TestTicketIDsAreServerMintedAndDistinct` 里
+  一个什么都不做的 `newStoreEach` 助手（注释声称它隔离了单票规则，实际原样返回同一个
+  store）。收敛单元 U-0008。
+
 ### Added
 
 - **`directory`**：唯一键预留 + 独占归属的两阶段提交原语。一次替掉业务仓里两份各带

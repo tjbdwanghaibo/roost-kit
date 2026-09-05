@@ -4,8 +4,8 @@ go 1.27.0
 
 require (
 	github.com/spf13/viper v1.21.0
-	github.com/tjbdwanghaibo/roost-core v1.11.2
-	github.com/tjbdwanghaibo/roost-kit v1.11.2
+	github.com/tjbdwanghaibo/roost-core v1.12.0
+	github.com/tjbdwanghaibo/roost-kit v1.12.0
 )
 
 require (

@@ -431,7 +431,10 @@ func (s *Service) ValidateSession(ctx context.Context, playerID int64, token str
 // role to another account and rename it while orphaning the old reservation.
 func (s *Service) UpdateProfile(ctx context.Context, accountID string, playerID int64, profile []byte) (Role, error) {
 	if len(profile) > MaxProfileBytes {
-		return Role{}, fmt.Errorf("%w: profile is %d bytes, limit %d", ErrConflict, len(profile), MaxProfileBytes)
+		// A size violation is a range error the caller can act on. It was
+		// ErrConflict, which a client reads as "retry" — and it was the only
+		// reason ErrRangeInvalid had no producer in this package.
+		return Role{}, fmt.Errorf("%w: profile is %d bytes, limit %d", ErrRangeInvalid, len(profile), MaxProfileBytes)
 	}
 	var result Role
 	_, _, err := s.cfg.Roles.Update(ctx, playerID, func(current Role, found bool) (Role, bool, error) {

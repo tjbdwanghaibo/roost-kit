@@ -52,6 +52,10 @@ var (
 	ErrRequestInvalid = errcode.Define(CodeRequestInvalid, "rank: request id is required", "")
 	ErrNotFound       = errcode.Define(CodeNotFound, "rank: not found", "")
 	ErrSeasonInvalid  = errcode.Define(CodeSeasonInvalid, "rank: season is invalid", "")
+	// ErrConflict reports repeated compare-and-swap loss on one owner. Contention
+	// and an unreachable backend need different operational responses, so it
+	// carries its own code rather than reading as CodeInternal on the wire.
+	ErrConflict = errcode.Define(CodeConflict, "rank: submit conflict", "")
 )
 
 // MaxPageSize bounds one page. A caller cannot exceed it, and — the part that

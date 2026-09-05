@@ -186,13 +186,17 @@ func (s *RedisStore) Submit(ctx context.Context, board Board, score Score, mode 
 	// reported rather than left as an opaque internal error the caller cannot
 	// distinguish from a Redis outage.
 	s.report.Conflict("submit")
-	return Entry{}, fmt.Errorf("%w: submit lost %d compare-and-swaps for owner %d", ErrConflictSentinel, maxSubmitAttempts, score.OwnerID)
+	return Entry{}, fmt.Errorf("%w: submit lost %d compare-and-swaps for owner %d", ErrConflict, maxSubmitAttempts, score.OwnerID)
 }
 
-// ErrConflictSentinel reports repeated compare-and-swap loss on one owner. It
-// is distinguishable from a store failure because contention and an
-// unreachable backend need different operational responses.
-var ErrConflictSentinel = errors.New("rank: submit conflict")
+// ErrConflictSentinel is the previous name of ErrConflict, kept so existing
+// errors.Is call sites keep matching. It used to be a plain errors.New, which
+// is why a submit that lost every compare-and-swap reached clients as
+// CodeInternal / "server error" — the one failure mode its own comment promised
+// was distinguishable from a store outage.
+//
+// Deprecated: use ErrConflict.
+var ErrConflictSentinel = ErrConflict
 
 func (s *RedisStore) readOwner(ctx context.Context, okey string, ownerID int64) (member string, ring string, err error) {
 	ret, err := s.client.Eval(ctx, `

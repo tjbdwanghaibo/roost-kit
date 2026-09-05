@@ -423,16 +423,28 @@ func (s *channelStore) store(ctx context.Context, ref ChannelRef, rule ChannelRu
 	storedAt := s.now().Unix()
 
 	var (
-		result   Message
-		replayed bool
-		evicted  int
+		result    Message
+		replayed  bool
+		keyReused bool
+		evicted   int
 	)
 	_, applied, err := s.state.Update(ctx, ref.key, func(current channelState, _ bool) (channelState, bool, error) {
 		next := current.clone()
-		replayed, evicted = false, 0
+		replayed, keyReused, evicted = false, false, 0
 
 		if seq, ok := next.Requests[draft.RequestID]; ok {
 			if existing, found := next.find(seq); found {
+				if !sameSender(existing, draft) {
+					// Keys are scoped per channel and clients mint them on
+					// their own, so two senders can collide on one by accident.
+					// Answering with the first sender's message would report
+					// the second publish as a success while dropping it — so
+					// the collision is refused, and the message is not lost
+					// silently.
+					keyReused = true
+					return current, false, fmt.Errorf("%w: idempotency key %q was already used by another sender on this channel",
+						ErrConflict, draft.RequestID)
+				}
 				// The replay answer: return what was stored, do not store a
 				// second copy. This is what the at-least-once transport needed
 				// and never had.
@@ -460,6 +472,9 @@ func (s *channelStore) store(ctx context.Context, ref ChannelRef, rule ChannelRu
 		if errors.Is(err, versionstore.ErrConflict) {
 			s.metrics.Conflict("append")
 		}
+		if keyReused {
+			s.metrics.Refused(publishOp(ref.Kind), "key_reused")
+		}
 		return Message{}, err
 	}
 	switch {
@@ -470,6 +485,20 @@ func (s *channelStore) store(ctx context.Context, ref ChannelRef, rule ChannelRu
 		s.metrics.Dropped("message.evicted."+string(ref.Kind), evicted)
 	}
 	return result.clone(), nil
+}
+
+// sameSender reports whether a stored message and a draft come from the same
+// publisher, which is what makes a repeated idempotency key a replay rather
+// than a collision. A role is identified by its id; the game, publishing
+// through the privileged path, by its origin and the actor label it declared.
+func sameSender(stored, draft Message) bool {
+	if stored.Origin != draft.Origin {
+		return false
+	}
+	if stored.Origin == OriginSystem {
+		return stored.From.Name == draft.From.Name
+	}
+	return stored.From.RoleID == draft.From.RoleID
 }
 
 func (s *channelStore) History(ctx context.Context, viewer Sender, query HistoryQuery) (Page, error) {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -161,19 +162,7 @@ func (s *Service) Send(ctx context.Context, req SendRequest) (Envelope, error) {
 	if existing, found, err := s.cfg.Sends.Get(ctx, req.RequestID); err != nil {
 		return Envelope{}, err
 	} else if found {
-		envelope, ok, err := s.cfg.Envelopes.Get(ctx, existing.Value.MailID)
-		if err != nil {
-			return Envelope{}, err
-		}
-		if !ok {
-			// The ledger names a mail that is not there. Answering "sent"
-			// would be a lie and answering "not sent" would risk a second
-			// send; report the inconsistency instead.
-			return Envelope{}, fmt.Errorf("%w: send %q names missing mail %s",
-				ErrConflict, req.RequestID, existing.Value.MailID)
-		}
-		s.report.Replayed("send")
-		return envelope, nil
+		return s.replaySend(ctx, existing.Value)
 	}
 
 	now := s.cfg.Now()
@@ -207,7 +196,8 @@ func (s *Service) Send(ctx context.Context, req SendRequest) (Envelope, error) {
 	}
 	if !claimed {
 		// A racer won. Read back what it produced rather than creating a
-		// second envelope.
+		// second envelope, and finish its delivery if it has not yet — the
+		// step is idempotent per mailbox, so two racers delivering is safe.
 		existing, found, err := s.cfg.Sends.Get(ctx, req.RequestID)
 		if err != nil {
 			return Envelope{}, err
@@ -215,16 +205,7 @@ func (s *Service) Send(ctx context.Context, req SendRequest) (Envelope, error) {
 		if !found {
 			return Envelope{}, fmt.Errorf("%w: send %q vanished during create", ErrConflict, req.RequestID)
 		}
-		stored, ok, err := s.cfg.Envelopes.Get(ctx, existing.Value.MailID)
-		if err != nil {
-			return Envelope{}, err
-		}
-		if !ok {
-			return Envelope{}, fmt.Errorf("%w: send %q names missing mail %s",
-				ErrConflict, req.RequestID, existing.Value.MailID)
-		}
-		s.report.Replayed("send")
-		return stored, nil
+		return s.replaySend(ctx, existing.Value)
 	}
 
 	created, err := s.cfg.Envelopes.Create(ctx, envelope)
@@ -236,19 +217,84 @@ func (s *Service) Send(ctx context.Context, req SendRequest) (Envelope, error) {
 		return Envelope{}, fmt.Errorf("%w: mail id %s is already in use", ErrConflict, id)
 	}
 
-	if envelope.Audience == AudienceDirect {
-		if err := s.deliverDirect(ctx, envelope); err != nil {
-			return Envelope{}, err
-		}
-	} else if err := s.cfg.Broadcast.Deliver(ctx, envelope); err != nil {
+	if err := s.deliverAndRecord(ctx, req.RequestID, envelope); err != nil {
 		// The envelope exists and the ledger names it, so a retry is a replay
-		// that will re-attempt delivery. Reporting the error lets the caller
-		// drive that; swallowing it is how a mail nobody receives looks like a
+		// — and replaySend re-attempts the delivery, because the ledger entry
+		// carries no delivery stamp. Reporting the error lets the caller drive
+		// that; swallowing it is how a mail nobody receives looks like a
 		// successful send.
-		s.report.Refused("send", "delivery_failed")
-		return envelope, fmt.Errorf("%w: %s", ErrConflict, err)
+		return envelope, err
 	}
 	s.report.Accepted("send")
+	return envelope, nil
+}
+
+// deliverAndRecord runs an envelope's delivery and, once it has succeeded,
+// stamps the ledger so a replay knows there is nothing left to do.
+//
+// Direct delivery surfaces the mailbox store's own error — a full mailbox is
+// the recipient's condition and the caller must see it as such; a broadcast
+// deliverer's failure is wrapped as ErrConflict. In both cases the envelope
+// and the ledger stay: a ledger entry with no delivery stamp is exactly what
+// tells the replay to try again.
+func (s *Service) deliverAndRecord(ctx context.Context, requestID string, envelope Envelope) error {
+	if envelope.Audience == AudienceDirect {
+		if err := s.deliverDirect(ctx, envelope); err != nil {
+			s.report.Refused("send", "delivery_failed")
+			return err
+		}
+	} else {
+		if s.cfg.Broadcast == nil {
+			s.report.Refused("send", "no_deliverer")
+			return fmt.Errorf("%w: no broadcast deliverer is configured", ErrAudienceInvalid)
+		}
+		if err := s.cfg.Broadcast.Deliver(ctx, envelope); err != nil {
+			s.report.Refused("send", "delivery_failed")
+			return fmt.Errorf("%w: %s", ErrConflict, err)
+		}
+	}
+	nowUnix := s.cfg.Now().Unix()
+	_, _, err := s.cfg.Sends.Update(ctx, requestID, func(current SentRecord, found bool) (SentRecord, bool, error) {
+		if !found || current.DeliveredAtUnix != 0 {
+			return current, false, nil
+		}
+		current.DeliveredAtUnix = nowUnix
+		return current, true, nil
+	})
+	if err != nil {
+		// The mail is delivered; only the stamp is missing. That costs one
+		// redundant, idempotent delivery attempt on the next replay, so it is
+		// counted rather than turned into a failed send.
+		s.report.Dropped("send.delivery_stamp_failed", 1)
+	}
+	return nil
+}
+
+// replaySend answers a send whose request id the ledger already holds. It
+// returns the envelope the first attempt produced — and if that attempt never
+// finished delivering, it delivers now. Send's contract is "idempotent per
+// RequestID", and idempotent has to mean the same OUTCOME, not the same
+// envelope with delivery left to whoever tried first. Before this, a broadcast
+// whose fanout failed once was recorded as sent forever and every retry
+// answered success.
+func (s *Service) replaySend(ctx context.Context, record SentRecord) (Envelope, error) {
+	envelope, ok, err := s.cfg.Envelopes.Get(ctx, record.MailID)
+	if err != nil {
+		return Envelope{}, err
+	}
+	if !ok {
+		// The ledger names a mail that is not there. Answering "sent"
+		// would be a lie and answering "not sent" would risk a second
+		// send; report the inconsistency instead.
+		return Envelope{}, fmt.Errorf("%w: send %q names missing mail %s",
+			ErrConflict, record.RequestID, record.MailID)
+	}
+	if record.DeliveredAtUnix == 0 {
+		if err := s.deliverAndRecord(ctx, record.RequestID, envelope); err != nil {
+			return envelope, err
+		}
+	}
+	s.report.Replayed("send")
 	return envelope, nil
 }
 
@@ -398,13 +444,7 @@ func (s *Service) List(ctx context.Context, playerID int64, cursor string, limit
 
 	start := 0
 	if cursor != "" {
-		start = len(entries)
-		for index, entry := range entries {
-			if entry.MailID == cursor {
-				start = index + 1
-				break
-			}
-		}
+		start = resumeIndex(entries, cursor)
 	}
 	if start >= len(entries) {
 		return Page{Unread: mailbox.Unread, Evicted: mailbox.Evicted}, nil
@@ -446,10 +486,48 @@ func (s *Service) List(ctx context.Context, playerID int64, cursor string, limit
 		})
 	}
 	if end < len(entries) {
-		page.NextCursor = window[len(window)-1].MailID
+		page.NextCursor = encodeCursor(window[len(window)-1])
 	}
 	s.report.Accepted("list")
 	return page, nil
+}
+
+// encodeCursor renders a page boundary as the POSITION of its last entry in
+// the listing order — delivery time and id — rather than as the id alone. An
+// id-only cursor stops working the moment that mail is deleted: the next page
+// cannot find it, answers empty with no NextCursor, and the client believes it
+// has seen the whole mailbox. Encoding the position lets the next page resume
+// from "everything after here" whether or not that mail still exists.
+func encodeCursor(entry Entry) string {
+	return strconv.FormatInt(entry.DeliveredAtUnix, 10) + "|" + entry.MailID
+}
+
+// resumeIndex returns the index of the first entry strictly after cursor in
+// the listing order (delivery time descending, then id descending). entries
+// must already be in that order.
+//
+// A cursor without a position — the id-only form issued before this encoding
+// existed — resumes after that id when it is present. If that mail is gone the
+// listing ends, which is the behaviour it always had; every page issued now
+// carries a position, so this concerns only cursors handed out before the
+// upgrade and still in a client's hand.
+func resumeIndex(entries []Entry, cursor string) int {
+	if rawAt, mailID, ok := strings.Cut(cursor, "|"); ok {
+		if deliveredAt, err := strconv.ParseInt(rawAt, 10, 64); err == nil {
+			return sort.Search(len(entries), func(i int) bool {
+				if entries[i].DeliveredAtUnix != deliveredAt {
+					return entries[i].DeliveredAtUnix < deliveredAt
+				}
+				return entries[i].MailID < mailID
+			})
+		}
+	}
+	for index, entry := range entries {
+		if entry.MailID == cursor {
+			return index + 1
+		}
+	}
+	return len(entries)
 }
 
 // MarkRead moves one mail to read. Idempotent.

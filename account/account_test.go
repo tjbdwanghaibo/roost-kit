@@ -421,26 +421,31 @@ func TestSelectRoleIssuesAVerifiableTokenForOwnedRolesOnly(t *testing.T) {
 }
 
 // A signing failure must not leave the login stamp written.
+//
+// core refuses to sign player id zero, so the one way to make signing fail for
+// a role that exists and is owned is to seed such a role directly in the store.
+// The previous version of this test selected player id zero WITHOUT seeding it:
+// that failed at the role lookup, before signing was ever attempted, and then
+// checked an unrelated role — an assertion that could not fail under either
+// ordering. Reversing sign and persist in SelectRole left it green.
 func TestSelectRoleDoesNotPersistWhenSigningFails(t *testing.T) {
-	// An empty secret is refused at construction, so force the failure by
-	// asking for a token for a role whose id core will refuse to sign.
 	service, _, cfg := newService(t)
 	ctx := context.Background()
 	owner := login(t, service, "u1")
-	role, err := service.CreateRole(ctx, owner.ID, 1, "Alice")
-	if err != nil {
-		t.Fatal(err)
+	seeded, created, err := cfg.Roles.Create(ctx, 0, Role{PlayerID: 0, AccountID: owner.ID, ServerID: 1, Name: "Zero"})
+	if err != nil || !created {
+		t.Fatalf("seed role: created=%v err=%v", created, err)
 	}
-	before, _, _ := cfg.Roles.Get(ctx, role.PlayerID)
-
-	// Player id zero cannot be signed, and there is no such role, so the
-	// ordering is observable through the untouched role above.
 	if _, err := service.SelectRole(ctx, owner.ID, 0); err == nil {
-		t.Fatal("selecting player id zero succeeded")
+		t.Fatal("selecting a role core cannot sign succeeded")
 	}
-	after, _, _ := cfg.Roles.Get(ctx, role.PlayerID)
-	if after.Version != before.Version {
-		t.Fatalf("a failed select wrote to an unrelated role: version %d -> %d", before.Version, after.Version)
+	after, found, err := cfg.Roles.Get(ctx, 0)
+	if err != nil || !found {
+		t.Fatalf("role read: found=%v err=%v", found, err)
+	}
+	if after.Version != seeded.Version || after.Value.LastLoginAtUnix != 0 {
+		t.Fatalf("a failed signing persisted the login stamp: version %d -> %d, last_login=%d",
+			seeded.Version, after.Version, after.Value.LastLoginAtUnix)
 	}
 }
 
@@ -510,9 +515,11 @@ func TestUpdateProfileCannotChangeIdentityOrName(t *testing.T) {
 	if string(stored.Value.Profile) != `{"level":7}` {
 		t.Fatalf("the refused write landed: %q", stored.Value.Profile)
 	}
-	// The profile is bounded.
-	if _, err := service.UpdateProfile(ctx, owner.ID, role.PlayerID, make([]byte, MaxProfileBytes+1)); err == nil {
-		t.Fatal("an oversized profile was accepted")
+	// The profile is bounded, and the refusal is a size error the caller can
+	// act on — not ErrConflict, which a client reads as "retry". Accepting any
+	// non-nil error here is what let the wrong code ship.
+	if _, err := service.UpdateProfile(ctx, owner.ID, role.PlayerID, make([]byte, MaxProfileBytes+1)); !errors.Is(err, ErrRangeInvalid) {
+		t.Fatalf("an oversized profile returned %v, want ErrRangeInvalid", err)
 	}
 	// And the stored profile is a copy, not the caller's slice.
 	payload := []byte(`{"level":8}`)

@@ -525,8 +525,135 @@ func TestAnOversizedLimitIsClamped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Items) > MaxPageSize {
-		t.Fatalf("the page holds %d items, above the cap %d", len(page.Items), MaxPageSize)
+	// Clamped means exactly the cap: the mailbox holds more than MaxPageSize,
+	// so anything less is a page that came back short, and "not above" is
+	// the assertion that lets a short page through.
+	if len(page.Items) != MaxPageSize {
+		t.Fatalf("the page holds %d items, want the cap %d", len(page.Items), MaxPageSize)
+	}
+}
+
+// Paging must survive the cursor mail being deleted between two pages. A
+// cursor that names a mail by id, and stops when that id is gone, ends the
+// listing early with no NextCursor — the client believes it saw everything.
+// That is the short-page-with-a-full-count defect this package exists to
+// remove, arriving through the pager instead of the reader.
+func TestPagingSurvivesTheCursorMailBeingDeleted(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	const total = 25
+	for i := 0; i < total; i++ {
+		mustSend(t, h, SendRequest{
+			Audience: AudienceDirect, Recipients: []int64{1},
+			Subject: "mail", ExpiresInSeconds: 3600, RequestID: fmt.Sprintf("send-%d", i),
+		})
+		h.clock.advance(time.Second)
+	}
+	first, err := h.service.List(ctx, 1, "", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Items) != 7 || first.NextCursor == "" {
+		t.Fatalf("first page: %d items, cursor %q", len(first.Items), first.NextCursor)
+	}
+	seen := map[string]bool{}
+	for _, item := range first.Items {
+		seen[item.Envelope.ID] = true
+	}
+	// The player deletes the last mail on the page they just read.
+	if _, err := h.service.Delete(ctx, 1, first.Items[len(first.Items)-1].Envelope.ID); err != nil {
+		t.Fatal(err)
+	}
+	cursor := first.NextCursor
+	for pages := 0; pages < 20 && cursor != ""; pages++ {
+		page, err := h.service.List(ctx, 1, cursor, 7)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range page.Items {
+			if seen[item.Envelope.ID] {
+				t.Fatalf("mail %s was listed twice", item.Envelope.ID)
+			}
+			seen[item.Envelope.ID] = true
+		}
+		cursor = page.NextCursor
+	}
+	if len(seen) != total {
+		t.Fatalf("paging reached %d of %d mails after the cursor mail was deleted; the rest were silently lost", len(seen), total)
+	}
+}
+
+// A retried send whose delivery failed must deliver on the retry. Send's own
+// comment promises it: "a retry is a replay that will re-attempt delivery".
+// Without it a broadcast whose fanout failed once is recorded as sent forever
+// and every retry answers success — a mail nobody receives reported as
+// delivered, which is the silent-drop pattern with a ledger in front of it.
+func TestARetriedSendReattemptsAFailedBroadcastDelivery(t *testing.T) {
+	attempts := 0
+	failFirst := true
+	h := newHarness(t, func(cfg *Config) {
+		cfg.Broadcast = DelivererFunc(func(context.Context, Envelope) error {
+			attempts++
+			if failFirst {
+				failFirst = false
+				return fmt.Errorf("fanout queue is down")
+			}
+			return nil
+		})
+	})
+	ctx := context.Background()
+	req := SendRequest{
+		Audience: AudienceBroadcast, Scope: "server-1", Subject: "maintenance",
+		ExpiresInSeconds: 3600, RequestID: "send-b",
+	}
+	if _, err := h.service.Send(ctx, req); err == nil {
+		t.Fatal("a send whose delivery failed reported success")
+	}
+	if _, err := h.service.Send(ctx, req); err != nil {
+		t.Fatalf("the retry failed: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("delivery was attempted %d times across the send and its retry, want 2: "+
+			"the replay path returned the envelope without delivering it", attempts)
+	}
+	// Once delivered, further retries are pure replays.
+	if _, err := h.service.Send(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("a replay after a successful delivery delivered again (%d attempts)", attempts)
+	}
+}
+
+// The same property for direct mail: a delivery that fails on one recipient
+// leaves the envelope and the ledger in place, so the retry must reach the
+// recipient it missed. Player 2's mailbox is full for the first send.
+func TestARetriedSendReachesTheRecipientItMissed(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	for i := 0; i < MaxMailboxEntries; i++ {
+		if err := h.service.Deliver(ctx, 2, fmt.Sprintf("old-%03d", i), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := directTo(1, 2)
+	if _, err := h.service.Send(ctx, req); !errors.Is(err, ErrMailboxFull) {
+		t.Fatalf("a send into a full mailbox returned %v, want ErrMailboxFull", err)
+	}
+	// Player 2 makes room, then the sender retries.
+	if _, err := h.service.Delete(ctx, 2, "old-000"); err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := h.service.Send(ctx, req)
+	if err != nil {
+		t.Fatalf("the retry failed: %v", err)
+	}
+	mailbox, _, err := h.service.Mailbox(ctx, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mailbox.Entries[envelope.ID]; !ok {
+		t.Fatal("the retried send never reached the recipient the first attempt missed")
 	}
 }
 

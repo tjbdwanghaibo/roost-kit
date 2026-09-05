@@ -40,6 +40,40 @@ type queueState struct {
 	Requests map[string]string `json:"requests"`
 }
 
+// clone copies the state before a mutation touches it.
+//
+// versionstore documents that a Mutate may run more than once and must be a
+// pure function of its arguments, and its memory implementation hands out the
+// stored value itself. The callbacks below resolve expired tickets by shifting
+// Waiting in place before they decide whether to save; done on the stored
+// slice, a mutation that then declined to save left the stored header over a
+// shifted array with its tail duplicated, and Candidates handed out one ticket
+// twice. Copying first is what makes "an aborted mutation changes nothing"
+// hold for every implementation of the contract, not only the Redis one that
+// happens to decode a fresh value per call.
+func (s queueState) clone() queueState {
+	next := queueState{
+		Waiting:        append([]string(nil), s.Waiting...),
+		Tickets:        make(map[string]Ticket, len(s.Tickets)+1),
+		Matches:        make(map[string]Match, len(s.Matches)+1),
+		SubjectTickets: make(map[string]string, len(s.SubjectTickets)+1),
+		Requests:       make(map[string]string, len(s.Requests)+1),
+	}
+	for id, ticket := range s.Tickets {
+		next.Tickets[id] = ticket
+	}
+	for id, match := range s.Matches {
+		next.Matches[id] = match
+	}
+	for key, id := range s.SubjectTickets {
+		next.SubjectTickets[key] = id
+	}
+	for key, id := range s.Requests {
+		next.Requests[key] = id
+	}
+	return next
+}
+
 func (s *queueState) init() {
 	if s.Tickets == nil {
 		s.Tickets = map[string]Ticket{}
@@ -136,7 +170,7 @@ func (s *queueStore) Enqueue(ctx context.Context, queue Queue, subject Subject, 
 		replayed bool
 	)
 	_, _, err = s.state.Update(ctx, queue.Key(), func(current queueState, _ bool) (queueState, bool, error) {
-		current.init()
+		current = current.clone()
 		replayed = false
 		s.expireLocked(&current, now)
 
@@ -208,7 +242,7 @@ func (s *queueStore) Cancel(ctx context.Context, queue Queue, ticketID string, s
 
 	var result Ticket
 	_, _, err := s.state.Update(ctx, queue.Key(), func(current queueState, found bool) (queueState, bool, error) {
-		current.init()
+		current = current.clone()
 		if !found {
 			return current, false, fmt.Errorf("%w: %s", ErrTicketMissing, ticketID)
 		}
@@ -324,7 +358,7 @@ func (s *queueStore) Commit(ctx context.Context, queue Queue, ticketIDs []string
 
 	var result Match
 	_, _, err = s.state.Update(ctx, queue.Key(), func(current queueState, found bool) (queueState, bool, error) {
-		current.init()
+		current = current.clone()
 		if !found {
 			return current, false, fmt.Errorf("%w: queue is empty", ErrTicketMissing)
 		}
@@ -401,7 +435,7 @@ func (s *queueStore) Sweep(ctx context.Context, queue Queue, limit int) (int, er
 	now := s.cfg.Now()
 	resolved := 0
 	_, _, err := s.state.Update(ctx, queue.Key(), func(current queueState, found bool) (queueState, bool, error) {
-		current.init()
+		current = current.clone()
 		if !found {
 			return current, false, nil
 		}

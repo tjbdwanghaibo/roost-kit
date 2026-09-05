@@ -47,6 +47,12 @@ type SentRecord struct {
 	RequestID     string `json:"request_id"`
 	MailID        string `json:"mail_id"`
 	CreatedAtUnix int64  `json:"created_at_unix"`
+	// DeliveredAtUnix is stamped once the envelope's delivery has succeeded.
+	// Zero means the first attempt never finished delivering, and a replay of
+	// this request id must deliver before it answers "sent". Records written
+	// before this field existed read as zero and cost one redundant,
+	// idempotent delivery attempt on their next replay.
+	DeliveredAtUnix int64 `json:"delivered_at_unix,omitempty"`
 }
 
 // Deliverer fans a broadcast envelope out into individual mailboxes.
