@@ -11,7 +11,7 @@ require (
 	github.com/xtaci/kcp-go/v5 v5.6.72
 	go.etcd.io/etcd/api/v3 v3.6.11
 	go.etcd.io/etcd/client/v3 v3.6.11
-	go.mongodb.org/mongo-driver/v2 v2.6.0
+	go.mongodb.org/mongo-driver/v2 v2.8.2
 	golang.org/x/sys v0.47.0
 )
 
