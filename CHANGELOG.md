@@ -9,6 +9,17 @@
 里各自重现的缺陷模式（见 README）。因此每个包都是重新实现，且每条设计约束都对应一类
 已确认的缺陷。
 
+### Added
+
+- **CI 门禁**（`.github/workflows/ci.yml`）。本仓此前没有任何自动化：mail、rank、`integration/`
+  三处 Redis 集成测试带 `//go:build integration` 标签并以 `REDIS_ADDR` 门控，而没有任何
+  流程设置过这个变量——32 个测试靠"从不运行"保持绿色（C2 类）。新工作流三段：`unit`
+  （tidy 一致、vet、`vet -tags integration`、glsvet、`-race`、govulncheck、actionlint）；
+  `integration`（真实 Redis 7 服务容器，`-tags integration ./...`，随后**把带 `REDIS_ADDR`
+  字样的 skip 判为失败**，再对三处 Redis 套件跑一次 `-race`）；`release-hygiene`（无
+  replace、tag 不依赖框架伪版本、模块路径可解析、tag 与主版本号一致）。根目录
+  `ci_test.go` 钉住工作流的这四个事实，防止一次改动悄悄删掉门禁。收敛单元 U-0014。
+
 ### Fixed
 
 - **rank：CAS 耗尽的冲突错误没有错误码**。`types.go` 声明了 `CodeConflict = 540108`，但从未
