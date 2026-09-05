@@ -287,7 +287,7 @@ func (s *Service) CreateRole(ctx context.Context, accountID string, serverID int
 	}
 	// Insert-only. An id that is already taken fails here instead of
 	// overwriting the player who holds it.
-	_, created, err := s.cfg.Roles.Create(ctx, playerID, role)
+	storedRole, created, err := s.cfg.Roles.Create(ctx, playerID, role)
 	if err != nil {
 		return Role{}, errors.Join(err, s.rollback(ctx, nameClaim, slotKey, slot))
 	}
@@ -298,10 +298,18 @@ func (s *Service) CreateRole(ctx context.Context, accountID string, serverID int
 			s.rollback(ctx, nameClaim, slotKey, slot))
 	}
 
-	// The name claim becomes permanent last: until this point every failure
-	// path can release it, and after it the role exists to justify it.
+	// The commit point is the slot write at the very end. Everything before it
+	// is reversible and IS reversed on failure — including the role record,
+	// which nobody has been handed yet. Until this fix the two tail failures
+	// returned the error and kept the role: a lost name commit left a role
+	// whose name claim lapsed and could then be taken by another account, and
+	// a lost slot write left a role the retrying client was refused for with
+	// ErrRoleLimit. Success is not reported before the commit point, and
+	// nothing that precedes it may survive a failure (U-0021).
 	if _, err := s.cfg.Names.Commit(ctx, nameClaim); err != nil {
-		return Role{}, err
+		return Role{}, errors.Join(err,
+			s.rollbackRole(ctx, storedRole),
+			s.rollback(ctx, nameClaim, slotKey, slot))
 	}
 	// Record which role occupies the slot, now that there is one.
 	if _, _, err := s.cfg.Slots.Update(ctx, slotKey, func(current Slot, found bool) (Slot, bool, error) {
@@ -311,10 +319,34 @@ func (s *Service) CreateRole(ctx context.Context, accountID string, serverID int
 		current.PlayerID = playerID
 		return current, true, nil
 	}); err != nil {
-		return Role{}, err
+		// The name is committed by now, so it is released as an owner would
+		// release it, not cancelled as a claim.
+		var joined error
+		if releaseErr := s.cfg.Names.Release(ctx, role.Name, directory.Owner(accountID)); releaseErr != nil {
+			joined = errors.Join(joined, fmt.Errorf("release committed name: %w", releaseErr))
+		}
+		joined = errors.Join(joined, s.rollbackRole(ctx, storedRole), s.releaseSlot(ctx, slotKey, slot))
+		if joined != nil {
+			s.report.Dropped("rollback.failed", 1)
+		}
+		return Role{}, errors.Join(err, joined)
 	}
 	s.report.Accepted("create_role")
 	return role, nil
+}
+
+// rollbackRole removes a role record the caller was never handed, version
+// checked so it cannot remove a role that has since been touched by anything
+// else.
+func (s *Service) rollbackRole(ctx context.Context, stored versionstore.Versioned[Role]) error {
+	if err := s.cfg.Roles.Delete(ctx, stored.Value.PlayerID, stored); err != nil {
+		if errors.Is(err, versionstore.ErrVersionMismatch) {
+			return nil
+		}
+		s.report.Dropped("rollback.failed", 1)
+		return fmt.Errorf("remove role %d: %w", stored.Value.PlayerID, err)
+	}
+	return nil
 }
 
 // rollback undoes what a failed create took.

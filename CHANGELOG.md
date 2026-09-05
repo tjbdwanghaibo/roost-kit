@@ -22,6 +22,12 @@
 
 ### Fixed
 
+- **account：`CreateRole` 在角色记录之后的两处失败不再留下半成品**（B-08）。此前 `Names.Commit` 失败
+  直接返回错误但角色已插入——名字 claim 到期后别的账号可占用同名；`Slots.Update` 失败同样保留角色，
+  客户端重试得到 `ErrRoleLimit`。现在提交点是最后的槽位写入，之前的一切在失败时全部撤销：版本校验
+  删除角色记录、按 claim 取消或按 owner 释放名字、释放槽位，撤销失败计 `rollback.failed`。
+  `create_role_tail_test.go` 用"首次 Commit 丢失"与"首次 Update 丢失"两个替身证明：同一账号立刻
+  重试以同名成功，另一账号随后被 `ErrNameTaken` 拒绝。收敛单元 U-0021。
 - **global/activity：两条兜底承诺补上测试**。六条注释承诺逐项临时回退，四条已有测试变红；"有界扫描先完成
   截止最早的活动"与"已完成但仍在窗口里（dispatch 创建失败）的活动由扫描补建投递并出窗"两条全绿——
   新增 `sweep_promises_test.go`（键序与截止序故意相反；`dispatchesFailingOnce` 让完成通知的投递创建丢一次）。
