@@ -17,6 +17,9 @@ import (
 // calls is the same outcome with better-looking code.
 const PruneInterval = 5 * time.Minute
 
+// pruneEvery is PruneInterval, overridable by tests that drive the loop.
+var pruneEvery = PruneInterval
+
 // PruneBatch bounds one prune. A long-neglected channel is worked down over
 // several ticks rather than in one unbounded pass.
 const PruneBatch = 200
@@ -34,7 +37,7 @@ const PruneBatch = 200
 // a storage cost, not an outage. What an operator watches is the Retained
 // figure from Stats not coming down.
 func (s *Server) run(ctx context.Context) error {
-	ticker := time.NewTicker(PruneInterval)
+	ticker := time.NewTicker(pruneEvery)
 	defer ticker.Stop()
 	service, ok := s.Service().(*Service)
 	if !ok {
@@ -43,12 +46,18 @@ func (s *Server) run(ctx context.Context) error {
 		// retention stops being enforced without anything failing.
 		return fmt.Errorf("chat server: the local capability is not a *Service, so no retention is being enforced")
 	}
+	if service.cfg.PruneChannels == nil {
+		// Said once, loudly, at start: this is a configuration a deployment
+		// may legitimately choose, and it must not be mistaken for retention.
+		slog.Warn("chat server: no prune channels configured (chat.prune_channels / Mod.WithPruneChannels); " +
+			"retention_age is not enforced by this process")
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			for _, ref := range s.pruneChannels() {
+			for _, ref := range service.pruneTargets(ctx) {
 				dropped, err := service.Prune(ctx, ref, PruneBatch)
 				if err != nil {
 					slog.Error("chat server: prune failed", "kind", ref.Kind, "err", err)
@@ -62,11 +71,3 @@ func (s *Server) run(ctx context.Context) error {
 		}
 	}
 }
-
-// pruneChannels is the set of channels this process prunes.
-//
-// Empty by default, deliberately: enumerating channels would be an unbounded
-// scan of the keyspace, and a deployment knows which channels it has — a world
-// channel, a handful of group channels, the pair channels its online players
-// are using. Refs come from Service.Resolve.
-func (s *Server) pruneChannels() []ChannelRef { return nil }

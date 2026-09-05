@@ -22,6 +22,14 @@
 
 ### Fixed
 
+- **chat / match：后台保留与过期扫描此前从未执行**（B-09）。两个 Server 的 run 钩子遍历的是一个返回硬编码
+  `nil` 的方法，且没有任何配置入口：chat 的 `retention_age` 没有执行者，match 的 `ticket_ttl` 只在读写时内联
+  兜底。现在由部署提供枚举：chat 读 `chat.prune_channels`（`kind:target` 的共享频道列表，Provide 时逐条
+  `Resolve`，解析不了就启动失败）并可用 `Mod.WithPruneChannels` 提供动态集合（如在线玩家的私聊频道）；
+  match 读 `match.sweep_queues`（`mode:group_size[:partition]`，Init 时按 `Queue.Validate` 校验）进
+  `Config.SweepQueues`，Store 通过 `SweepQueues()` 暴露给 run 钩子。两处未配置时在启动时 `slog.Warn`
+  一次，不再沉默。测试用可调 tick 真的驱动 run 循环并断言 `Prune` / `Sweep` 被调用；把 provider 换回
+  硬编码 `nil` 两条测试都红。收敛单元 U-0022。
 - **account：`CreateRole` 在角色记录之后的两处失败不再留下半成品**（B-08）。此前 `Names.Commit` 失败
   直接返回错误但角色已插入——名字 claim 到期后别的账号可占用同名；`Slots.Update` 失败同样保留角色，
   客户端重试得到 `ErrRoleLimit`。现在提交点是最后的槽位写入，之前的一切在失败时全部撤销：版本校验

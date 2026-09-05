@@ -98,6 +98,14 @@ type Config struct {
 	TicketTTL time.Duration
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+	// SweepQueues is the queue set this process's server sweeps for expired
+	// tickets, once per tick. A deployment knows its queues — from the modes
+	// it runs — and this package cannot enumerate them without an unbounded
+	// scan. Empty means the server sweeps nothing, which it logs at start.
+	// Expiry is still enforced inline on every read and mutation, so tickets
+	// do not wait forever without it; what the sweep adds is resolving
+	// expired tickets nobody touches again.
+	SweepQueues []Queue
 	// NewID mints ticket and match ids; nil means a 128-bit random id.
 	//
 	// Ids must be globally unique and unguessable. The implementation this
@@ -122,6 +130,9 @@ type queueStore struct {
 	report servicemetrics.Sink
 }
 
+// SweepQueues is the configured queue set the server's expiry sweep covers.
+func (s *queueStore) SweepQueues() []Queue { return append([]Queue(nil), s.cfg.SweepQueues...) }
+
 // NewStore returns a Store over versioned state.
 func NewStore(state versionstore.Store[string, queueState], cfg Config) (Store, error) {
 	if state == nil {
@@ -133,6 +144,12 @@ func NewStore(state versionstore.Store[string, queueState], cfg Config) (Store, 
 	if cfg.TicketTTL == 0 {
 		cfg.TicketTTL = DefaultTicketTTL
 	}
+	for _, queue := range cfg.SweepQueues {
+		if err := queue.Validate(); err != nil {
+			return nil, fmt.Errorf("match: sweep queue %s: %w", queue.Key(), err)
+		}
+	}
+	cfg.SweepQueues = append([]Queue(nil), cfg.SweepQueues...)
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}

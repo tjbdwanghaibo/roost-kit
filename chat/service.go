@@ -18,6 +18,14 @@ type ServiceConfig struct {
 	// replaces, whose absence from a request was the only thing keeping the
 	// hole shut.
 	System SystemAuthenticator
+	// PruneChannels enumerates the channels this process prunes, once per
+	// retention tick. A deployment knows its channels — a world channel, its
+	// group channels, the pair channels of its online players — and this
+	// package cannot enumerate them without an unbounded keyspace scan. Nil
+	// means this process prunes nothing, which the server logs at start:
+	// retention that nobody runs is the "looks present, does nothing"
+	// mechanism this package criticises in the implementation it replaced.
+	PruneChannels func(context.Context) []ChannelRef
 	// ConversationKind is the pair-scoped kind Conversation queries; zero
 	// selects ChannelPrivate.
 	ConversationKind ChannelKind
@@ -118,6 +126,14 @@ func (s *Service) Scrollback(ctx context.Context, viewer Sender, peer int64, bef
 // Resolve maps a channel and a participant to their stream.
 func (s *Service) Resolve(ch Channel, participant int64) (ChannelRef, error) {
 	return s.cfg.Store.Resolve(ch, participant)
+}
+
+// pruneTargets is what the retention loop prunes on one tick.
+func (s *Service) pruneTargets(ctx context.Context) []ChannelRef {
+	if s.cfg.PruneChannels == nil {
+		return nil
+	}
+	return s.cfg.PruneChannels(ctx)
 }
 
 // Prune drops messages past the retention age, up to limit. It is the sweep

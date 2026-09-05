@@ -2,6 +2,8 @@ package match
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -24,7 +26,35 @@ type Mod struct {
 
 	prefix    string
 	ticketTTL time.Duration
+	sweep     []Queue
 	store     Store
+}
+
+// parseSweepQueues reads `match.sweep_queues`, a list of "mode:group_size" or
+// "mode:group_size:partition" entries. Each is validated the way a queue is
+// validated everywhere else, so a typo stops the process at Init instead of
+// being swept as a queue that does not exist.
+func parseSweepQueues(entries []string) ([]Queue, error) {
+	queues := make([]Queue, 0, len(entries))
+	for _, entry := range entries {
+		parts := strings.Split(strings.TrimSpace(entry), ":")
+		if len(parts) < 2 || len(parts) > 3 {
+			return nil, fmt.Errorf("match mod: match.sweep_queues entry %q must be mode:group_size[:partition]", entry)
+		}
+		size, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return nil, fmt.Errorf("match mod: match.sweep_queues entry %q has a non-numeric group size", entry)
+		}
+		queue := Queue{Mode: parts[0], GroupSize: size}
+		if len(parts) == 3 {
+			queue.Partition = parts[2]
+		}
+		if err := queue.Validate(); err != nil {
+			return nil, fmt.Errorf("match mod: match.sweep_queues entry %q: %w", entry, err)
+		}
+		queues = append(queues, queue)
+	}
+	return queues, nil
 }
 
 // NewMod returns a match Mod. grouping may be nil for FirstComeGrouping.
@@ -54,7 +84,11 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 	if err != nil {
 		return err
 	}
-	m.prefix, m.ticketTTL = prefix, ttl
+	sweep, err := parseSweepQueues(cfg.GetStringSlice("match.sweep_queues"))
+	if err != nil {
+		return err
+	}
+	m.prefix, m.ticketTTL, m.sweep = prefix, ttl, sweep
 	return nil
 }
 
@@ -65,7 +99,7 @@ func (m *Mod) Provide(r *app.Registry) error {
 		return err
 	}
 	store, err := NewRedisStore(client, m.prefix, Config{
-		TicketTTL: m.ticketTTL, Grouping: m.grouping, Metrics: m.metrics,
+		TicketTTL: m.ticketTTL, Grouping: m.grouping, Metrics: m.metrics, SweepQueues: m.sweep,
 	})
 	if err != nil {
 		return fmt.Errorf("match mod: %w", err)
