@@ -15,6 +15,14 @@
 
 ### Fixed
 
+- **nestwal：重放循环与 `Flush` 重叠时同一条记录被 apply 两次**。一次重放 pass 是"从 ack fence 读
+  → apply → publish → ack"，WAL 只串行化了"读"：另一条 pass 在前者读完、ack 未落地的窗口里进来，
+  从旧 fence 再读一遍、再 apply 一遍。`MutationApplier` 契约允许（at-least-once、幂等），所以
+  不丢不坏，但两条 pass 扫同一段纯属浪费，也正是 `TestCommitterEnqueueHoldsReplayUntilReleased`
+  在慢 runner 上报 `apply calls=2` 的原因。现在 `replayPass` 整体持 `replayMu`，运行循环与
+  `Flush` 串行；新增 `testBetweenReplayAndAck` 构造期 seam，测试把第一条 pass 停在读与 ack 之间、
+  放第二条进去，修复前确定性地看到 ≥2 次 apply，修复后恰好 1 次。`-race` 与 `-count=3` 绿。
+  收敛单元 U-0013。
 - **B-05 回退验证补齐的测试（U-0012）**。对 FEATURE_LOGIC M2/M3/M5–M9 逐项临时回退实现、看哪条
   测试变红：9 处原本就有守卫，6 处回退后无一变红，现在都有了——
   `redis`：distLock 的 TTL < 1ms 拒绝、SETNX 回复丢失进入 uncertain 态并阻止重获直到 Release
