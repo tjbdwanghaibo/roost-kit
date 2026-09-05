@@ -4,12 +4,11 @@
 # require_safe_root: the fault commands kill processes under it), but the one
 # fixed path differs per platform — /tmp is /private/tmp on macOS and stays
 # /tmp on Linux, where /private cannot even be created. Hardcoding the macOS
-# form made the whole suite unrunnable on a Linux CI runner.
-if [[ "$(uname -s)" == "Darwin" ]]; then
-	readonly ROOST_IT_CANONICAL_ROOT="/private/tmp/roost-dataengine-it"
-else
-	readonly ROOST_IT_CANONICAL_ROOT="/tmp/roost-dataengine-it"
-fi
+# form made the whole suite unrunnable on a Linux CI runner. `cd /tmp && pwd -P`
+# resolves the symlink on macOS and is a no-op on Linux.
+readonly ROOST_IT_CANONICAL_ROOT="$(cd /tmp && pwd -P)/roost-dataengine-it"
+# Go build cache for the suite, beside the test root: same platform rule.
+readonly ROOST_IT_GO_CACHE_DEFAULT="$(dirname "$ROOST_IT_CANONICAL_ROOT")/roost-go-cache"
 readonly ROOST_IT_ROOT="${ROOST_DATAENGINE_IT_ROOT:-$ROOST_IT_CANONICAL_ROOT}"
 
 roost_it_log() {

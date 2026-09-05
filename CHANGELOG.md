@@ -15,6 +15,21 @@
 
 ### Fixed
 
+- **集成环境脚本只能在 macOS 上跑**。`common.sh` 把唯一允许的测试根目录硬编码为 `/private/tmp/…`，
+  `dataengine-env.sh` 的 `reset` 安全检查和 `GOCACHE` 默认值、`perf/dataengine.sh` 的缓存目录
+  也各写了一份；Linux 上 `/private` 不可创建，`integration` job 首次远端运行在起环境前就退出。
+  现在根目录取 `$(cd /tmp && pwd -P)`（macOS 解析到 `/private/tmp`，Linux 保持 `/tmp`），其余路径
+  都从它派生；"根目录固定、拒绝任意路径"的安全属性不变。
+- **tag 上的 release-hygiene 被第三方间接伪版本卡住**。"tagged release uses tagged dependencies"
+  对 go.mod 里任何伪版本都报错，而 viper → locafero → `sourcegraph/conc` 的间接依赖只有伪版本，
+  从 v1.11.3 起每个 kit tag 的这一步都是红的。该步骤存在的目的是"kit tag 不得依赖未发布的
+  roost-core / roost-skill / roost-service"，现在正则限定到 `tjbdwanghaibo/roost-*`。
+- **govulncheck：GO-2026-6061**（google.golang.org/grpc v1.79.3，经 etcd 客户端间接引入）。
+  升到 v1.83.2，govulncheck 全绿。v1.11.3 与 v1.12.0 的 released-core (ubuntu) 都因此失败。
+- **`TestStatsLogStopWithContextReturnsWhenFlushIsBlocked` 让 flush goroutine 活过测试**。
+  `defer close(release)` 在测试结束时才放开被阻塞的 provider，flush 随后往 TempDir 写文件，与
+  runner 的清理竞争——慢机器上报 `TempDir RemoveAll cleanup: directory not empty`。现在测试
+  自己放开 provider 并等第二次 `StopWithContext` 真正结束。F13 一类：goroutine 是谁起的谁收。
 - **CI 基准步骤指向已改名的包**。`ci.yml` 里房间同步的三条基准仍写 `./sync`，而该包在
   v1.10.0 已改名为 `room`；上面的 `go test ./...` 一直绿，这一步却每次都失败。现在改为
   `./room`，并新增根目录测试 `TestCIWorkflowPackagePathsExist`：工作流里每个 `./pkg`

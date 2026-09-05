@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-readonly go_cache="${ROOST_GO_CACHE:-/private/tmp/roost-go-cache}"
+readonly go_cache="${ROOST_GO_CACHE:-$(cd /tmp && pwd -P)/roost-go-cache}"
 readonly output_dir="${ROOST_PERF_OUTPUT:-${repo_dir}/artifacts/perf}"
 
 mkdir -p "${output_dir}"

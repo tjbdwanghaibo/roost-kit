@@ -58,12 +58,12 @@ environment_down() {
 environment_reset() {
 	require_safe_root
 	environment_down
-	if [[ "$ROOST_IT_ROOT" != "/private/tmp/roost-dataengine-it" ]]; then
+	if [[ "$ROOST_IT_ROOT" != "$ROOST_IT_CANONICAL_ROOT" ]]; then
 		roost_it_error "refuse unsafe root: $ROOST_IT_ROOT"
 		return 2
 	fi
 	roost_it_log "removing $ROOST_IT_ROOT"
-	rm -rf -- "/private/tmp/roost-dataengine-it"
+	rm -rf -- "$ROOST_IT_CANONICAL_ROOT"
 }
 
 environment_fault() {
@@ -99,7 +99,7 @@ environment_test() {
 	source "$ROOST_IT_ROOT/env.sh"
 	(
 		cd "$repo_root"
-		GOCACHE="${GOCACHE:-/private/tmp/roost-go-cache}" \
+		GOCACHE="${GOCACHE:-$ROOST_IT_GO_CACHE_DEFAULT}" \
 			go test -tags=integration ./dataengine ./nestwal ./saga -count=1
 	)
 }

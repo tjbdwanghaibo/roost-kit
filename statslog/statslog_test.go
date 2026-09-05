@@ -145,7 +145,6 @@ func TestStatsLogStopWithContextReturnsWhenFlushIsBlocked(t *testing.T) {
 	if err := mod.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer close(release)
 
 	select {
 	case <-started:
@@ -158,6 +157,17 @@ func TestStatsLogStopWithContextReturnsWhenFlushIsBlocked(t *testing.T) {
 	err := mod.StopWithContext(ctx)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("StopWithContext err = %v, want context deadline", err)
+	}
+
+	// Let the blocked provider return, then wait for the shutdown the bounded
+	// StopWithContext abandoned to actually finish. Left as a deferred
+	// close(release), the flush goroutine outlived the test and wrote its
+	// record into TempDir while the runner was removing it — "TempDir
+	// RemoveAll cleanup: directory not empty" on a slow CI runner. A goroutine
+	// the test started is the test's to reap.
+	close(release)
+	if err := mod.StopWithContext(context.Background()); err != nil {
+		t.Fatalf("StopWithContext after releasing the provider: %v", err)
 	}
 }
 
