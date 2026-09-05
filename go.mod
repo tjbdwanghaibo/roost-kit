@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/nats-io/nats.go v1.52.0
 	github.com/quic-go/quic-go v0.59.1
-	github.com/redis/go-redis/v9 v9.19.0
+	github.com/redis/go-redis/v9 v9.22.0
 	github.com/spf13/viper v1.21.0
 	github.com/tjbdwanghaibo/roost-core v1.12.0
 	github.com/xtaci/kcp-go/v5 v5.6.72
