@@ -22,6 +22,10 @@
 
 ### Fixed
 
+- **rank：`TestIntegrationConcurrentAddsAgainstRealRedis` 在 v1.5.1 的 tag CI 上偶发红**
+  （`submit lost 8 compare-and-swaps for owner 1`）。八个 writer 对同一 owner 用 CAS 累加，
+  `Submit` 按契约在 8 次失败后返回 `ErrConflict`（哨兵注释写明"重试即可"），测试却把它当作失败。
+  现在测试按契约以调用方的方式有界重试冲突，其它任何错误仍立即失败；断言不变。
 - **session：`Enter` 在账本写失败时的承诺补上测试**。对 session 六条注释承诺逐项临时回退：四条
   已有测试变红；"releaseClaim 的 run id 守卫"回退后无测试变红——但它与版本校验删除等价，不是洞
   （只影响 `claim.release_not_ours` 计数）；"账本 `Create` 失败时 `Enter` 返回错误而非成功"回退后

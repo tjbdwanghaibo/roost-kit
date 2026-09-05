@@ -4,6 +4,7 @@ package rank
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -76,6 +77,24 @@ func TestIntegrationSwapScriptLeavesNoOrphanMember(t *testing.T) {
 	}
 }
 
+// submitRetryingConflicts is the client the contract describes: Submit gives
+// up after maxSubmitAttempts lost compare-and-swaps and answers ErrConflict,
+// which the sentinel documents as "retry". Eight writers hammering ONE owner
+// on a loaded CI runner do lose eight in a row now and then ("writer 0: rank:
+// submit conflict: submit lost 8 compare-and-swaps for owner 1" on the
+// v1.5.1 tag run), so the test retries the way a caller would, bounded, and
+// still fails on anything that is not a conflict.
+func submitRetryingConflicts(ctx context.Context, store *RedisStore, board Board, requestID string) error {
+	var err error
+	for round := 0; round < 20; round++ {
+		if _, err = store.Submit(ctx, board, Score{OwnerID: 1, Value: 1}, UpdateAdd, requestID); !errors.Is(err, ErrConflict) {
+			return err
+		}
+		time.Sleep(time.Duration(round+1) * time.Millisecond)
+	}
+	return fmt.Errorf("%d client retries exhausted: %w", 20, err)
+}
+
 // Real concurrency against real Redis: the compare-and-swap must serialize
 // accumulations, and the request ring must deduplicate replays.
 func TestIntegrationConcurrentAddsAgainstRealRedis(t *testing.T) {
@@ -93,7 +112,7 @@ func TestIntegrationConcurrentAddsAgainstRealRedis(t *testing.T) {
 				requestID := fmt.Sprintf("w%d-%d", index, i)
 				// Submit each event twice: a redelivery must not double-count.
 				for attempt := 0; attempt < 2; attempt++ {
-					if _, err := store.Submit(ctx, board, Score{OwnerID: 1, Value: 1}, UpdateAdd, requestID); err != nil {
+					if err := submitRetryingConflicts(ctx, store, board, requestID); err != nil {
 						errs[index] = err
 						return
 					}
