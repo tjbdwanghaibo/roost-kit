@@ -4,6 +4,45 @@
 
 ## [Unreleased]
 
+### Added
+
+- **CI `integration` job：真跑集成套件**。此前 `//go:build integration` 的八个测试文件只被
+  `go vet -tags integration` 编译、从不执行（2026-09-02 审计 F8）。新 job 在 ubuntu runner 上装
+  mongod 8.0 / mongosh / nats-server v2.14.5 / jq / nc，先跑环境脚本自检，再跑与本地完全相同的
+  `scripts/integration/dataengine-env.sh test`，失败时打印节点状态，无论成败都 `down`。版本与
+  本地开发环境一致并以 env 变量钉死。**尚未在 GitHub Actions 上跑过第一次**：actionlint 通过、
+  同一条命令本地三个包全绿（U-0003 之后），首次远端运行的结果要单独确认。收敛单元 U-0010。
+
+### Fixed
+
+- **CI 基准步骤指向已改名的包**。`ci.yml` 里房间同步的三条基准仍写 `./sync`，而该包在
+  v1.10.0 已改名为 `room`；上面的 `go test ./...` 一直绿，这一步却每次都失败。现在改为
+  `./room`，并新增根目录测试 `TestCIWorkflowPackagePathsExist`：工作流里每个 `./pkg`
+  字面量都必须是本模块里真实存在的目录，下次改名忘了工作流会在普通 `go test` 里变红，
+  而不是在 CI 里。这是 2026-09-02 审计"跨包字面量耦合"一类的同族缺陷——只是这次
+  字面量写在 YAML 里。收敛单元 U-0001，见 roost-core `docs/history/ledger.md`。
+- **集成环境的 NATS 就绪判定没等 JetStream 元 leader**。`scripts/integration/lib/nats.sh`
+  的 `nats_cluster_ready` 只看 JetStream 已启用和路由数，而建流要等元集群选出 leader；
+  冷启动后包内第一个执行的 `TestRealMongoPrimaryFailoverContinuesProjection` 在
+  `ensure effect stream` 上等满 30s 超时，在注入任何故障之前就失败，且两轮完整运行都
+  确定性复现。现在每个节点的 `/jsz .meta_cluster.leader` 非空才算就绪，`status` 也打印
+  它；修复后完整套件三个包全绿。这是 F10 一类的同族缺陷——就绪检查是对真实条件的
+  宽容替身。收敛单元 U-0003。
+- **`syncstream.Publisher` 的帧没有投递身份**。每一帧的 `SyncMsg` 只带 `(topic, key, sequence,
+  sid, part)`，JetStream 以此元组去重：同一进程重启后从头重发同一序号，在 broker 去重窗口内
+  与重启前的帧撞键，新帧被当重复丢掉，客户端无声地少收一帧。现在每帧经 core
+  `syncbus.DeliveryIDs` 取进程唯一的身份；新增测试用两个同 sid 的发布者重发同一序号，断言所有
+  帧身份两两不同。收敛单元 U-0009。
+- **Remote Entity：无 fence 的锁工厂现在在构造和 Provide 时被拒绝**。`batch.go` 此前用鸭子类型
+  `interface{ Fence() uint64 }` 探测锁能否给出 fence，拿不到就在每次共享操作时以 `ErrRemoteFenced`
+  拒绝——fail-closed，但太晚、太吵，且在指标上与真正的 fence 冲突无法区分。现在改用 core 的公开
+  契约 `redis.IFencedVersionedLock`；`newRemoteEntityManager` 构造时用一把探针锁（无 I/O）检查
+  工厂，不合格则记录错误、`getOrCreate` 不再创建任何 wrapper，`RemoteEntityMod.Provide` 直接
+  返回该错误让进程在启动时停下。FEATURE_LOGIC §4.2 第 6、7 项。
+  同时补两条 §4.2 要求的确定性测试：第一代持有者租约过期、第二代取得锁后，第一代的迟到 unlock
+  不能删掉第二代 owner、不能改版本、只能拿到 `ErrVersionedLockNotOwned`（机制原本就正确，缺的
+  是测试）；无 fence 工厂在构造与创建两处都被拒（修复前该测试红）。收敛单元 U-0011。
+
 ### Changed
 
 - **go 指令 1.25.0 → 1.27.0**，与 roost-core / roost-codegen / roost-service 和

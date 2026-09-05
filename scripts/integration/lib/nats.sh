@@ -51,6 +51,15 @@ nats_routes_ready() {
 	curl --silent --show-error --fail "http://127.0.0.1:$1/routez" 2>/dev/null | jq -e '.num_routes >= 2' >/dev/null
 }
 
+# JetStream is enabled and routed before the meta group has elected a leader,
+# and stream creation is refused until it has. A fixture that starts a Data
+# Engine in that window waits its whole startup_timeout on "ensure effect
+# stream" and fails before any fault is injected. Readiness therefore also
+# requires every node to report a meta leader.
+nats_meta_leader_ready() {
+	curl --silent --show-error --fail "http://127.0.0.1:$1/jsz" 2>/dev/null | jq -e '(.meta_cluster.leader // "") | length > 0' >/dev/null
+}
+
 nats_start_node() {
 	local index="$1" node pid_file config client monitor
 	node="$(nats_node_dir "$index")"
@@ -76,6 +85,7 @@ nats_cluster_ready() {
 		monitor="$(nats_monitor_port "$index")"
 		nats_varz_ready "$monitor" || return 1
 		nats_routes_ready "$monitor" || return 1
+		nats_meta_leader_ready "$monitor" || return 1
 	done
 }
 
@@ -103,12 +113,13 @@ nats_status() {
 		roost_it_error "NATS JetStream cluster is not ready"
 		return 1
 	fi
-	local index monitor name routes
+	local index monitor name routes leader
 	for index in 1 2 3; do
 		monitor="$(nats_monitor_port "$index")"
 		name="$(curl --silent --fail "http://127.0.0.1:$monitor/varz" | jq -r '.server_name')"
 		routes="$(curl --silent --fail "http://127.0.0.1:$monitor/routez" | jq -r '.num_routes')"
-		printf '%s=JETSTREAM routes=%s\n' "$name" "$routes"
+		leader="$(curl --silent --fail "http://127.0.0.1:$monitor/jsz" | jq -r '.meta_cluster.leader // "none"')"
+		printf '%s=JETSTREAM routes=%s meta_leader=%s\n' "$name" "$routes" "$leader"
 	done
 }
 

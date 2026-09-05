@@ -44,9 +44,9 @@ jobs:
         run: go vet ./...
         # The integration suite (dataengine/nestwal/saga crash + failover) is
         # build-tagged, so it is excluded from `go vet ./...`, `go build ./...`
-        # and `go test ./...` alike — it can rot silently. Vetting it keeps it
-        # compiling; running it needs real Mongo/NATS and lives in
-        # scripts/integration/dataengine-env.sh.
+        # and `go test ./...` alike — it can rot silently. Vetting it here keeps
+        # it compiling on every platform; RUNNING it needs real Mongo + NATS and
+        # is the `integration` job below.
       - if: runner.os == 'Linux'
         name: vet integration-tagged tests
         run: go vet -tags integration ./...
@@ -55,7 +55,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: go test -race ./...
       - if: runner.os == 'Linux'
-        run: go test -run '^$' -bench 'Benchmark(RoomReplicationFlush100Subscribers|RoomTransportSinkAdmit100Subscribers|RoomReplicationGlobalFrame100x100)$' -benchtime=1s ./sync
+        run: go test -run '^$' -bench 'Benchmark(RoomReplicationFlush100Subscribers|RoomTransportSinkAdmit100Subscribers|RoomReplicationGlobalFrame100x100)$' -benchtime=1s ./room
       - if: runner.os == 'Linux'
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
@@ -89,6 +89,51 @@ jobs:
         run: go run ../roost-core/cmd/glsvet ./...
       - working-directory: roost-kit
         run: go test -race ./...
+
+  # Runs the build-tagged integration suite against real, isolated Mongo and
+  # NATS nodes — the same script a developer runs locally. Until this job
+  # existed the suite was only vetted (AUDIT F8): eight test files that could
+  # rot for months while every other check stayed green. Versions are pinned to
+  # what the suite is developed against; bump them deliberately.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NATS_SERVER_VERSION: v2.14.5
+      MONGODB_SERIES: "8.0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: install mongod + mongosh
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://www.mongodb.org/static/pgp/server-${MONGODB_SERIES}.asc" \
+            | sudo gpg --dearmor -o "/usr/share/keyrings/mongodb-server-${MONGODB_SERIES}.gpg"
+          echo "deb [signed-by=/usr/share/keyrings/mongodb-server-${MONGODB_SERIES}.gpg] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/${MONGODB_SERIES} multiverse" \
+            | sudo tee "/etc/apt/sources.list.d/mongodb-org-${MONGODB_SERIES}.list" >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y mongodb-org-server mongodb-mongosh jq netcat-openbsd
+          mongod --version | head -1
+          mongosh --version
+      - name: install nats-server
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/nats-io/nats-server/releases/download/${NATS_SERVER_VERSION}/nats-server-${NATS_SERVER_VERSION}-linux-amd64.tar.gz" | tar -xz
+          sudo install -m 0755 "nats-server-${NATS_SERVER_VERSION}-linux-amd64/nats-server" /usr/local/bin/nats-server
+          nats-server --version
+      - name: environment script self-test
+        run: scripts/integration/dataengine_env_test.sh
+      - name: integration-tagged tests on isolated Mongo replica set + NATS JetStream cluster
+        run: scripts/integration/dataengine-env.sh test
+      - name: node status (on failure)
+        if: failure()
+        run: scripts/integration/dataengine-env.sh status || true
+      - name: tear down
+        if: always()
+        run: scripts/integration/dataengine-env.sh down || true
 
   release-hygiene:
     runs-on: ubuntu-latest
