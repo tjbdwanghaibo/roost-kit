@@ -100,7 +100,7 @@ environment_test() {
 	(
 		cd "$repo_root"
 		GOCACHE="${GOCACHE:-$ROOST_IT_GO_CACHE_DEFAULT}" \
-			go test -tags=integration ./dataengine ./nestwal ./saga -count=1
+			go test -tags=integration ./dataengine ./nestwal ./saga ./remoteentity -count=1
 	)
 }
 

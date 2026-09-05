@@ -6,6 +6,15 @@
 
 ### Added
 
+- **remoteentity：真实 Mongo 上的 fence 竞争测试**（`mongo_committer_integration_test.go`，`integration` 标签，
+  B-10 / FEATURE_LOGIC §4.2 第五条）。同一实体同一 base version 上高低两个 lock fence 并发提交：恰好一个
+  落库，败方得到 `ErrRemoteVersionConflict` 进入既有隔离流程；随后"版本对、fence 低于已存"的提交同样是
+  版本冲突，"版本对、fence 相同"的提交通过。此前这条不变量只有 mongotest 假客户端上的证据。
+  `scripts/integration/dataengine-env.sh test` 的包列表加入 `./remoteentity`，CI 的 integration job 随之覆盖。
+  收敛单元 U-0023。
+
+### Added
+
 - **CI `integration` job：真跑集成套件**。此前 `//go:build integration` 的八个测试文件只被
   `go vet -tags integration` 编译、从不执行（2026-09-02 审计 F8）。新 job 在 ubuntu runner 上装
   mongod 8.0 / mongosh / nats-server v2.14.5 / jq / nc，先跑环境脚本自检，再跑与本地完全相同的
