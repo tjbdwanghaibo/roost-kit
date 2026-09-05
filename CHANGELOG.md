@@ -6,6 +6,11 @@
 
 ### Fixed
 
+- **nestwal：`TestWALCloseDrainsAdmittedAppends` 在慢机器上偶发 `append 0: nestwal: closed`**（v1.12.2 tag 的
+  Windows 首跑）。测试的前置条件"全部 append 已被接纳"只等了"队列里有一条"，Windows 上 Close 抢在 31 个
+  goroutine 到达 `Append` 之前，它们得到的 `ErrClosed` 是合法的。`Stats` 新增 `Admitted`（接纳计数；
+  `Admitted − Appended` 即在途量，`Queued` 在写入协程取走一批后就看不见了），测试等到 `Admitted == 32` 再
+  Close。收敛单元 U-0027。
 - **dataengine / saga / remoteentity 三个 Mod 在真实进程里装配不起来**（U-0025，C4）。它们的 `DependsOn`
   写的是 `mods.ModHealth`（app.Registry 的内建项，不是 Mod）和 `mods.ModNatsJetStream`（nats Mod 发布的
   capability，不是 Mod），而 app 按 Mod **名字**解析依赖：任何带数据引擎的进程启动即
