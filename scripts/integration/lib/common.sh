@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 
-readonly ROOST_IT_CANONICAL_ROOT="/private/tmp/roost-dataengine-it"
+# The fixed test root. It is deliberately not configurable (see
+# require_safe_root: the fault commands kill processes under it), but the one
+# fixed path differs per platform — /tmp is /private/tmp on macOS and stays
+# /tmp on Linux, where /private cannot even be created. Hardcoding the macOS
+# form made the whole suite unrunnable on a Linux CI runner.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+	readonly ROOST_IT_CANONICAL_ROOT="/private/tmp/roost-dataengine-it"
+else
+	readonly ROOST_IT_CANONICAL_ROOT="/tmp/roost-dataengine-it"
+fi
 readonly ROOST_IT_ROOT="${ROOST_DATAENGINE_IT_ROOT:-$ROOST_IT_CANONICAL_ROOT}"
 
 roost_it_log() {
