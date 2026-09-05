@@ -22,6 +22,12 @@
 
 ### Fixed
 
+- **session：`Enter` 在账本写失败时的承诺补上测试**。对 session 六条注释承诺逐项临时回退：四条
+  已有测试变红；"releaseClaim 的 run id 守卫"回退后无测试变红——但它与版本校验删除等价，不是洞
+  （只影响 `claim.release_not_ours` 计数）；"账本 `Create` 失败时 `Enter` 返回错误而非成功"回退后
+  全绿——这是洞：调用方会拿到一个账本不认识的 run，重试无法回放。新增
+  `TestEnterReportsALostLedgerWriteInsteadOfSuccess`（账本首次 Create 失败的替身）钉住：返回错误、
+  run 仍在且 open、同 request id 重试被 `ErrAlreadyRunning` 拒绝、不计 accepted。收敛单元 U-0017。
 - **directory：计数器在 CAS 重试下虚高**。`Reserve` / `Commit` 在 `versionstore.Update` 的回调
   里上报 `accepted` / `replayed` / `refused`，而 kit 的契约明说 Mutate 可能被调用多次（每次输掉
   compare-and-set 都重读重放）。内存后端从不重试，所以现有指标测试全绿；换成一个"先输一次 CAS"
