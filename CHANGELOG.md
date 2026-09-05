@@ -22,6 +22,11 @@
 
 ### Fixed
 
+- **global/activity：两条兜底承诺补上测试**。六条注释承诺逐项临时回退，四条已有测试变红；"有界扫描先完成
+  截止最早的活动"与"已完成但仍在窗口里（dispatch 创建失败）的活动由扫描补建投递并出窗"两条全绿——
+  新增 `sweep_promises_test.go`（键序与截止序故意相反；`dispatchesFailingOnce` 让完成通知的投递创建丢一次）。
+  "扫描不会完成 pending 活动"回退后仍绿是因为 `completeExpired` 在 CAS 内再次校验状态，属双重保险而非洞。
+  servicemetrics、servicemods 全读：分支全部有测试。收敛单元 U-0020，B-07 的 12 包至此全部过一遍。
 - **global：重试的 `CompleteMigration` 被计为 `accepted`**。同 epoch 的重复完成按注释是幂等回放，
   但上报走的是 accepted，迁移速率指标会高于实际迁移数。现在回放计 `replayed:complete_migration`。
   对 global 九条注释承诺逐项临时回退：七条已有测试变红；两条全绿——"非持有者的拒绝不泄露当前
