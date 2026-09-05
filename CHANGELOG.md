@@ -15,6 +15,15 @@
 
 ### Fixed
 
+- **B-05 回退验证补齐的测试（U-0012）**。对 FEATURE_LOGIC M2/M3/M5–M9 逐项临时回退实现、看哪条
+  测试变红：9 处原本就有守卫，6 处回退后无一变红，现在都有了——
+  `redis`：distLock 的 TTL < 1ms 拒绝、SETNX 回复丢失进入 uncertain 态并阻止重获直到 Release
+  对账（服务端已应用/未应用两种结局）、Release 回复丢失同样 uncertain、owner token 每次获取
+  不同；`nats`：`validateSubscription` 拒绝 nil handler；`mongo`：`BulkWrite` 未知模型类型带
+  index 报错且不触碰 driver。另把 `TestInvokeNatsHandlerContainsPanic` 从"调用后置一个永远为
+  true 的标志"改为断言 `nats.subscription.handler_panic.total` 计数 +1——原测试对"panic 被吞
+  掉但没上报"完全看不见。redis 侧新增 `scriptedRedis`：只实现 SETNX 与释放脚本、其余方法保持
+  nil-panic 的求值型替身。
 - **集成环境脚本只能在 macOS 上跑**。`common.sh` 把唯一允许的测试根目录硬编码为 `/private/tmp/…`，
   `dataengine-env.sh` 的 `reset` 安全检查和 `GOCACHE` 默认值、`perf/dataengine.sh` 的缓存目录
   也各写了一份；Linux 上 `/private` 不可创建，`integration` job 首次远端运行在起环境前就退出。
