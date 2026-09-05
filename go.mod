@@ -9,7 +9,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/tjbdwanghaibo/roost-core v1.12.0
 	github.com/xtaci/kcp-go/v5 v5.6.72
-	go.etcd.io/etcd/api/v3 v3.6.11
+	go.etcd.io/etcd/api/v3 v3.7.1
 	go.etcd.io/etcd/client/v3 v3.6.11
 	go.mongodb.org/mongo-driver/v2 v2.6.0
 	golang.org/x/sys v0.47.0
@@ -29,9 +29,8 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-chi/chi/v5 v5.3.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
-	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.26.3 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
