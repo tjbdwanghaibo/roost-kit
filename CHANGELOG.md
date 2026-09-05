@@ -22,6 +22,12 @@
 
 ### Fixed
 
+- **directory：计数器在 CAS 重试下虚高**。`Reserve` / `Commit` 在 `versionstore.Update` 的回调
+  里上报 `accepted` / `replayed` / `refused`，而 kit 的契约明说 Mutate 可能被调用多次（每次输掉
+  compare-and-set 都重读重放）。内存后端从不重试，所以现有指标测试全绿；换成一个"先输一次 CAS"
+  的存储替身，一次预留报 2 个 accept。回调现在只做决定，Update 返回后按结果上报恰好一次。
+  收敛单元 U-0016（C3）；`contention_test.go` 的 `contendedStore` 可复用于其它包。
+
 - **rank：CAS 耗尽的冲突错误没有错误码**。`types.go` 声明了 `CodeConflict = 540108`，但从未
   用 `errcode.Define` 接上；`Submit` 输掉全部 8 次 compare-and-swap 时返回的是一个普通的
   `errors.New`，于是生成的 RPC 信封把它报成 `CodeInternal` / "server error"——恰恰是那个哨兵

@@ -104,20 +104,25 @@ func (s *store) Reserve(ctx context.Context, raw string, owner Owner, ttl time.D
 		return Claim{}, err
 	}
 
+	// The callback only decides; it reports nothing. versionstore may run it
+	// more than once — every lost compare-and-set re-reads and re-applies it
+	// — so a counter incremented inside it counts attempts, not outcomes.
+	// The decision is carried out and reported exactly once, after Update.
 	var claim Claim
+	var replayed bool
 	_, _, err = s.state.Update(ctx, key, func(current Entry, found bool) (Entry, bool, error) {
+		replayed = false
 		// A lapsed reservation is treated as absent. This is what frees a key
 		// whose reserver died before committing.
 		if found && !current.Expired(now) {
 			if current.Owner != owner {
-				s.report.Refused("reserve", "taken")
 				return current, false, fmt.Errorf("%w: %q held by %q", ErrKeyTaken, key, current.Owner)
 			}
+			replayed = true
 			if current.State == StateCommitted {
 				// Already ours and permanent: hand back a claim describing
 				// that, so a retried Reserve is a no-op rather than an error.
 				claim = Claim{Key: key, Owner: owner, Token: current.Token}
-				s.report.Replayed("reserve")
 				return current, false, nil
 			}
 			// Ours and still reserved: return the existing claim instead of
@@ -125,7 +130,6 @@ func (s *store) Reserve(ctx context.Context, raw string, owner Owner, ttl time.D
 			// reservations.
 			claim = Claim{Key: key, Owner: owner, Token: current.Token,
 				ExpiresAt: time.Unix(current.ExpiresAtUnix, 0)}
-			s.report.Replayed("reserve")
 			return current, false, nil
 		}
 		next := Entry{
@@ -133,11 +137,18 @@ func (s *store) Reserve(ctx context.Context, raw string, owner Owner, ttl time.D
 			Token: token, ExpiresAtUnix: expiresAt.Unix(), ReservedAtUnix: now.Unix(),
 		}
 		claim = Claim{Key: key, Owner: owner, Token: token, ExpiresAt: expiresAt}
-		s.report.Accepted("reserve")
 		return next, true, nil
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrKeyTaken):
+		s.report.Refused("reserve", "taken")
 		return Claim{}, err
+	case err != nil:
+		return Claim{}, err
+	case replayed:
+		s.report.Replayed("reserve")
+	default:
+		s.report.Accepted("reserve")
 	}
 	return claim, nil
 }
@@ -150,26 +161,30 @@ func (s *store) Commit(ctx context.Context, claim Claim) (Entry, error) {
 		return Entry{}, ErrClaimNotFound
 	}
 	now := s.cfg.Now()
+	// As in Reserve: the callback decides, the report happens once after it.
 	var committed Entry
+	var replayed bool
+	var refusal string
 	_, _, err := s.state.Update(ctx, claim.Key, func(current Entry, found bool) (Entry, bool, error) {
+		replayed, refusal = false, ""
 		if !found {
 			return current, false, fmt.Errorf("%w: %q", ErrClaimNotFound, claim.Key)
 		}
 		if current.Token != claim.Token {
-			s.report.Refused("commit", "stale")
 			// Someone else holds the key now. Reporting this rather than
 			// overwriting is the whole point of carrying a token.
+			refusal = "stale"
 			return current, false, fmt.Errorf("%w: %q is held by %q", ErrClaimStale, claim.Key, current.Owner)
 		}
 		if current.State == StateCommitted {
 			// Idempotent: a retried Commit on our own committed entry
 			// succeeds, so a client retry after a lost response does not fail.
 			committed = current
-			s.report.Replayed("commit")
+			replayed = true
 			return current, false, nil
 		}
 		if current.Expired(now) {
-			s.report.Refused("commit", "lapsed")
+			refusal = "lapsed"
 			return current, false, fmt.Errorf("%w: %q reservation lapsed", ErrClaimNotFound, claim.Key)
 		}
 		next := current
@@ -177,11 +192,18 @@ func (s *store) Commit(ctx context.Context, claim Claim) (Entry, error) {
 		next.ExpiresAtUnix = 0
 		next.CommittedAtUnix = now.Unix()
 		committed = next
-		s.report.Accepted("commit")
 		return next, true, nil
 	})
-	if err != nil {
+	switch {
+	case err != nil:
+		if refusal != "" {
+			s.report.Refused("commit", refusal)
+		}
 		return Entry{}, err
+	case replayed:
+		s.report.Replayed("commit")
+	default:
+		s.report.Accepted("commit")
 	}
 	return committed, nil
 }
