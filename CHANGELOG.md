@@ -6,6 +6,13 @@
 
 ### Changed（测试质量）
 
+- **match 的 `Commit` / `Cancel` 拒绝规则钉住**（U-0057，C2）。回退采样 38 条守卫 21 条全绿。`Commit`：票数与队伍规模不等、
+  空票号、同一票号出现两次、票不存在、队列从未有人进入、已配对的票再提交报 `ErrConflict`——并断言所有拒绝之后两张票
+  仍在等待（整段是一次 CAS，拒绝不留半改）；`Cancel`：空票号、未知票号。"同一 subject 两张票"那条在 CAS 里的规则经公开
+  API 不可达（`Enqueue` 先拒绝），记为纵深防御不钉。`commit_promises_test.go` 两条；回退四处守卫各红。
+- **生成的 RPC 胶水三条拒绝在 account 钉住一次，覆盖全部九个服务的同一模板**（U-0058，C2）。`Server.Init`：注册表只有
+  远端能力（进程只持有 client）时拒绝并说明"会把每个请求转发给自己"，什么都没有时点名要加 `account.NewMod()`；
+  `ClientMod.Init`：`call_timeout` 为负拒绝、为零取默认。`rpc_glue_promises_test.go` 两条；回退两处守卫各红。
 - **session 的 `Run.Validate`、`Resource.Validate` 与进入请求校验逐条钉住**（U-0056，C2）。回退采样 40 条守卫 32 条全绿。
   运行：空 id、owner 非正、空 kind、空幂等键、**无截止期（否则持有的资源永远不释放）**、截止期不晚于开始、context 超 64、
   资源超 8、资源缺 kind / id；进入请求：空 kind、**空幂等键（重试会分配第二个运行）**、context 超限。
