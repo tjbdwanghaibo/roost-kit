@@ -11,6 +11,12 @@
 
 ### Changed（测试质量）
 
+- **spatial 兴趣管理器的配置与边界守卫钉住**（U-0081，C2）。空边界 / 块尺寸为零、进入半径非正、离开半径小于进入半径、
+  离开半径会溢出、距离带非正 / 非升序七种配置各自拒绝；世界外的点与未注册的 id 在增 / 移 / 删六个入口各自拒绝，
+  被拒绝的移动不改变位置。`interest_promises_test.go` 两条；回退三处守卫各红。
+- **syncstream 订阅端的尺寸上限与分片规则钉住**（U-0082，C2）。用真实 Publisher 铸出信封再单点变异：信封超
+  `MaxEnvelopeBytes`、分片数超 `MaxChunks`、分片下标越界、要求校验和却没有、校验和不符、解压后超 `MaxDecodedBytes`、
+  报文载荷超 `MaxPayloadBytes`——订阅端是同步总线上的信任边界。`subscribe_promises_test.go` 一条；回退五处守卫各红。
 - **nats 客户端的错误翻译与参数校验钉住**（U-0079，C2）。gonats 的 timeout / no responders / closed / draining 各翻成
   roost-core 的哨兵（翻错会让调用方走错分支：把连接关闭当超时重试，或把无响应者当终态放弃）；空 / 带空白的 subject 与
   queue、nil handler、非正 request 超时、无连接的客户端各自拒绝。`client_promises_test.go` 两条；回退五处守卫各红。
