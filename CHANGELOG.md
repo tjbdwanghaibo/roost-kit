@@ -11,6 +11,10 @@
 
 ### Changed（测试质量）
 
+- **ai 行为树注册表与文档解析器的每条规则按文本与 JSON 路径钉住**（U-0083，C2）。原 `TestParseTreeFailFast` 只断言错误类别。
+  注册：空名 / 空工厂、重复条件、重复动作；解析：schema、缺 root、缺 `node`、未知节点、未知动作 / 条件（带路径）、guard
+  缺 condition、repeat 缺 child、cooldown ticks 非正、parallel 未知策略、嵌套超 64 层。`tree_parser_promises_test.go` 两条；
+  回退五处守卫各红。
 - **spatial 兴趣管理器的配置与边界守卫钉住**（U-0081，C2）。空边界 / 块尺寸为零、进入半径非正、离开半径小于进入半径、
   离开半径会溢出、距离带非正 / 非升序七种配置各自拒绝；世界外的点与未注册的 id 在增 / 移 / 删六个入口各自拒绝，
   被拒绝的移动不改变位置。`interest_promises_test.go` 两条；回退三处守卫各红。
