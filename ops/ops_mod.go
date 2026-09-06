@@ -39,6 +39,7 @@ type OpsMod struct {
 	commands      *admin.Registry
 	lifecycle     *lifecycle.Registry
 	server        *http.Server
+	registry      *app.Registry
 	ready         atomic.Bool
 	readyMsg      atomic.Value
 }
@@ -75,6 +76,7 @@ func (m *OpsMod) Provide(r *app.Registry) error {
 	if r == nil {
 		return fmt.Errorf("ops: app registry is nil")
 	}
+	m.registry = r
 	var ok bool
 	if m.health, ok = app.Lookup[*health.Registry](r, mods.ModHealth); !ok || m.health == nil {
 		return fmt.Errorf("ops: capability %q not found", mods.ModHealth)
@@ -119,6 +121,7 @@ func (m *OpsMod) Start() error {
 	engine.Get("/healthz", m.handleHealth)
 	engine.Get("/readyz", m.handleReady)
 	engine.Get("/metrics", m.handleMetrics)
+	engine.Get("/statsz", m.handleStats)
 	engine.Get("/admin/commands", m.handleAdminCommands)
 	engine.Post("/admin/execute", m.handleAdminExecute)
 	m.server = httpserver.NewServer(m.addr, engine, httpserver.WithMaxBodyBytes(opsMaxJSONBodyBytes))
@@ -190,6 +193,27 @@ func (m *OpsMod) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		snapshot = m.metrics.Snapshot()
 	}
 	_, _ = w.Write(metrics.PrometheusText(snapshot))
+}
+
+// statsCollector is what the statslog Mod publishes: one observation of the
+// process — goroutines, heap, entity counts by category and kind, Nest
+// dispatcher figures — as a JSON-marshalable record.
+type statsCollector interface{ CollectStats() any }
+
+// handleStats serves the current runtime observation. It is the JSON twin of
+// the statslog JSONL line and of the gauges on /metrics, for an operator who
+// wants to look at one process right now rather than at a dashboard.
+func (m *OpsMod) handleStats(w http.ResponseWriter, _ *http.Request) {
+	if m.registry == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "stats unavailable: no registry"})
+		return
+	}
+	collector, ok := app.Lookup[statsCollector](m.registry, mods.ModStatsLog)
+	if !ok || collector == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "stats unavailable: statslog mod is not assembled in this process"})
+		return
+	}
+	writeJSON(w, http.StatusOK, collector.CollectStats())
 }
 
 func (m *OpsMod) handleAdminCommands(w http.ResponseWriter, r *http.Request) {

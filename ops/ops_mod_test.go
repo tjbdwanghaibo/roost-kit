@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/tjbdwanghaibo/roost-kit/mods"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/tjbdwanghaibo/roost-core/app"
@@ -158,4 +160,36 @@ func requestWithHeaders(headers map[string]string) *http.Request {
 		request.Header.Set(key, value)
 	}
 	return request
+}
+
+type fakeStatsCollector struct{ record map[string]any }
+
+func (c fakeStatsCollector) CollectStats() any { return c.record }
+
+// /statsz serves the statslog observation as JSON when that Mod is assembled,
+// and says so plainly when it is not — never an empty 200.
+func TestOpsStatszServesTheStatsLogObservation(t *testing.T) {
+	m := NewOpsMod()
+	rec := httptest.NewRecorder()
+	m.handleStats(rec, httptest.NewRequest(http.MethodGet, "/statsz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("without a registry status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	registry := app.NewRegistry(viper.New())
+	m.registry = registry
+	rec = httptest.NewRecorder()
+	m.handleStats(rec, httptest.NewRequest(http.MethodGet, "/statsz", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("without statslog status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	if err := registry.Register(mods.ModStatsLog, fakeStatsCollector{record: map[string]any{"entity": map[string]any{"total": 3}}}); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	m.handleStats(rec, httptest.NewRequest(http.MethodGet, "/statsz", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"total":3`) {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
 }

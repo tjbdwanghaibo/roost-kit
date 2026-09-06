@@ -13,6 +13,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-core/entity"
 	fctx "github.com/tjbdwanghaibo/roost-core/fctx"
+	"github.com/tjbdwanghaibo/roost-core/metrics"
 	"github.com/tjbdwanghaibo/roost-core/nest"
 	"github.com/tjbdwanghaibo/roost-core/worker"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
@@ -87,6 +88,7 @@ type StatsLogMod struct {
 	dir      string
 	filename string
 	interval time.Duration
+	metrics  *metrics.Registry
 
 	mu             sync.Mutex
 	file           *os.File
@@ -145,7 +147,44 @@ func (m *StatsLogMod) Provide(r *app.Registry) error {
 		return nil
 	}
 	m.registry = r
+	if reg, ok := app.Lookup[*metrics.Registry](r, mods.ModMetrics); ok && reg != nil {
+		m.metrics = reg
+	}
 	return r.Register(mods.ModStatsLog, m)
+}
+
+// CollectStats takes one observation now — the same record a tick writes to
+// the JSONL file — for callers such as ops' /statsz. It is typed any so ops
+// need not import this package.
+func (m *StatsLogMod) CollectStats() any {
+	if m == nil {
+		return nil
+	}
+	return m.collect()
+}
+
+// publishGauges mirrors the record into the metrics registry, so what the
+// JSONL file says is also what /metrics and the dashboards say: goroutines,
+// heap, and how many entities of each category and kind this process holds.
+// Memory is observed at process level (heap); an entity's own footprint is
+// not attributable without allocation tracking, so the entity figures are
+// counts.
+func (m *StatsLogMod) publishGauges(record StatsRecord) {
+	if m.metrics == nil {
+		return
+	}
+	m.metrics.SetGauge("runtime.goroutines", nil, int64(record.Runtime.Goroutines))
+	m.metrics.SetGauge("runtime.heap_alloc_bytes", nil, int64(record.Runtime.HeapAllocBytes))
+	m.metrics.SetGauge("runtime.heap_sys_bytes", nil, int64(record.Runtime.HeapSysBytes))
+	m.metrics.SetGauge("runtime.sys_bytes", nil, int64(record.Runtime.SysBytes))
+	m.metrics.SetGauge("runtime.num_gc", nil, int64(record.Runtime.NumGC))
+	m.metrics.SetGauge("entity.count", nil, int64(record.Entity.Total))
+	for category, count := range record.Entity.ByCategory {
+		m.metrics.SetGauge("entity.count_by_category", metrics.Labels{"category": category}, int64(count))
+	}
+	for kind, count := range record.Entity.ByKind {
+		m.metrics.SetGauge("entity.count_by_kind", metrics.Labels{"kind": kind}, int64(count))
+	}
 }
 
 func (m *StatsLogMod) Start() error {
@@ -287,6 +326,7 @@ func (m *StatsLogMod) collect() StatsRecord {
 	if runtime, ok := app.Lookup[interface{ Stats() nest.DispatcherStats }](m.registry, mods.ModNest); ok && runtime != nil {
 		record.Nest = m.formatNestStats(runtime.Stats(), now)
 	}
+	m.publishGauges(record)
 	return record
 }
 

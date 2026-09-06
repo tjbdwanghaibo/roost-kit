@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **运行时观察进指标与 ops**（方向一）。statslog 每次采集把 `runtime.goroutines`、`runtime.heap_alloc_bytes`、
+  `runtime.heap_sys_bytes`、`runtime.sys_bytes`、`runtime.num_gc`、`entity.count`、
+  `entity.count_by_category{category}`、`entity.count_by_kind{kind}` 写成 gauge，ops 的 `/metrics` 与 Grafana 直接
+  可见；ops 新增 `GET /statsz`，返回 statslog 当前一次观察的 JSON（进程未装配 statslog 时 404 并说明，而不是空 200）。
+  内存以进程堆为观察量：实体自身的占用没有分配追踪无法归属，实体侧给数量。`StatsLogMod.CollectStats()` 导出。
+
 ### Fixed
 
 - **nestwal：`TestWALCloseDrainsAdmittedAppends` 在慢机器上偶发 `append 0: nestwal: closed`**（v1.12.2 tag 的
