@@ -10,6 +10,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-service/account"
 	"github.com/tjbdwanghaibo/roost-service/chat"
 	"github.com/tjbdwanghaibo/roost-service/global"
+	"github.com/tjbdwanghaibo/roost-service/global/activity"
 	"github.com/tjbdwanghaibo/roost-service/mail"
 	"github.com/tjbdwanghaibo/roost-service/match"
 	"github.com/tjbdwanghaibo/roost-service/platform"
@@ -29,6 +30,7 @@ func TestEveryClientModDependsOnTheNATSMod(t *testing.T) {
 		"account":  account.NewClientMod(),
 		"chat":     chat.NewClientMod(),
 		"global":   global.NewClientMod(),
+		"activity": activity.NewClientMod(),
 		"mail":     mail.NewClientMod(),
 		"match":    match.NewClientMod(),
 		"platform": platform.NewClientMod(),

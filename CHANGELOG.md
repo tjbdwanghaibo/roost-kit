@@ -22,6 +22,9 @@
 
 ### Fixed
 
+- **`global/activity` 的 ClientMod 漏在上一条修复之外**。手工重生成八个包时漏了第九个带 RPC 传输层的包；
+  把 `tool` 指令对齐到 codegen v1.13.5 后 `go generate ./...` 补上了它，`integration/client_mods_test.go`
+  现在覆盖全部九个客户端——手工枚举漏包正是"用工具而不是用手"的理由。
 - **所有生成的 ClientMod 在真实进程里装配不起来**。八个 `*_rpc_gen.go` 的 `ClientMod.DependsOn` 返回的是
   总线的 capability 名 `bus`，而 app 按 Mod **名字**解析依赖，没有任何 Mod 叫 `bus`：任何把
   `xxx.NewClientMod()` 和 kit 的 nats Mod 装进同一个进程的程序启动即失败——
