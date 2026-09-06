@@ -6,6 +6,10 @@
 
 ### Changed（测试质量）
 
+- **session 的 `Run.Validate`、`Resource.Validate` 与进入请求校验逐条钉住**（U-0056，C2）。回退采样 40 条守卫 32 条全绿。
+  运行：空 id、owner 非正、空 kind、空幂等键、**无截止期（否则持有的资源永远不释放）**、截止期不晚于开始、context 超 64、
+  资源超 8、资源缺 kind / id；进入请求：空 kind、**空幂等键（重试会分配第二个运行）**、context 超限。
+  `validate_promises_test.go` 两条；回退四处守卫各红。
 - **mail 的 `Envelope.Validate` 十二条规则逐条钉住**（U-0054，C2）。脚本回退采样 40 条守卫 32 条全绿，其中信封校验整段无测试：
   空 id、direct 无收件人 / 超 200 人 / 收件人不是玩家、broadcast 带收件人名单、未知 audience、空 / 超长 subject、超长 body /
   attachment、不过期、过期不晚于创建。`validate_promises_test.go` 一条表驱动；回退三处守卫各红。
