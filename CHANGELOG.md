@@ -32,6 +32,9 @@
 
 ### Added
 
+- **toxiproxy 故障矩阵第四切片：Redis 延迟**。`latency` toxic 3s 下 `Acquire` 必须在调用方截止期内返回（首跑抓到上面那条缺陷），
+  超时的 SETNX 按 uncertain 处理、恢复后经 `Release` 协调复用。Redis 半开（`timeout` toxic）与"回复被吞"形态相同，第二切片的
+  两条测试已覆盖，不另开。
 - **toxiproxy 故障矩阵第三切片：NATS 半开**（B-15）。`timeout` toxic（timeout=0）把三个 NATS 代理的下行黑洞化——连接不断、
   字节不回，客户端拿不到 ack 也拿不到错误。测试钉住：提交 + 投影 2.5s 内完成（总线不在持久路径）；outbox 的发布在有界时间内
   失败而不是永远挂住（`PublishFailures ≥ 1`，来自 ping 超时 → EOF）；效果保留在 outbox；网络恢复后**恰好一次**送达——
@@ -62,6 +65,12 @@
 
 ### Fixed
 
+- **Redis 客户端不把调用方的 ctx 截止期带到网络上**（U-0061，C8，故障矩阵第四切片发现）。go-redis 默认 `ContextTimeoutEnabled=false`：
+  命令等待回复只看 `ReadTimeout`，不看 ctx。对 Redis 注入 3s 延迟时，带 500ms 预算的 `Acquire` 等了整整 2s（读超时）才返回——
+  锁之后的每个处理器都跟着停 2s；原有两条丢回复测试的 700ms 预算实际也等了 2s。单机与集群客户端都改为 `ContextTimeoutEnabled: true`
+  （没给截止期的调用方仍由 `ReadTimeout` 兜底）；toxic 夹具改用 kit 自己的构造器，不再手写一份近似的客户端选项。
+  `client_deadline_test.go` 钉住两种客户端的选项；`TestToxicRedisLatencyKeepsAcquireWithinItsDeadline` 对真实延迟断言
+  501ms 返回、恢复后可协调可复用。
 - **v1.12.4 的 `integration` 构建编译不过**：U-0037 的单元测试文件声明了 `waitFor`，与 `failover_integration_test.go`
   （`//go:build integration`）里同名的辅助函数重复。`go test ./...`、`go vet ./...`、pretag 都不带 tag，全绿；只有 CI 的
   `go vet -tags integration` 与 integration job 红——而当时盯的是 `codeql` 工作流的结果（按"main 上最新一次运行"取的，
