@@ -6,6 +6,10 @@
 
 ### Added
 
+- **toxiproxy 故障矩阵（第二切片：Redis）**。隔离环境新增一个 Redis 节点（16379，`--set-proc-title no` 让脚本能按命令行认领自己的进程）并由 toxiproxy
+  代理（26379）。两条 `integration` 锁测试：`Release` 的回复被网络吞掉 → 锁进入 uncertain，同一对象拒绝再 `Acquire`，网络恢复后
+  `Release` 以值守卫删除收敛、锁可复用，且不会误删另一持有者；`SETNX` 的回复被吞掉 → 不重试、按 uncertain 处理，收敛后 key 已释放。
+  这是 U-0012 的契约第一次被真实丢包驱动而非脚本化客户端。CI 与 nightly 安装 `redis-server`；集成脚本包列表加 `./redis`。
 - **toxiproxy 故障矩阵（第一切片）**。隔离环境脚本在装了 `toxiproxy-server` 时为三个 NATS 节点各起一个代理并导出
   `ROOST_DATAENGINE_IT_TOXIPROXY_URL` / `ROOST_DATAENGINE_IT_NATS_PROXIED_URL`；`heal` 同时清空 toxic。两条
   `integration` 标签的网络故障测试：① 对全部 NATS 节点加 3s 延迟，提交与投影仍在 2.5s 内完成（提交点是 WAL +

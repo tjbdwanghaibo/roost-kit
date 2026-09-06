@@ -10,6 +10,8 @@ source "$repo_root/scripts/integration/lib/common.sh"
 source "$repo_root/scripts/integration/lib/mongo.sh"
 # shellcheck source=lib/nats.sh
 source "$repo_root/scripts/integration/lib/nats.sh"
+# shellcheck source=lib/redis.sh
+source "$repo_root/scripts/integration/lib/redis.sh"
 # shellcheck source=lib/toxiproxy.sh
 source "$repo_root/scripts/integration/lib/toxiproxy.sh"
 
@@ -20,7 +22,7 @@ Usage: scripts/integration/dataengine-env.sh COMMAND [ARGS]
 Commands:
   up                         Start and initialize all isolated nodes
   down                       Stop isolated nodes and preserve their data
-  status                     Show Mongo and NATS cluster status
+  status                     Show Mongo, NATS, Redis and toxiproxy status
   reset                      Stop nodes and delete only the fixed test root
   test                       Start nodes and run integration-tagged tests
   fault mongo-primary        Stop the current isolated Mongo primary
@@ -37,7 +39,7 @@ USAGE
 
 preflight() {
 	require_safe_root
-	require_commands mongod mongosh nats-server curl jq nc ps
+	require_commands mongod mongosh nats-server redis-server redis-cli curl jq nc ps
 }
 
 environment_up() {
@@ -45,6 +47,7 @@ environment_up() {
 	mkdir -p "$ROOST_IT_ROOT"
 	mongo_up
 	nats_up
+	redis_up
 	toxiproxy_up
 	write_environment_file
 }
@@ -54,6 +57,7 @@ environment_status() {
 	local status=0
 	mongo_status || status=1
 	nats_status || status=1
+	redis_status || status=1
 	toxiproxy_status
 	return "$status"
 }
@@ -61,6 +65,7 @@ environment_status() {
 environment_down() {
 	require_safe_root
 	toxiproxy_down
+	redis_down
 	nats_down
 	mongo_down
 }
@@ -100,6 +105,7 @@ environment_heal() {
 	preflight
 	mongo_heal
 	nats_heal
+	redis_up
 	toxiproxy_heal
 	write_environment_file
 }
@@ -111,7 +117,7 @@ environment_test() {
 	(
 		cd "$repo_root"
 		GOCACHE="${GOCACHE:-$ROOST_IT_GO_CACHE_DEFAULT}" \
-			go test -tags=integration ./dataengine ./nestwal ./saga ./remoteentity -count=1
+			go test -tags=integration ./dataengine ./nestwal ./saga ./remoteentity ./redis -count=1
 	)
 }
 

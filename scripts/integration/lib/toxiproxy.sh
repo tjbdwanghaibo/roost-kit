@@ -9,6 +9,7 @@
 
 toxiproxy_api_port() { printf '18474\n'; }
 toxiproxy_proxy_port() { printf '%d\n' "$((24221 + $1))"; }
+toxiproxy_redis_port() { printf '26379\n'; }
 toxiproxy_dir() { printf '%s/toxiproxy\n' "$ROOST_IT_ROOT"; }
 toxiproxy_pid_file() { printf '%s/toxiproxy.pid\n' "$(toxiproxy_dir)"; }
 toxiproxy_api() { printf 'http://127.0.0.1:%d\n' "$(toxiproxy_api_port)"; }
@@ -62,6 +63,7 @@ toxiproxy_up() {
 	for index in 1 2 3; do
 		toxiproxy_ensure_proxy "nats-$index" "127.0.0.1:$(toxiproxy_proxy_port "$index")" "127.0.0.1:$(nats_client_port "$index")"
 	done
+	toxiproxy_ensure_proxy "redis" "127.0.0.1:$(toxiproxy_redis_port)" "$(redis_addr)"
 	toxiproxy_heal
 	roost_it_log "toxiproxy ready: $(toxiproxy_api), nats proxies 127.0.0.1:$(toxiproxy_proxy_port 1)-$(toxiproxy_proxy_port 3)"
 }
@@ -92,6 +94,8 @@ toxiproxy_status() {
 		roost_it_log "toxiproxy=absent"
 	fi
 }
+
+toxiproxy_redis_addr() { printf '127.0.0.1:%d\n' "$(toxiproxy_redis_port)"; }
 
 toxiproxy_nats_url() {
 	printf 'nats://127.0.0.1:%d,nats://127.0.0.1:%d,nats://127.0.0.1:%d\n' "$(toxiproxy_proxy_port 1)" "$(toxiproxy_proxy_port 2)" "$(toxiproxy_proxy_port 3)"

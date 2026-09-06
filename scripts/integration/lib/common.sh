@@ -121,9 +121,11 @@ write_environment_file() {
 		printf 'export ROOST_DATAENGINE_IT_ROOT=%q\n' "$ROOST_IT_ROOT"
 		printf 'export ROOST_DATAENGINE_IT_MONGO_URI=%q\n' 'mongodb://127.0.0.1:27117,127.0.0.1:27118,127.0.0.1:27119/?replicaSet=roost-it'
 		printf 'export ROOST_DATAENGINE_IT_NATS_URL=%q\n' 'nats://127.0.0.1:14222,nats://127.0.0.1:14223,nats://127.0.0.1:14224'
+		printf 'export ROOST_DATAENGINE_IT_REDIS_ADDR=%q\n' "$(redis_addr)"
 		if toxiproxy_running; then
 			printf 'export ROOST_DATAENGINE_IT_TOXIPROXY_URL=%q\n' "$(toxiproxy_api)"
 			printf 'export ROOST_DATAENGINE_IT_NATS_PROXIED_URL=%q\n' "$(toxiproxy_nats_url)"
+			printf 'export ROOST_DATAENGINE_IT_REDIS_PROXIED_ADDR=%q\n' "$(toxiproxy_redis_addr)"
 		fi
 	} > "$temporary"
 	mv -f -- "$temporary" "$output"
