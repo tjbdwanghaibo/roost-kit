@@ -6,6 +6,11 @@
 
 ### Changed（测试质量）
 
+- **nestwal 的目录布局与帧头损坏检测钉住**（U-0053，C2，B-20）。此前只有"载荷校验和被改"一条测试。现在：段号不连续
+  （中间缺一段）与"日志从段 1 之后开始却没有任何确认"两种目录损坏在 Open 时以 `ErrCorrupt` 命名拒绝，而不是把空洞
+  当作"什么都没发生"回放；帧头的魔数、头 CRC、长度三个字段各自一条拒绝——魔数和长度被头 CRC 覆盖，测试改字段后
+  **重算 CRC**，让被测规则成为唯一能触发的规则（否则被 CRC 规则掩盖、回退时绿）。`corruption_promises_test.go` 两条；
+  回退五处守卫各红。
 - **saga 消费者的配置拒绝与两条入站解码路径钉住**（U-0051，C2）。脚本回退采样 40 条守卫 37 条全绿。`SubscribeNestStarts`
   的七种不安全配置（空 stream / durable、带通配的前缀、处理超时不小于 AckWait、超 broker 上限的 MaxDeliver /
   MaxAckPending、超一天的 NAK 退避）各按错误文本拒绝且不订阅；`decodeStepCommand` 对 nil / 超 8MiB / 异版本 / 校验失败
