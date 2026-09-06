@@ -6,6 +6,9 @@
 
 ### Added
 
+- **不变量 ③ 删除防复活的真实 Mongo 测试**（remoteentity）：删除提交落库后，旧 fence 在正确 base version 上的迟到写入被
+  `ErrRemoteVersionConflict` 拒绝、meta 仍是 tombstone、数据文档不复现；当前 fence 的写入允许且是新版本（显式重建，不是复活）。
+  故障矩阵四个不变量至此各有至少一条真实依赖上的测试。
 - **toxiproxy 故障矩阵（第二切片：Redis）**。隔离环境新增一个 Redis 节点（16379，`--set-proc-title no` 让脚本能按命令行认领自己的进程）并由 toxiproxy
   代理（26379）。两条 `integration` 锁测试：`Release` 的回复被网络吞掉 → 锁进入 uncertain，同一对象拒绝再 `Acquire`，网络恢复后
   `Release` 以值守卫删除收敛、锁可复用，且不会误删另一持有者；`SETNX` 的回复被吞掉 → 不重试、按 uncertain 处理，收敛后 key 已释放。
