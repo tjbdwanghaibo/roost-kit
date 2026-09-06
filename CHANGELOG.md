@@ -11,6 +11,10 @@
 
 ### Changed（测试质量）
 
+- **dataengine 聚合装载的五种损坏形态钉住**（U-0078，C2）。kit 本地 gap map `dataengine` 19/20 无覆盖。同一 id 两份文档、
+  文档键指向别的实体、构建器把同一资源声明两次、nil DAO 构建器、远端托管实体缺版本包——每种都以 `ErrEntityAggregateCorrupt`
+  点名资源拒绝，且聚合不发布到管理器。装载是"坏的存储答案变成活实体"的唯一入口。`entity_repository_promises_test.go`
+  一条（5 子用例）；回退四处守卫各红。
 - **actionflow 的冻结组与任务独占守卫钉住**（U-0077，C2）。kit 本地 gap map `actionflow` 20/20 无覆盖。冻结的动作组拒绝
   `Start`（不留状态，`Recover` 后恢复）；`StartMission` 对 kind 0 且无默认拒绝；正在运行的任务拒绝被替换时，替换者不被
   构建、当前任务不被结束。`promises_test.go` 两条；回退三处守卫各红。
