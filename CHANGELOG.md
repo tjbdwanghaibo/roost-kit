@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- **gap map 工具**（与 roost-core 同一份拷贝）：`scripts/gapmap/revertsample.py`、`scripts/gapmap.sh`、`nightly-gapmap` 工作流。
+  每日对每个有测试的包做承诺回退采样，报告进 job summary，不阻塞。
+
 ### Changed（测试质量）
 
 - **nestwal 的目录布局与帧头损坏检测钉住**（U-0053，C2，B-20）。此前只有"载荷校验和被改"一条测试。现在：段号不连续
