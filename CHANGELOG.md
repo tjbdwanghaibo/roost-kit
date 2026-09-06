@@ -10,6 +10,9 @@
 
 ### Added
 
+- **room 同步总线与信封汇的参数守卫钉住**（U-0095，C2）：NATS / JetStream 两条同步总线对未初始化、nil 消息、空 topic、nil handler
+  各自拒绝且不触网（用计数替身证明）；`RoomEnvelopeSink` 的注册 / 注销拒绝房间 0、主体 0、跨房间迁移、未注册注销；nil 汇 / nil 帧函数
+  返回 `ErrRoomFrameSinkRequired` 而非解引用。`guards_promises_test.go` 两条；回退二十处守卫各红。
 - **remote_entity 所有权标记 / 兴趣注册 / 后端的参数规则钉住**（U-0093，C2）：`ClaimOwnership` 的 id / ownerSid 为 0、`EnterSharedExpected`
   传入已共享租约、`LeaveSharedExpected` 传入本地租约或 epoch 0 各自本地拒绝且**不落 Redis 一次**；声明冲突与 CAS 失败按文案翻译；
   `renewIfNeeded` 对 consumer 0 / 非法 key / 已过期兴趣返回 `ErrRemoteRejected` 且不登记；`NewBackend` 缺任一半拒绝，非原子存储的事务提交
