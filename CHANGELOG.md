@@ -10,6 +10,9 @@
 
 ### Added
 
+- **account `CreateRole` 提交尾部的三条异常分支钉住**（U-0098，C2）：槽位行在最后一笔写之前消失（`vanished during create`）、分配到的
+  player id 已被占用、分配器返回 0——各自报错且**什么都不留下**：同一账号用同一名字重试即成功。`create_role_race_promises_test.go` 两条；
+  回退三处守卫各红。
 - **platform 回调 / 投递路径的四条订单竞态分支钉住**（U-0097，C2）：插入输给并发者而对方行已消失（`vanished during create`）、
   同一订单号不同载荷（`ErrOrderMismatch`）、认领后标记已投递前行消失、记录失败前行消失——各自以 `ErrConflict` / `ErrOrderMismatch`
   报出，未预留的订单不发货、不计入 accepted。替身嵌入真实内存 store，只在第 N 次 Update 让行消失。`order_race_promises_test.go` 一条；
