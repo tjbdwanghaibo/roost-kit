@@ -11,6 +11,8 @@
 
 ### Changed（测试质量）
 
+- **etcd 本地镜像的配置守卫钉住**（U-0086，C2）。空前缀（会 watch 整个键空间）、缺 Decode / Encode / Clone、重试窗口上限低于
+  下限、nil 客户端各自在构造期拒绝。`local_mirror_promises_test.go` 一条；回退三处守卫各红。
 - **mongotest 替身的拒绝契约钉住**（U-0084，C2）。这个替身替代了 kit / service 绝大多数单元测试里的 Mongo，它的拒绝就是那些
   测试实际锻炼的契约：find-and-modify 三族的未命中返回 `ErrNotFound`（upsert 除外且确实插入）、`FindOne` 未命中、更新不得
   把文档搬到另一个 `_id`（拒绝且原文档不变）、重复 `_id` 插入是 `ErrDuplicateKey`。`contract_promises_test.go` 一条；
