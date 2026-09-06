@@ -10,6 +10,10 @@
 
 ### Added
 
+- **saga 步骤消费者的配置拒绝与 Replay 身份规则钉住**（U-0092，C2）：`SubscribeMongoStep` / `SubscribeDataEngineStep` 对空 stream /
+  durable、带通配的 topic、超代理上限的 MaxDeliver / MaxAckPending / NAK 退避、DataEngine 租约不长于 AckWait、以及任一 nil 依赖
+  各自拒绝且不订阅；`MongoCommandInbox.Replay` 对同 ID 异摘要的回执返回 `ErrIdentityConflict`，未知 ID 返回"无可重放"，nil 收件箱返回
+  `ErrInvalidRecord`；两个收件箱构造器的必填项。`step_consumer_promises_test.go` 三条；回退九处守卫各红。
 - **gap map 工具**（与 roost-core 同一份拷贝）：`scripts/gapmap/revertsample.py`、`scripts/gapmap.sh`、`nightly-gapmap` 工作流。
   每日对每个有测试的包做承诺回退采样，报告进 job summary，不阻塞。
 
