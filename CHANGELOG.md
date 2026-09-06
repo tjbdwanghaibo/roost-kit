@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- **mail `Send` 的三条"世界在脚下变了"分支钉住**（U-0096，C2）：账本认领输给并发者但对方的行已消失（`vanished during create`）、
+  对方账本行指向不存在的邮件（`names missing mail`）、邮件 id 已被占用——各自以 `ErrConflict` 报出，不留下账本没登记的信封，
+  也不计入 accepted。用包装真实内存存储的替身制造竞态。`send_race_promises_test.go` 一条；回退三处守卫各红。
+
 ### Fixed
 
 - **`scripts/gapmap.sh` 收尾不再 `git clean`**（与 roost-core 同一份拷贝）：采样后只还原被改动的已跟踪文件，未跟踪文件原样保留。
