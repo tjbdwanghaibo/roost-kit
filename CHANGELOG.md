@@ -28,6 +28,16 @@
 
 ### Fixed
 
+- **nats：JetStream 的 `Ack` / `Nak` / `Term` 失败被静默丢弃**（U-0036，C5）。处理器成功后 `Ack` 失败（连接已关、消费者被删）
+  只会让 broker 在 AckWait 后重投——at-least-once 允许——但没有任何计数或日志，运维看到的是"处理器反复收到同一条"，
+  和"处理器一直失败"分不开。结算路径抽成 `settleJetStreamDelivery`：失败时计数
+  `nats.jetstream.settle_failures.total{op=ack|nak|nak_delay|term}` 并打一条 Warn（带 subject / stream / consumer / 序号）。
+  `jetstream_settle_test.go` 用可注入失败的 `gojs.Msg` 替身钉住三种 op 各计一次、成功路径不碰计数器。
+- **dataengine：outbox 认领循环对 store 失败只加计数、不出声**（U-0037，C5 / C8）。`RunOnce` 的错误在 `run` 里被 `_, _ =`
+  吞掉；Mongo 停一小时，日志里一小时什么都没有，health 行也只报 `publish_failures`（saga 的 health 行两侧都报）。现在
+  失败**转折**各打一条：连败开始 Warn 一次、恢复 Info 一次（不是每次轮询一条——100ms 间隔下那是每秒十行同样的错），
+  被自身 ctx 取消的轮询不算失败；health 行加 `store_failures=`。三条测试：连败 5 次只有 1 条 Warn、恢复恰好 1 条 Info、
+  停机不留"failing"尾巴；`dataEngineHealthMessage` 两侧都在。
 - **nestwal：`TestWALCloseDrainsAdmittedAppends` 在慢机器上偶发 `append 0: nestwal: closed`**（v1.12.2 tag 的
   Windows 首跑）。测试的前置条件"全部 append 已被接纳"只等了"队列里有一条"，Windows 上 Close 抢在 31 个
   goroutine 到达 `Append` 之前，它们得到的 `ErrClosed` 是合法的。`Stats` 新增 `Admitted`（接纳计数；
