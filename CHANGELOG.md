@@ -6,6 +6,12 @@
 
 ### Changed（测试质量）
 
+- **global 的迁移 / 租约 / 分页请求守卫钉住**（U-0059，C2）。回退采样 33 条守卫 19 条全绿。`BeginMigration`：目标 sid 非正、
+  迁移到"已经在服务它的那个 global"（否则绑定永远停在 Migrating）、路由不存在——并断言拒绝后绑定原样；`ReleaseLease`
+  空 incarnation；`LiveGames` limit 非正 / 超页、候选超页。`guards_promises_test.go` 两条；回退四处守卫各红，
+  "incarnation 必填"一处与内层同文本检查互掩（冗余保留）。
+- **rank 的 `decodeEntry` 严格解码钉住**（U-0060，C2）。字段数不对、value / tie 非十六进制、brief 非 base64——每种都必须
+  是错误而**不是零分**：解码成零再写回就是把真实分数换掉。`member_promises_test.go` 一条；回退字段数守卫变红。
 - **match 的 `Commit` / `Cancel` 拒绝规则钉住**（U-0057，C2）。回退采样 38 条守卫 21 条全绿。`Commit`：票数与队伍规模不等、
   空票号、同一票号出现两次、票不存在、队列从未有人进入、已配对的票再提交报 `ErrConflict`——并断言所有拒绝之后两张票
   仍在等待（整段是一次 CAS，拒绝不留半改）；`Cancel`：空票号、未知票号。"同一 subject 两张票"那条在 CAS 里的规则经公开
