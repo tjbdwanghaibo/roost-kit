@@ -6,6 +6,13 @@
 
 ### Added
 
+- **toxiproxy 故障矩阵（第一切片）**。隔离环境脚本在装了 `toxiproxy-server` 时为三个 NATS 节点各起一个代理并导出
+  `ROOST_DATAENGINE_IT_TOXIPROXY_URL` / `ROOST_DATAENGINE_IT_NATS_PROXIED_URL`；`heal` 同时清空 toxic。两条
+  `integration` 标签的网络故障测试：① 对全部 NATS 节点加 3s 延迟，提交与投影仍在 2.5s 内完成（提交点是 WAL +
+  Mongo，总线不在同步路径上），延迟清除后效果恰好投递一次；② 提交期间对全部 NATS 连接做 reset_peer，提交仍
+  被接纳、outbox 保留效果、网络恢复后恰好投递一次。没装 toxiproxy 时这两条 skip 并说明；`ROOST_IT_TOXIPROXY=1`
+  时缺 toxiproxy 直接失败。新增 `nightly-fault-matrix` 工作流（每日 03:00 Asia/Shanghai，可手动触发）以
+  `ROOST_IT_TOXIPROXY=1` 跑整套集成测试。Mongo 不走代理：副本集发现会把驱动引到成员各自的地址，代理会被绕开。
 - **运行时观察进指标与 ops**（方向一）。statslog 每次采集把 `runtime.goroutines`、`runtime.heap_alloc_bytes`、
   `runtime.heap_sys_bytes`、`runtime.sys_bytes`、`runtime.num_gc`、`entity.count`、
   `entity.count_by_category{category}`、`entity.count_by_kind{kind}` 写成 gauge，ops 的 `/metrics` 与 Grafana 直接

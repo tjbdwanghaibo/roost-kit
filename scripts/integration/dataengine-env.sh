@@ -10,6 +10,8 @@ source "$repo_root/scripts/integration/lib/common.sh"
 source "$repo_root/scripts/integration/lib/mongo.sh"
 # shellcheck source=lib/nats.sh
 source "$repo_root/scripts/integration/lib/nats.sh"
+# shellcheck source=lib/toxiproxy.sh
+source "$repo_root/scripts/integration/lib/toxiproxy.sh"
 
 usage() {
 	cat <<'USAGE'
@@ -24,7 +26,12 @@ Commands:
   fault mongo-primary        Stop the current isolated Mongo primary
   fault nats-leader STREAM   Stop the leader for an isolated JetStream stream
   fault nats-all             Stop all isolated NATS nodes
-  heal                       Restart missing nodes and wait for full health
+  heal                       Restart missing nodes, clear toxics, wait for full health
+
+Network faults: when toxiproxy-server is installed, up also starts toxiproxy
+with one proxy per NATS node and exports ROOST_DATAENGINE_IT_TOXIPROXY_URL and
+ROOST_DATAENGINE_IT_NATS_PROXIED_URL; the Toxic* integration tests use them.
+ROOST_IT_TOXIPROXY=1 makes toxiproxy mandatory (the nightly fault matrix).
 USAGE
 }
 
@@ -38,6 +45,7 @@ environment_up() {
 	mkdir -p "$ROOST_IT_ROOT"
 	mongo_up
 	nats_up
+	toxiproxy_up
 	write_environment_file
 }
 
@@ -46,11 +54,13 @@ environment_status() {
 	local status=0
 	mongo_status || status=1
 	nats_status || status=1
+	toxiproxy_status
 	return "$status"
 }
 
 environment_down() {
 	require_safe_root
+	toxiproxy_down
 	nats_down
 	mongo_down
 }
@@ -90,6 +100,7 @@ environment_heal() {
 	preflight
 	mongo_heal
 	nats_heal
+	toxiproxy_heal
 	write_environment_file
 }
 
