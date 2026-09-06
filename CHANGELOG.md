@@ -11,6 +11,12 @@
 
 ### Changed（测试质量）
 
+- **nats 客户端的错误翻译与参数校验钉住**（U-0079，C2）。gonats 的 timeout / no responders / closed / draining 各翻成
+  roost-core 的哨兵（翻错会让调用方走错分支：把连接关闭当超时重试，或把无响应者当终态放弃）；空 / 带空白的 subject 与
+  queue、nil handler、非正 request 超时、无连接的客户端各自拒绝。`client_promises_test.go` 两条；回退五处守卫各红。
+- **nettransport 会话注册与批量准入的上限钉住**（U-0080，C2）。零会话 id、重复注册、超 `MaxSessions`、关闭后注册各自的哨兵；
+  `AdmitBatch` 逐帧校验：必须指定会话且恰有一条通道、可靠消息超 `MaxReliableBytes`、数据报批超数 / 空包 / 超长——全部在
+  触碰任何队列之前拒绝，压线的帧放行。`admission_promises_test.go` 两条；回退四处守卫各红。
 - **dataengine 聚合装载的五种损坏形态钉住**（U-0078，C2）。kit 本地 gap map `dataengine` 19/20 无覆盖。同一 id 两份文档、
   文档键指向别的实体、构建器把同一资源声明两次、nil DAO 构建器、远端托管实体缺版本包——每种都以 `ErrEntityAggregateCorrupt`
   点名资源拒绝，且聚合不发布到管理器。装载是"坏的存储答案变成活实体"的唯一入口。`entity_repository_promises_test.go`
