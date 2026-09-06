@@ -10,6 +10,10 @@
 
 ### Added
 
+- **remote_entity 所有权标记 / 兴趣注册 / 后端的参数规则钉住**（U-0093，C2）：`ClaimOwnership` 的 id / ownerSid 为 0、`EnterSharedExpected`
+  传入已共享租约、`LeaveSharedExpected` 传入本地租约或 epoch 0 各自本地拒绝且**不落 Redis 一次**；声明冲突与 CAS 失败按文案翻译；
+  `renewIfNeeded` 对 consumer 0 / 非法 key / 已过期兴趣返回 `ErrRemoteRejected` 且不登记；`NewBackend` 缺任一半拒绝，非原子存储的事务提交
+  返回 `ErrRemoteAtomicBatchUnsupported`。`guards_promises_test.go` 三条；回退八处守卫各红。
 - **saga 步骤消费者的配置拒绝与 Replay 身份规则钉住**（U-0092，C2）：`SubscribeMongoStep` / `SubscribeDataEngineStep` 对空 stream /
   durable、带通配的 topic、超代理上限的 MaxDeliver / MaxAckPending / NAK 退避、DataEngine 租约不长于 AckWait、以及任一 nil 依赖
   各自拒绝且不订阅；`MongoCommandInbox.Replay` 对同 ID 异摘要的回执返回 `ErrIdentityConflict`，未知 ID 返回"无可重放"，nil 收件箱返回
