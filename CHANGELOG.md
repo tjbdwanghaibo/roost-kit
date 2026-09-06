@@ -11,6 +11,10 @@
 
 ### Changed（测试质量）
 
+- **mongotest 替身的拒绝契约钉住**（U-0084，C2）。这个替身替代了 kit / service 绝大多数单元测试里的 Mongo，它的拒绝就是那些
+  测试实际锻炼的契约：find-and-modify 三族的未命中返回 `ErrNotFound`（upsert 除外且确实插入）、`FindOne` 未命中、更新不得
+  把文档搬到另一个 `_id`（拒绝且原文档不变）、重复 `_id` 插入是 `ErrDuplicateKey`。`contract_promises_test.go` 一条；
+  回退三处守卫各红。
 - **ai 行为树注册表与文档解析器的每条规则按文本与 JSON 路径钉住**（U-0083，C2）。原 `TestParseTreeFailFast` 只断言错误类别。
   注册：空名 / 空工厂、重复条件、重复动作；解析：schema、缺 root、缺 `node`、未知节点、未知动作 / 条件（带路径）、guard
   缺 condition、repeat 缺 child、cooldown ticks 非正、parallel 未知策略、嵌套超 64 层。`tree_parser_promises_test.go` 两条；
