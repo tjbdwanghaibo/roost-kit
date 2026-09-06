@@ -66,6 +66,11 @@ echo "pretag: building with GOWORK=off"
 GOWORK=off go build ./... >/dev/null
 echo "pretag: vetting with GOWORK=off"
 GOWORK=off go vet ./... >/dev/null
+# The integration-tagged files are compiled by nobody unless the tag is on;
+# a helper declared twice across the two builds is invisible to `go test`
+# and breaks the nightly fault matrix (v1.12.4 shipped exactly that).
+echo "pretag: vetting integration-tagged files"
+GOWORK=off go vet -tags integration ./... >/dev/null
 echo "pretag: checking go.mod / go.sum are tidy"
 GOWORK=off go mod tidy
 git diff --quiet -- go.mod go.sum || fail "go.mod / go.sum are not tidy; commit the result of go mod tidy first (the CI unit job diffs them)"

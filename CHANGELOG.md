@@ -6,6 +6,14 @@
 
 ### Added
 
+- **toxiproxy 故障矩阵第三切片：NATS 半开**（B-15）。`timeout` toxic（timeout=0）把三个 NATS 代理的下行黑洞化——连接不断、
+  字节不回，客户端拿不到 ack 也拿不到错误。测试钉住：提交 + 投影 2.5s 内完成（总线不在持久路径）；outbox 的发布在有界时间内
+  失败而不是永远挂住（`PublishFailures ≥ 1`，来自 ping 超时 → EOF）；效果保留在 outbox；网络恢复后**恰好一次**送达——
+  broker 可能已经存下那条没 ack 的发布，靠 `Msg-Id = effect ID` 去重。首跑发现客户端从 INFO gossip 学到成员真实端口、
+  重连时**绕开了代理**（`reconnected url=…:14222`），于是有了下一条。
+- **`nats.ignore_discovered_servers`**（kit 层配置，默认 false）：让客户端只走配置的 URL，不跟随集群 gossip 重连到成员
+  广告地址。代理、NAT、故障注入这三种部署下没有它，客户端会静默逃出运维配置的路径。集成夹具在代理模式下自动置 true；
+  `options_discovered_test.go` 钉住默认关、开了到达连接选项。
 - **不变量 ③ 删除防复活的真实 Mongo 测试**（remoteentity）：删除提交落库后，旧 fence 在正确 base version 上的迟到写入被
   `ErrRemoteVersionConflict` 拒绝、meta 仍是 tombstone、数据文档不复现；当前 fence 的写入允许且是新版本（显式重建，不是复活）。
   故障矩阵四个不变量至此各有至少一条真实依赖上的测试。
@@ -28,6 +36,10 @@
 
 ### Fixed
 
+- **v1.12.4 的 `integration` 构建编译不过**：U-0037 的单元测试文件声明了 `waitFor`，与 `failover_integration_test.go`
+  （`//go:build integration`）里同名的辅助函数重复。`go test ./...`、`go vet ./...`、pretag 都不带 tag，全绿；只有 CI 的
+  `go vet -tags integration` 与 integration job 红——而当时盯的是 `codeql` 工作流的结果（按"main 上最新一次运行"取的，
+  不是按工作流名）。改名 `waitUntil`；pretag 新增 `go vet -tags integration ./...`；教训记入 T-41。
 - **nats：JetStream 的 `Ack` / `Nak` / `Term` 失败被静默丢弃**（U-0036，C5）。处理器成功后 `Ack` 失败（连接已关、消费者被删）
   只会让 broker 在 AckWait 后重投——at-least-once 允许——但没有任何计数或日志，运维看到的是"处理器反复收到同一条"，
   和"处理器一直失败"分不开。结算路径抽成 `settleJetStreamDelivery`：失败时计数
