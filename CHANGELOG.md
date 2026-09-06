@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`scripts/gapmap.sh` 收尾不再 `git clean`**（与 roost-core 同一份拷贝）：采样后只还原被改动的已跟踪文件，未跟踪文件原样保留。
+
 ### Added
 
 - **gap map 工具**（与 roost-core 同一份拷贝）：`scripts/gapmap/revertsample.py`、`scripts/gapmap.sh`、`nightly-gapmap` 工作流。
