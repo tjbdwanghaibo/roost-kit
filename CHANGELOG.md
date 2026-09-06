@@ -37,6 +37,10 @@
 
 ### Added
 
+- **toxiproxy 故障矩阵第五切片：JetStream RPC 半开**。`nats` 包新增集成测试：用 NatsMod 按生产配置起一条 JetStream 传输的
+  RPC（`nats.rpc.transport=jetstream`），基线调用成功后把三个 NATS 代理的下行黑洞化，带 500ms 截止期的 `CallReliable` 在
+  502ms 返回（publish 阻塞在确认上、被 ctx 截止期打断），网络恢复后同一条 bus 立刻恢复服务。RPC 路径尊重调用方截止期——
+  与 Redis 客户端（U-0061）不同，这条路径本来就对。
 - **toxiproxy 故障矩阵第四切片：Redis 延迟**。`latency` toxic 3s 下 `Acquire` 必须在调用方截止期内返回（首跑抓到上面那条缺陷），
   超时的 SETNX 按 uncertain 处理、恢复后经 `Release` 协调复用。Redis 半开（`timeout` toxic）与"回复被吞"形态相同，第二切片的
   两条测试已覆盖，不另开。
