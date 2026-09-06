@@ -6,6 +6,13 @@
 
 ### Changed（测试质量）
 
+- **saga 消费者的配置拒绝与两条入站解码路径钉住**（U-0051，C2）。脚本回退采样 40 条守卫 37 条全绿。`SubscribeNestStarts`
+  的七种不安全配置（空 stream / durable、带通配的前缀、处理超时不小于 AckWait、超 broker 上限的 MaxDeliver /
+  MaxAckPending、超一天的 NAK 退避）各按错误文本拒绝且不订阅；`decodeStepCommand` 对 nil / 超 8MiB / 异版本 / 校验失败
+  的拒绝；`handleNestStart` 对超大帧、缺 effect id、异 topic、解不开的 start 载荷全部 **permanent** 拒绝且不到达 starter
+  ——用能独立通过的 start 载荷做夹具，让"缺 id / 异 topic"只能由信封规则拦下（否则被载荷解码失败掩盖，首版测试正是如此）；
+  收据 TTL 不能表示为 int32 秒时 `EnsureInfrastructure` 拒绝。超大帧那条守卫是纵深防御：去掉后 JSON 解码仍会拒绝，
+  记为"冗余但保留"。`promises_test.go` 四条；回退六处守卫各红。
 - **remoteentity 写批次的步骤顺序、准入上限、围栏与 Mod 的 sid 要求钉住**（U-0049，C2）。脚本回退采样 40 条守卫 37 条全绿。
   现在钉住：prepare → finalize → commit 之外的每一步都返回 `ErrRemoteCommitNotFinalized`（提交 / 不确定早于 finalize、
   失败或零事务的 outcome、二次 finalize、abort 后再标不确定——二次 finalize 若被放行会在 WAL 已拿到提交后改写它）；
