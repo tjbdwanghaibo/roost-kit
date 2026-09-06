@@ -6,6 +6,12 @@
 
 ### Changed（测试质量）
 
+- **remoteentity 写批次的步骤顺序、准入上限、围栏与 Mod 的 sid 要求钉住**（U-0049，C2）。脚本回退采样 40 条守卫 37 条全绿。
+  现在钉住：prepare → finalize → commit 之外的每一步都返回 `ErrRemoteCommitNotFinalized`（提交 / 不确定早于 finalize、
+  失败或零事务的 outcome、二次 finalize、abort 后再标不确定——二次 finalize 若被放行会在 WAL 已拿到提交后改写它）；
+  超过 `MaxWriteBatch` 报 `batch=N max=M`；记录过释放失败的管理器对新写入围栏并带原因；`RemoteEntityMod` sid 为 0 拒绝
+  初始化。`mongo_committer` 的"事务 id 复用但内容不同"在采样里显示无覆盖，核对后是被 `ApplyRemoteCommitsInTransaction`
+  的同类检查先拦下（冗余互掩，见 U-0035 同型），已有测试。`promises_test.go` 三条；回退五处守卫各红。
 - **nestwal 的选项校验、编解码拒绝、确认围栏、健康阈值与检查点解码逐条钉住**（U-0048，C2）。脚本回退采样 40 条守卫
   37 条全绿。现在按错误文本断言：空目录 / 未知 writer 版本 / 负保留数 / 段小于最大记录四条选项规则；空记录、非法
   durability、条目过多、记录过大、未知 writer 版本五条编码拒绝；`Ack` 对零围栏与"越过日志尾"的拒绝（否则下次重开会跳过
