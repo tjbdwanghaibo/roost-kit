@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### Changed（测试质量）
+
+- **mail 的 `Envelope.Validate` 十二条规则逐条钉住**（U-0054，C2）。脚本回退采样 40 条守卫 32 条全绿，其中信封校验整段无测试：
+  空 id、direct 无收件人 / 超 200 人 / 收件人不是玩家、broadcast 带收件人名单、未知 audience、空 / 超长 subject、超长 body /
+  attachment、不过期、过期不晚于创建。`validate_promises_test.go` 一条表驱动；回退三处守卫各红。
+- **platform 的 `Order.Validate`、`Credential.Validate`、`Verified.Validate` 逐条钉住**（U-0055，C2）。回退采样 39 条 32 条全绿。
+  订单：空 / 超长 order id、玩家 id 非正、空 / 超长 product id、**金额为零或负（"免费送货"守卫）**、无尝试预算；凭证：空
+  channel / open id、超长 open id、**空 secret**（被替换实现接受的形状）；校验结果：空 channel / open id。回退三处各红。
+
 首个版本尚未发布。本仓是 roost 框架的通用服务层，从一个生产业务仓的公共服务抽出——
 但**不是搬运**：对那些服务的逐文件审计得到 62 项发现，收敛到六个在多个互不相关服务
 里各自重现的缺陷模式（见 README）。因此每个包都是重新实现，且每条设计约束都对应一类
