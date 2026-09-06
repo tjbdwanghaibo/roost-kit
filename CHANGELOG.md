@@ -10,6 +10,10 @@
 
 ### Added
 
+- **platform 回调 / 投递路径的四条订单竞态分支钉住**（U-0097，C2）：插入输给并发者而对方行已消失（`vanished during create`）、
+  同一订单号不同载荷（`ErrOrderMismatch`）、认领后标记已投递前行消失、记录失败前行消失——各自以 `ErrConflict` / `ErrOrderMismatch`
+  报出，未预留的订单不发货、不计入 accepted。替身嵌入真实内存 store，只在第 N 次 Update 让行消失。`order_race_promises_test.go` 一条；
+  回退四处守卫各红（其中摘要比较是跨行 `if`，按文本中和）。
 - **mail `Send` 的三条"世界在脚下变了"分支钉住**（U-0096，C2）：账本认领输给并发者但对方的行已消失（`vanished during create`）、
   对方账本行指向不存在的邮件（`names missing mail`）、邮件 id 已被占用——各自以 `ErrConflict` 报出，不留下账本没登记的信封，
   也不计入 accepted。用包装真实内存存储的替身制造竞态。`send_race_promises_test.go` 一条；回退三处守卫各红。
