@@ -10,6 +10,12 @@
 
 ### Added
 
+- **actionflow 的重入检测与运行器守卫钉住**（U-0100，C2，B-24 第二项）。nightly gap map 里 `actionflow` 20 条采样 17 条无覆盖。
+  动作从自己的 Start / Tick / Cancel / 过渡钩子里回调 `Start` 换掉自己，外层调用各自返回 `ErrReentrantMutation`，内层装上的动作是唯一
+  当前项、被换掉的动作不再被 Start；任务在自己的 Start 里再 `StartMission` 被 `starting` 标志拒绝、不构建；配置缺 registry / 组解析器、
+  组未知、id 耗尽（action 与 mission）、空闲时 Cancel、`PlanMission.Start` 缺上下文 / 动作表。`reentrancy_promises_test.go` 三条；
+  回退 17 处守卫 13 红；4 处不红均为防御性重复：`Start` 里 finish 后的二次检查（finish 自己已报重入）、`start` 的 nil 检查（registry
+  已拒绝 nil 构建）、`StartMission` 里 End / changed 钩子后的两处检查（`starting` 标志已挡住重入）。
 - **room 同步总线与信封汇的参数守卫钉住**（U-0095，C2）：NATS / JetStream 两条同步总线对未初始化、nil 消息、空 topic、nil handler
   各自拒绝且不触网（用计数替身证明）；`RoomEnvelopeSink` 的注册 / 注销拒绝房间 0、主体 0、跨房间迁移、未注册注销；nil 汇 / nil 帧函数
   返回 `ErrRoomFrameSinkRequired` 而非解引用。`guards_promises_test.go` 两条；回退二十处守卫各红。
