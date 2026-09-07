@@ -10,6 +10,11 @@
 
 ### Added
 
+- **dataengine 仓库装载路径的其余拒绝钉住**（U-0101，C2，B-24 第三项）。nightly gap map 里 `dataengine` 20 条采样 15 条无覆盖。
+  未注册构建器的 kind、无持久 DAO 的 kind（`ErrEntityAggregateNotFound`）、DAO 不实现 `PersistedDaoLoader`、DAO 解码出别的 id
+  （`ErrEntityAggregateCorrupt`）、存储 schema 与 DAO 不一致且无迁移器（`ErrMigrationUnsupported`）、构造缺 manager / store、nil 仓库
+  `LoadEntity` → `ErrStoreRequired`；每条都不向 manager 发布。`entity_repository_load_promises_test.go` 一条；回退七处守卫各红。
+  迁移三次仍冲突（`ErrMigrationConflict`）一条需要 SystemCommitter 替身，留待 MigrationRunner 单元。
 - **actionflow 的重入检测与运行器守卫钉住**（U-0100，C2，B-24 第二项）。nightly gap map 里 `actionflow` 20 条采样 17 条无覆盖。
   动作从自己的 Start / Tick / Cancel / 过渡钩子里回调 `Start` 换掉自己，外层调用各自返回 `ErrReentrantMutation`，内层装上的动作是唯一
   当前项、被换掉的动作不再被 Start；任务在自己的 Start 里再 `StartMission` 被 `starting` 标志拒绝、不构建；配置缺 registry / 组解析器、
