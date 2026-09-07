@@ -10,6 +10,11 @@
 
 ### Added
 
+- **mail 生成传输层的装配拒绝与 Redis 存储参数守卫钉住**（U-0103，C2，B-24 尾项）。nightly gap map 里 `mail` 20 条采样 16 条无覆盖，
+  其中 8 条在生成的 `mail_rpc_gen.go`，与其余 11 个服务共用同一模板。钉住：`RegisterHandlers` 缺 bus / service、`NewBusClient` 缺 bus、
+  nil 客户端调用、Server 装在只持有客户端的进程（"published but … not"）/ 缺本地实现 / 缺 bus、ClientMod 负超时 / 缺 bus；Redis：nil 客户端、
+  空前缀、空 id（单读 / 批读）、存储信封无 id。`wiring_promises_test.go` 两条；回退 16 处守卫 13 红；"缺 handler / handler 数不符"两条
+  是防模板漂移的构造性守卫（handler 表是字面量），`NewRedisStores` 的 nil 客户端与下游 `NewRedisEnvelopes` 同文案冗余。
 - **account `CreateRole` 提交尾部的三条异常分支钉住**（U-0098，C2）：槽位行在最后一笔写之前消失（`vanished during create`）、分配到的
   player id 已被占用、分配器返回 0——各自报错且**什么都不留下**：同一账号用同一名字重试即成功。`create_role_race_promises_test.go` 两条；
   回退三处守卫各红。
