@@ -1,0 +1,98 @@
+package activity
+
+import "context"
+
+// The transport for Coordinator is generated from the interface below.
+//
+//go:generate go run github.com/tjbdwanghaibo/roost-codegen/cmd/servicerpc -dir .
+
+// Coordinator is the cross-process contract: what ANOTHER process may ask of
+// the activity coordination service.
+//
+// Five of the fourteen Service methods are not here, in two groups.
+//
+// AdvanceExpired, DueDispatches and AttemptDispatch are the owning process's
+// own periodic work: back-stopping an aggregation whose grace window closed,
+// and retrying a dispatch whose delivery failed. They are what the Server's
+// run hook drives. Exposing them would let any process on the bus advance
+// activities it does not own, on a cadence nobody configured.
+//
+// NotifyAudits and AuditOverflow are the diagnostic surface: why was this
+// game's notification refused, and how many audits were dropped. They answer
+// an operator's question, not a game's, and they belong with the operator
+// tools rather than on the path a game server calls in a loop.
+//
+// Every method carries an affinity key derived from the group, and that is the
+// load-bearing decision here rather than a tuning choice. A group's PENDING
+// WINDOW is one versioned entry — it is what bounds the group's open
+// activities and what OpenActivity must be admitted through — so every
+// activity in a group commits through the same compare-and-set. Round-robin
+// routing across replicas turns that into cross-replica contention on one key.
+// Routing by group keeps it in one process, the same reason match routes by
+// queue.
+//
+// The key is Key.Group() rather than Key.String(): routing per ACTIVITY would
+// spread one group's window traffic across instances, which is the contention
+// this is meant to avoid, and is the mistake that looks correct because the
+// activity is the more obvious unit.
+//
+//roost:rpc service_type=activity capability=service.global.activity
+type Coordinator interface {
+	// OpenActivity opens an activity for a named set of game servers. It is
+	// admitted through the group's pending window, so a group cannot
+	// accumulate unbounded open activities.
+	//
+	//roost:rpc affinity=key.Group()
+	OpenActivity(ctx context.Context, key Key, expectedGameSIDs []int32) (activity Activity, err error)
+
+	// LookupActivity reads one activity.
+	//
+	//roost:rpc affinity=key.Group()
+	LookupActivity(ctx context.Context, key Key) (activity Activity, found bool, err error)
+
+	// PendingActivities lists a group's activities that are not finished. It
+	// is the only enumerable index of them, and it is bounded.
+	//
+	//roost:rpc affinity=groupID
+	PendingActivities(ctx context.Context, groupID string, limit int) (keys []Key, err error)
+
+	// NotifyPhase records that one game server reached the phase. This
+	// service never advances an activity from its own clock; a game's
+	// notification is what starts the grace window.
+	//
+	//roost:rpc affinity=key.Group()
+	NotifyPhase(ctx context.Context, key Key, gameSID int32) (activity Activity, err error)
+
+	// ApplyProgress adds a participant's progress, exactly once per
+	// requestID. The reservation is claimed insert-only before the score
+	// moves, so a redelivery cannot count twice.
+	//
+	//roost:rpc affinity=key.Group()
+	ApplyProgress(ctx context.Context, key Key, participantID string, requestID string, delta ProgressDelta) (participant Participant, err error)
+
+	// LookupParticipant reads one participant's accumulated progress.
+	//
+	//roost:rpc affinity=key.Group()
+	LookupParticipant(ctx context.Context, key Key, participantID string) (participant Participant, found bool, err error)
+
+	// Reservation reads what one requestID already did. It is how a caller
+	// that lost a response learns whether its progress landed, instead of
+	// retrying blind or giving up.
+	//
+	//roost:rpc affinity=key.Group()
+	Reservation(ctx context.Context, key Key, participantID string, requestID string) (reservation ProgressReservation, found bool, err error)
+
+	// LookupDispatch reads the result delivery owed to one game server.
+	//
+	//roost:rpc affinity=key.Group()
+	LookupDispatch(ctx context.Context, key Key, gameSID int32) (dispatch Dispatch, found bool, err error)
+
+	// AckDispatch is a game server confirming it applied the result. The
+	// token is required, so an ack cannot be forged from the activity key
+	// alone and a stale ack cannot close a redelivered dispatch.
+	//
+	//roost:rpc affinity=key.Group()
+	AckDispatch(ctx context.Context, key Key, gameSID int32, token string) (dispatch Dispatch, err error)
+}
+
+var _ Coordinator = (*Service)(nil)
