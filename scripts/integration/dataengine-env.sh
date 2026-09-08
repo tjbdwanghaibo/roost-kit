@@ -119,6 +119,21 @@ environment_test() {
 		GOCACHE="${GOCACHE:-$ROOST_IT_GO_CACHE_DEFAULT}" \
 			go test -tags=integration ./dataengine ./saga ./remoteentity ./nats -count=1
 	)
+	# The Redis fault suites moved to roost-core with the redis client
+	# (consolidation P2-②); run them against the same environment when a
+	# core checkout is at hand (sibling directory by default, ROOST_CORE_DIR
+	# to override). Absent checkout = skipped loudly, never silently green.
+	local core_dir="${ROOST_CORE_DIR:-$repo_root/../roost-core}"
+	if [[ -f "$core_dir/go.mod" ]]; then
+		(
+			cd "$core_dir"
+			ROOST_REDIS_TEST_ADDR="$ROOST_DATAENGINE_IT_REDIS_ADDR" \
+				GOCACHE="${GOCACHE:-$ROOST_IT_GO_CACHE_DEFAULT}" \
+				go test -tags=integration ./redis -count=1
+		)
+	else
+		echo "[roost-it] roost-core checkout not found at $core_dir; core redis fault suites NOT run" >&2
+	fi
 }
 
 case "${1:-}" in

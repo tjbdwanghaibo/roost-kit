@@ -170,8 +170,18 @@ jobs:
           nats-server --version
       - name: environment script self-test
         run: scripts/integration/dataengine_env_test.sh
-      - name: integration-tagged tests on isolated Mongo replica set + NATS JetStream cluster
+      - name: check out roost-core for its Redis fault suites
+        # The suites moved to core with the redis client; the env script runs
+        # them from ROOST_CORE_DIR against the same isolated Redis + toxiproxy.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: tjbdwanghaibo/roost-core
+          ref: ${{ inputs.core_ref || (github.ref_name == 'consolidation' && 'consolidation' || 'main') }}
+          path: roost-core-checkout
+      - name: integration-tagged tests on isolated Mongo replica set + NATS JetStream cluster (+ core Redis fault suites)
         run: scripts/integration/dataengine-env.sh test
+        env:
+          ROOST_CORE_DIR: ${{ github.workspace }}/roost-core-checkout
       - name: node status (on failure)
         if: failure()
         run: scripts/integration/dataengine-env.sh status || true
