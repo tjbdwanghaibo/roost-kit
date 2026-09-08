@@ -17,8 +17,8 @@ import (
 // RedisMod implements app.Mod for Redis connectivity.
 // It creates IRedis and IDistLockFactory instances and registers them in the Registry.
 type RedisMod struct {
-	client *redisClient
-	locker *distLockFactory
+	client *fredis.Client
+	locker *fredis.DistLockFactory
 	cfg    *fredis.Config
 }
 
@@ -54,8 +54,8 @@ func (m *RedisMod) Init(cfg *viper.Viper) error {
 }
 
 func (m *RedisMod) Provide(r *app.Registry) error {
-	m.client = newRedisClient(m.cfg)
-	m.locker = newDistLockFactory(m.client.rdb)
+	m.client = fredis.NewRedisClient(m.cfg)
+	m.locker = fredis.NewDistLockFactory(m.client.Raw())
 	healthReg, ok := app.Lookup[*health.Registry](r, mods.ModHealth)
 	if !ok || healthReg == nil {
 		return fmt.Errorf("redis mod: capability %q not found", mods.ModHealth)

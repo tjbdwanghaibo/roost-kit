@@ -7,6 +7,7 @@ import (
 	fctx "github.com/tjbdwanghaibo/roost-core/fctx"
 	"github.com/tjbdwanghaibo/roost-core/health"
 	fnats "github.com/tjbdwanghaibo/roost-core/nats"
+	coreroom "github.com/tjbdwanghaibo/roost-core/room"
 	fsyncbus "github.com/tjbdwanghaibo/roost-core/syncbus"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 	"log/slog"
@@ -50,7 +51,7 @@ type RoomMod struct {
 	localSid  int32
 	prefix    string
 	transport string
-	jsCfg     JetStreamSyncConfig
+	jsCfg     coreroom.JetStreamSyncConfig
 }
 
 func NewRoomMod(localSid int32) *RoomMod {
@@ -67,7 +68,7 @@ func (m *RoomMod) Init(cfg *viper.Viper) error {
 		m.prefix = "roost.room"
 	}
 	m.transport = strings.ToLower(strings.TrimSpace(cfgGetString(cfg, "transport")))
-	m.jsCfg = JetStreamSyncConfig{
+	m.jsCfg = coreroom.JetStreamSyncConfig{
 		LocalSid:     m.localSid,
 		Prefix:       m.prefix,
 		Stream:       cfgGetString(cfg, "stream"),
@@ -94,7 +95,7 @@ func (m *RoomMod) Provide(r *app.Registry) error {
 		if !ok || js == nil {
 			return fmt.Errorf("room mod: required capability %q not found", mods.ModNatsJetStream)
 		}
-		bus, err := NewJetStreamSyncBus(fctx.BaseContext(), js, m.jsCfg)
+		bus, err := coreroom.NewJetStreamSyncBus(fctx.BaseContext(), js, m.jsCfg)
 		if err != nil {
 			return err
 		}
@@ -106,7 +107,7 @@ func (m *RoomMod) Provide(r *app.Registry) error {
 	if !ok {
 		return fmt.Errorf("room mod: required capability %q not found", mods.ModNats)
 	}
-	m.bus = NewNatsSyncBus(client, m.localSid, m.prefix)
+	m.bus = coreroom.NewNatsSyncBus(client, m.localSid, m.prefix)
 	m.registerHealth(healthReg, "nats")
 	return r.Register(mods.ModRoom, m.bus)
 }

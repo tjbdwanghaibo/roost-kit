@@ -3,6 +3,7 @@ package remoteentity
 import (
 	"context"
 	"fmt"
+	coreremote "github.com/tjbdwanghaibo/roost-core/remoteentity"
 	"log/slog"
 	"time"
 
@@ -22,14 +23,14 @@ import (
 // RemoteEntityMod implements app.Mod for remote entity lifecycle management.
 // Depends on: redis mod (for versioned locks and marker storage).
 type RemoteEntityMod struct {
-	mgr         *remoteEntityManager
-	cfg         *Config
+	mgr         *coreremote.Manager
+	cfg         *coreremote.Config
 	localSid    int32
 	registry    *app.Registry
 	snapshotRep *mirror.Replicator
 	interestRep *mirror.Replicator
 	backend     entity.IRemoteEntityBackend
-	atomicStore AtomicCommitStore
+	atomicStore coreremote.AtomicCommitStore
 	mongoLoader entity.IRemoteEntityLoader
 	mongoConfig mongoBackendConfig
 }
@@ -68,7 +69,7 @@ func (m *RemoteEntityMod) Init(cfg *viper.Viper) error {
 	if cfg == nil {
 		cfg = viper.New()
 	}
-	m.cfg = DefaultConfig()
+	m.cfg = coreremote.DefaultConfig()
 	if m.localSid == 0 {
 		m.localSid = cfg.GetInt32("sid")
 	}
@@ -173,23 +174,23 @@ func (m *RemoteEntityMod) Provide(r *app.Registry) error {
 	if !ok {
 		return fmt.Errorf("remote_entity mod: required capability %q not found", mods.ModRedis)
 	}
-	lockFactory := newVersionedLockFactory(redis)
+	lockFactory := coreremote.NewVersionedLockFactory(redis)
 
-	m.mgr = newRemoteEntityManager(lockFactory, m.cfg, m.localSid, newRemoteSnapshotL2Store(redis, m.cfg.SnapshotL2TTL))
+	m.mgr = coreremote.NewManager(lockFactory, m.cfg, m.localSid, coreremote.NewSnapshotL2Store(redis, m.cfg.SnapshotL2TTL))
 	if err := m.mgr.LockFactoryError(); err != nil {
 		m.mgr = nil
 		return err
 	}
 	if failure, ok := app.Lookup[*app.RuntimeFailure](r, app.ModRuntimeFailure); ok && failure != nil {
-		m.mgr.setFatalHandler(func(err error) { failure.Fail(fmt.Errorf("remote_entity fatal release failure: %w", err)) })
+		m.mgr.SetFatalHandler(func(err error) { failure.Fail(fmt.Errorf("remote_entity fatal release failure: %w", err)) })
 	}
 	if m.backend == nil && m.mongoLoader != nil {
 		mongoClient, ok := app.Lookup[fmongo.IMongo](r, mods.ModMongo)
 		if !ok || mongoClient == nil {
 			return fmt.Errorf("remote_entity mod: required capability %q not found", mods.ModMongo)
 		}
-		storage := NewMongoCommitter(mongoClient, m.mongoConfig.database, m.localSid, m.mongoConfig.transactionTTL)
-		backend, err := NewBackend(m.mongoLoader, storage)
+		storage := coreremote.NewMongoCommitter(mongoClient, m.mongoConfig.database, m.localSid, m.mongoConfig.transactionTTL)
+		backend, err := coreremote.NewBackend(m.mongoLoader, storage)
 		if err != nil {
 			return err
 		}
@@ -197,7 +198,7 @@ func (m *RemoteEntityMod) Provide(r *app.Registry) error {
 	}
 	if m.backend != nil {
 		m.mgr.SetBackend(m.backend)
-		m.atomicStore, _ = m.backend.(AtomicCommitStore)
+		m.atomicStore, _ = m.backend.(coreremote.AtomicCommitStore)
 		if m.atomicStore == nil {
 			return fmt.Errorf("remote_entity mod: backend must support caller-owned atomic transactions")
 		}
@@ -207,7 +208,7 @@ func (m *RemoteEntityMod) Provide(r *app.Registry) error {
 	}
 
 	// Set up the authoritative fenced ownership store (Redis-based).
-	ownership := newRedisMarker(redis, "")
+	ownership := coreremote.NewRedisMarker(redis, "")
 	m.mgr.SetOwnershipStore(ownership)
 
 	// Register into app registry
@@ -240,32 +241,22 @@ func (m *RemoteEntityMod) checkHealth(context.Context) health.Result {
 	if m == nil || m.mgr == nil {
 		return health.Result{Status: health.StatusFail, Message: "not initialized"}
 	}
-	if err := m.mgr.fatalError(); err != nil {
+	if err := m.mgr.FatalError(); err != nil {
 		return health.Result{Status: health.StatusFail, Message: "fatal release failure", Err: err}
 	}
-	m.mgr.remote.localInterestMu.Lock()
-	localInterests := len(m.mgr.remote.localInterests)
-	m.mgr.remote.localInterestMu.Unlock()
-	m.mgr.remote.txMu.Lock()
-	transactions := len(m.mgr.remote.txs)
-	activeTransactions := 0
-	for _, tracker := range m.mgr.remote.txs {
-		if !tracker.closed {
-			activeTransactions++
-		}
-	}
-	m.mgr.remote.txMu.Unlock()
+	stats := m.mgr.Stats()
+	localInterests, transactions, activeTransactions := stats.LocalInterests, stats.Transactions, stats.ActiveTransactions
 	if (m.cfg.SnapshotInterestKeys > 0 && localInterests >= m.cfg.SnapshotInterestKeys) || (m.cfg.TransactionTrackLimit > 0 && activeTransactions >= m.cfg.TransactionTrackLimit) {
-		return health.Result{Status: health.StatusFail, Message: fmt.Sprintf("capacity exhausted wrappers=%d local_interests=%d transactions=%d active_transactions=%d", m.mgr.wrapperCount(), localInterests, transactions, activeTransactions)}
+		return health.Result{Status: health.StatusFail, Message: fmt.Sprintf("capacity exhausted wrappers=%d local_interests=%d transactions=%d active_transactions=%d", m.mgr.Stats().Wrappers, localInterests, transactions, activeTransactions)}
 	}
-	return health.Result{Status: health.StatusOK, Message: fmt.Sprintf("wrappers=%d capacity=%d local_interests=%d transactions=%d active_transactions=%d", m.mgr.wrapperCount(), m.cfg.WrapperCapacity, localInterests, transactions, activeTransactions)}
+	return health.Result{Status: health.StatusOK, Message: fmt.Sprintf("wrappers=%d capacity=%d local_interests=%d transactions=%d active_transactions=%d", m.mgr.Stats().Wrappers, m.cfg.WrapperCapacity, localInterests, transactions, activeTransactions)}
 }
 
 func (m *RemoteEntityMod) Start() error {
 	if m == nil || m.mgr == nil {
 		return fmt.Errorf("remote_entity mod: not provided")
 	}
-	if err := m.mgr.validateDependencies(); err != nil {
+	if err := m.mgr.ValidateDependencies(); err != nil {
 		return fmt.Errorf("remote_entity mod: %w", err)
 	}
 	if err := m.bindSyncer(); err != nil {
@@ -277,8 +268,8 @@ func (m *RemoteEntityMod) Start() error {
 			m.stopReplicators()
 		}
 	}()
-	m.mgr.sealDependencies()
-	if initializer, ok := m.mgr.backend.(entity.IRemoteStorageInitializer); ok {
+	m.mgr.SealDependencies()
+	if initializer, ok := m.mgr.Backend().(entity.IRemoteStorageInitializer); ok {
 		storageCtx, cancel := context.WithTimeout(fctx.BaseContext(), m.cfg.OpTimeout)
 		err := initializer.EnsureRemoteStorage(storageCtx)
 		cancel()
@@ -287,12 +278,12 @@ func (m *RemoteEntityMod) Start() error {
 		}
 	}
 	recoverCtx, cancel := context.WithTimeout(fctx.BaseContext(), m.cfg.OpTimeout)
-	err := m.mgr.recoverRemoteOutbox(recoverCtx)
+	err := m.mgr.RecoverOutbox(recoverCtx)
 	cancel()
 	if err != nil {
 		return err
 	}
-	m.mgr.startRemoteFinalizer()
+	m.mgr.StartFinalizer()
 	started = true
 	slog.Info("remote_entity mod: started",
 		"sid", m.localSid,
@@ -315,7 +306,7 @@ func (m *RemoteEntityMod) StopWithContext(ctx context.Context) error {
 	}
 	var err error
 	if m.mgr != nil {
-		err = m.mgr.stopRemoteFinalizer(ctx)
+		err = m.mgr.StopFinalizer(ctx)
 	}
 	m.stopReplicators()
 	slog.Info("remote_entity mod: stopped")
@@ -330,12 +321,7 @@ func (m *RemoteEntityMod) bindSyncer() error {
 	if !ok {
 		return fmt.Errorf("remote_entity mod: required capability %q not found", mods.ModRoom)
 	}
-	snapshotRep := mirror.New(bus, syncTopicRemoteSnapshot, remoteSnapshotReplicaStore{mgr: m.mgr})
-	interestRep := mirror.New(bus, syncTopicRemoteInterest, remoteInterestReplicaStore{mgr: m.mgr})
-	syncer := newRemoteSyncer(snapshotRep)
-	syncer.mgr = m.mgr
-	syncer.interestRep = interestRep
-	m.mgr.setSyncer(syncer)
+	snapshotRep, interestRep := m.mgr.BindSync(bus)
 
 	if err := snapshotRep.Start(); err != nil {
 		return fmt.Errorf("remote_entity mod: start snapshot replica: %w", err)

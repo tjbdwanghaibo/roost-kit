@@ -18,7 +18,7 @@ import (
 type MongoMod struct {
 	client fmongo.IMongo
 	cfg    *fmongo.Config
-	policy IndexMigrationPolicy
+	policy fmongo.IndexMigrationPolicy
 }
 
 func NewMongoMod() *MongoMod {
@@ -52,7 +52,7 @@ func (m *MongoMod) Init(cfg *viper.Viper) error {
 	if cfg.IsSet("mongo.require_replica_set") {
 		m.cfg.RequireReplicaSet = cfg.GetBool("mongo.require_replica_set")
 	}
-	m.policy = IndexMigrationPolicy{
+	m.policy = fmongo.IndexMigrationPolicy{
 		AllowRecreate: cfg.GetBool("mongo.index.allow_recreate"),
 	}
 
@@ -61,7 +61,7 @@ func (m *MongoMod) Init(cfg *viper.Viper) error {
 
 func (m *MongoMod) Provide(r *app.Registry) error {
 	// mongo-driver v2 Connect does not dial immediately; Ping verifies connectivity.
-	cli, err := newMongoClient(m.cfg, m.policy)
+	cli, err := fmongo.NewClient(m.cfg, m.policy)
 	if err != nil {
 		return err
 	}
@@ -91,8 +91,8 @@ func (m *MongoMod) Start() error {
 	if err := m.client.Ping(ctx); err != nil {
 		return err
 	}
-	if client, ok := m.client.(*mongoClient); ok {
-		if err := client.validateDeployment(ctx); err != nil {
+	if client, ok := m.client.(*fmongo.Client); ok {
+		if err := client.ValidateDeployment(ctx); err != nil {
 			return err
 		}
 	}

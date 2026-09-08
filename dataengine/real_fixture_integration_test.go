@@ -5,6 +5,7 @@ package dataengine
 import (
 	"context"
 	"fmt"
+	engine "github.com/tjbdwanghaibo/roost-core/dataengine/engine"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -36,7 +37,7 @@ type realFixture struct {
 	effectSub string
 	mongo     fmongo.IMongo
 	jetStream fnats.IJetStream
-	runtime   *Runtime
+	runtime   *engine.Runtime
 	mongoMod  *kitmongo.MongoMod
 	natsMod   *kitnats.NatsMod
 	dataMod   *Mod

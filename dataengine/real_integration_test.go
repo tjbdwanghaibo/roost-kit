@@ -7,24 +7,25 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	engine "github.com/tjbdwanghaibo/roost-core/dataengine/engine"
 	"strconv"
 	"testing"
 	"time"
 
 	coredata "github.com/tjbdwanghaibo/roost-core/dataengine"
 	corenest "github.com/tjbdwanghaibo/roost-core/nest"
-	"github.com/tjbdwanghaibo/roost-kit/nestwal"
+	"github.com/tjbdwanghaibo/roost-core/nestwal"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-type projectionOnlyMongoStore struct{ delegate ProjectionStore }
+type projectionOnlyMongoStore struct{ delegate engine.ProjectionStore }
 
 func (store *projectionOnlyMongoStore) Project(ctx context.Context, record coredata.CommitRecord) error {
 	return store.delegate.Project(ctx, record)
 }
 
 type blockingProjectionOnlyMongoStore struct {
-	delegate  ProjectionStore
+	delegate  engine.ProjectionStore
 	attempted chan struct{}
 	release   chan struct{}
 }
@@ -66,9 +67,9 @@ func TestRealMultiDocumentReceiptAndOutboxAreAtomic(t *testing.T) {
 
 	assertDocumentVersion(t, fx, "players", 101, 1)
 	assertDocumentVersion(t, fx, "inventories", 101, 1)
-	assertCollectionCount(t, fx, receiptCollection, 1)
-	assertCollectionCount(t, fx, outboxCollection, 1)
-	assertCollectionCount(t, fx, transactionCollection, 1)
+	assertCollectionCount(t, fx, engine.ReceiptCollection, 1)
+	assertCollectionCount(t, fx, engine.OutboxCollection, 1)
+	assertCollectionCount(t, fx, engine.TransactionCollection, 1)
 }
 
 func TestRealMultiDocumentFailureRollsBackEarlierMutation(t *testing.T) {
@@ -95,8 +96,8 @@ func TestRealMultiDocumentFailureRollsBackEarlierMutation(t *testing.T) {
 		{Key: coredata.DocumentKey{Database: fx.database, Resource: "a_players", ID: 202}, Kind: coredata.MutationPatch, ExpectedVersion: 1, NextVersion: 2, Mask: 1, Schema: 1, Codec: "bson-v2", Patch: coredata.FieldPatch{SetBSON: patch}},
 		{Key: coredata.DocumentKey{Database: fx.database, Resource: "z_inventories", ID: 202}, Kind: coredata.MutationPatch, ExpectedVersion: 2, NextVersion: 3, Mask: 1, Schema: 1, Codec: "bson-v2", Patch: coredata.FieldPatch{SetBSON: conflict}},
 	})
-	if err := fx.runtime.Store.Project(fx.context(), record); !errors.Is(err, ErrProjectionConflict) {
-		t.Fatalf("err=%v, want ErrProjectionConflict", err)
+	if err := fx.runtime.Store.Project(fx.context(), record); !errors.Is(err, engine.ErrProjectionConflict) {
+		t.Fatalf("err=%v, want engine.ErrProjectionConflict", err)
 	}
 
 	doc := findDocument(t, fx, "a_players", 202)
@@ -122,8 +123,8 @@ func TestRealPatchConflictFencesWithoutFullFallback(t *testing.T) {
 		Key: coredata.DocumentKey{Database: fx.database, Resource: "players", ID: 303}, Kind: coredata.MutationPatch,
 		ExpectedVersion: 2, NextVersion: 3, Mask: 1, Schema: 1, Codec: "bson-v2", Patch: coredata.FieldPatch{SetBSON: set},
 	}})
-	if err := fx.runtime.Store.Project(fx.context(), stale); !errors.Is(err, ErrProjectionConflict) {
-		t.Fatalf("err=%v, want ErrProjectionConflict", err)
+	if err := fx.runtime.Store.Project(fx.context(), stale); !errors.Is(err, engine.ErrProjectionConflict) {
+		t.Fatalf("err=%v, want engine.ErrProjectionConflict", err)
 	}
 	doc := findDocument(t, fx, "players", 303)
 	if doc["name"] != "authoritative" || documentVersion(t, doc) != 1 {
@@ -145,7 +146,7 @@ func TestRealLoadAndMigrationRestoresTrackerVersion(t *testing.T) {
 		t.Fatalf("load docs=%d err=%v", len(docs), err)
 	}
 	dao := &realMigrationDAO{}
-	runner, err := NewMigrationRunner(fx.runtime.Projector)
+	runner, err := engine.NewMigrationRunner(fx.runtime.Projector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,12 +249,15 @@ func TestRealMixedProjectionSegmentsPreserveOrder(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	projector, err := NewProjector(wal, fx.runtime.Store, ProjectorOptions{CloseWAL: false, IdlePoll: time.Hour})
+	projector, err := engine.NewProjector(wal, fx.runtime.Store, engine.ProjectorOptions{CloseWAL: false, IdlePoll: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
-	projector.cancel()
-	awaitChan(t, projector.done, "the projector to finish its pass")
+	// Close cancels the loop and waits for it to finish; the WAL stays open
+	// (CloseWAL is false) so the records below can still be appended.
+	if err := projector.Close(context.Background()); err != nil {
+		t.Fatalf("stop projector before appending: %v", err)
+	}
 	for _, record := range []coredata.CommitRecord{first, second, third} {
 		if _, err := wal.Append(fx.context(), record); err != nil {
 			t.Fatal(err)
@@ -264,9 +268,9 @@ func TestRealMixedProjectionSegmentsPreserveOrder(t *testing.T) {
 	}
 
 	assertDocumentVersion(t, fx, "mixed_entities", 4101, 3)
-	assertCollectionCount(t, fx, receiptCollection, 1)
-	assertCollectionCount(t, fx, outboxCollection, 1)
-	assertCollectionCount(t, fx, transactionCollection, 1)
+	assertCollectionCount(t, fx, engine.ReceiptCollection, 1)
+	assertCollectionCount(t, fx, engine.OutboxCollection, 1)
+	assertCollectionCount(t, fx, engine.TransactionCollection, 1)
 	replayed := 0
 	if err := wal.Replay(fx.context(), func(corenest.CommitFence, coredata.CommitRecord) error {
 		replayed++
@@ -305,7 +309,7 @@ func TestRealProjectionOnlyMongoAckFailureRestartPreservesSameEntityOrder(t *tes
 		t.Fatal(err)
 	}
 	firstStore := &projectionOnlyMongoStore{delegate: fx.runtime.Store}
-	firstProjector, err := NewProjector(wal, firstStore, ProjectorOptions{
+	firstProjector, err := engine.NewProjector(wal, firstStore, engine.ProjectorOptions{
 		ReplayBatchRecords: 16, ReplayBatchBytes: 4 << 20, CloseWAL: false, IdlePoll: time.Hour,
 	})
 	if err != nil {
@@ -340,7 +344,7 @@ func TestRealProjectionOnlyMongoAckFailureRestartPreservesSameEntityOrder(t *tes
 	restartStore := &blockingProjectionOnlyMongoStore{
 		delegate: fx.runtime.Store, attempted: make(chan struct{}, 1), release: make(chan struct{}),
 	}
-	restarted, err := NewProjector(reopened, restartStore, ProjectorOptions{
+	restarted, err := engine.NewProjector(reopened, restartStore, engine.ProjectorOptions{
 		RetryMin: time.Hour, RetryMax: time.Hour, IdlePoll: time.Hour,
 		ReplayBatchRecords: 16, ReplayBatchBytes: 4 << 20, CloseWAL: false,
 	})
@@ -399,7 +403,7 @@ func TestRealMongoMixedRatioWALReplayAckThroughput(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			projector, err := NewProjector(wal, fx.runtime.Store, ProjectorOptions{
+			projector, err := engine.NewProjector(wal, fx.runtime.Store, engine.ProjectorOptions{
 				ReplayBatchRecords: recordCount, ReplayBatchBytes: 64 << 20,
 				CloseWAL: false, IdlePoll: time.Hour,
 			})
@@ -436,7 +440,7 @@ func TestRealMongoMixedRatioWALReplayAckThroughput(t *testing.T) {
 				assertDocumentVersion(t, fx, resource, int64(entityIndex+1), recordCount/entityCount)
 			}
 			totalSpecial += specialCount
-			assertCollectionCount(t, fx, receiptCollection, int64(totalSpecial))
+			assertCollectionCount(t, fx, engine.ReceiptCollection, int64(totalSpecial))
 			t.Logf("backend=real MongoDB + file WAL workload=%s records=%d entities=%d special=%d checkpoint_acks=%d elapsed=%s throughput=%.0f records/s",
 				workload.name, recordCount, entityCount, specialCount, ackCalls, elapsed, float64(recordCount)/elapsed.Seconds())
 			if err := projector.Close(context.Background()); err != nil {
@@ -526,7 +530,7 @@ func TestRealSagaReceiptTransactionThroughput(t *testing.T) {
 	}
 	elapsed := time.Since(started)
 	assertDocumentVersion(t, fx, "saga_entities", 701, records)
-	assertCollectionCount(t, fx, transactionCollection, records)
-	assertCollectionCount(t, fx, receiptCollection, records)
+	assertCollectionCount(t, fx, engine.TransactionCollection, records)
+	assertCollectionCount(t, fx, engine.ReceiptCollection, records)
 	t.Logf("Saga receipt transactions: %s (%.0f records/s)", elapsed, float64(records)/elapsed.Seconds())
 }

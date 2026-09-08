@@ -21,9 +21,9 @@ type Mod struct {
 	stateMu     sync.RWMutex
 	definitions []coresaga.Definition
 	config      modConfig
-	store       *MongoStore
+	store       *coresaga.MongoStore
 	engine      *coresaga.Engine
-	transport   *JetStreamPublisher
+	transport   *coresaga.JetStreamPublisher
 	resultSub   fnats.IJetStreamSubscription
 	startSub    fnats.IJetStreamSubscription
 	cancel      context.CancelFunc
@@ -34,7 +34,7 @@ type Mod struct {
 }
 
 type modConfig struct {
-	store          MongoStoreOptions
+	store          coresaga.MongoStoreOptions
 	engine         coresaga.Options
 	prefix         string
 	stream         fnats.JetStreamConfig
@@ -45,7 +45,7 @@ type modConfig struct {
 	maxPending     int
 	nakMin         time.Duration
 	nakMax         time.Duration
-	start          NestStartConsumerConfig
+	start          coresaga.NestStartConsumerConfig
 }
 
 func NewMod(definitions ...coresaga.Definition) *Mod {
@@ -100,10 +100,10 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 		durable = "roost-saga-coordinator"
 	}
 	m.config = modConfig{
-		store:  MongoStoreOptions{Database: stringDefault(cfg.GetString("saga.database"), "saga"), SagaCollection: cfg.GetString("saga.collections.sagas"), OutboxCollection: cfg.GetString("saga.collections.outbox"), CompletionCollection: cfg.GetString("saga.collections.completions"), OperationCollection: cfg.GetString("saga.collections.operations"), CompletionReceiptTTL: durationDefault(cfg.GetDuration("saga.completion_receipt_ttl"), 30*24*time.Hour)},
+		store:  coresaga.MongoStoreOptions{Database: stringDefault(cfg.GetString("saga.database"), "saga"), SagaCollection: cfg.GetString("saga.collections.sagas"), OutboxCollection: cfg.GetString("saga.collections.outbox"), CompletionCollection: cfg.GetString("saga.collections.completions"), OperationCollection: cfg.GetString("saga.collections.operations"), CompletionReceiptTTL: durationDefault(cfg.GetDuration("saga.completion_receipt_ttl"), 30*24*time.Hour)},
 		engine: coresaga.Options{Owner: owner, CoordinatorWorkers: intDefault(cfg.GetInt("saga.coordinator_workers"), defaults.CoordinatorWorkers), PublisherWorkers: intDefault(cfg.GetInt("saga.publisher_workers"), defaults.PublisherWorkers), CoordinatorBatch: intDefault(cfg.GetInt("saga.coordinator_claim_batch"), defaults.CoordinatorBatch), PublisherBatch: intDefault(cfg.GetInt("saga.publisher_claim_batch"), defaults.PublisherBatch), LeaseDuration: durationDefault(cfg.GetDuration("saga.lease_duration"), defaults.LeaseDuration), StoreTimeout: durationDefault(cfg.GetDuration("saga.store_timeout"), defaults.StoreTimeout), PollInterval: durationDefault(cfg.GetDuration("saga.poll_interval"), defaults.PollInterval), PublishTimeout: durationDefault(cfg.GetDuration("saga.publish_timeout"), defaults.PublishTimeout), PublishBackoffMin: durationDefault(cfg.GetDuration("saga.publish_backoff_min"), defaults.PublishBackoffMin), PublishBackoffMax: durationDefault(cfg.GetDuration("saga.publish_backoff_max"), defaults.PublishBackoffMax), MaxPayloadBytes: intDefault(cfg.GetInt("saga.max_payload_bytes"), defaults.MaxPayloadBytes)},
 		prefix: prefix, durable: durable, ackWait: durationDefault(cfg.GetDuration("saga.result_ack_wait"), 30*time.Second), processTimeout: durationDefault(cfg.GetDuration("saga.result_process_timeout"), defaults.StoreTimeout), maxDeliver: intDefault(cfg.GetInt("saga.result_max_deliver"), 25_000), maxPending: intDefault(cfg.GetInt("saga.result_max_ack_pending"), 256), nakMin: durationDefault(cfg.GetDuration("saga.result_nak_backoff_min"), 250*time.Millisecond), nakMax: durationDefault(cfg.GetDuration("saga.result_nak_backoff_max"), 30*time.Second),
-		start: NestStartConsumerConfig{
+		start: coresaga.NestStartConsumerConfig{
 			Stream:         stringDefault(cfg.GetString("saga.start_effect_stream"), "ROOST_EFFECTS"),
 			Durable:        stringDefault(cfg.GetString("saga.start_effect_durable"), "roost-saga-start"),
 			EffectPrefix:   stringDefault(cfg.GetString("saga.start_effect_prefix"), "roost.effect"),
@@ -134,11 +134,11 @@ func (m *Mod) Provide(registry *app.Registry) error {
 	if !ok || jetStream == nil {
 		return fmt.Errorf("saga mod: capability %q not found", mods.ModNatsJetStream)
 	}
-	store, err := NewMongoStore(mongoClient, m.config.store)
+	store, err := coresaga.NewMongoStore(mongoClient, m.config.store)
 	if err != nil {
 		return err
 	}
-	transport, err := NewJetStreamPublisher(jetStream, m.config.prefix)
+	transport, err := coresaga.NewJetStreamPublisher(jetStream, m.config.prefix)
 	if err != nil {
 		return err
 	}
@@ -177,17 +177,17 @@ func (m *Mod) Start() error {
 	if err := m.store.EnsureInfrastructure(ctx); err != nil {
 		return err
 	}
-	jetStream := m.transport.client
+	jetStream := m.transport.Client()
 	if err := jetStream.EnsureStream(ctx, m.config.stream); err != nil {
 		return fmt.Errorf("saga mod: ensure stream: %w", err)
 	}
 	runCtx, runCancel := context.WithCancel(context.Background())
-	sub, err := SubscribeCompletions(runCtx, jetStream, CompletionConsumerConfig{Stream: m.config.stream.Name, Durable: m.config.durable, SubjectPrefix: m.config.prefix, AckWait: m.config.ackWait, ProcessTimeout: m.config.processTimeout, MaxDeliver: m.config.maxDeliver, MaxAckPending: m.config.maxPending, NakBackoffMin: m.config.nakMin, NakBackoffMax: m.config.nakMax}, m.engine)
+	sub, err := coresaga.SubscribeCompletions(runCtx, jetStream, coresaga.CompletionConsumerConfig{Stream: m.config.stream.Name, Durable: m.config.durable, SubjectPrefix: m.config.prefix, AckWait: m.config.ackWait, ProcessTimeout: m.config.processTimeout, MaxDeliver: m.config.maxDeliver, MaxAckPending: m.config.maxPending, NakBackoffMin: m.config.nakMin, NakBackoffMax: m.config.nakMax}, m.engine)
 	if err != nil {
 		runCancel()
 		return fmt.Errorf("saga mod: subscribe completions: %w", err)
 	}
-	startSub, err := SubscribeNestStarts(runCtx, jetStream, m.config.start, m.engine)
+	startSub, err := coresaga.SubscribeNestStarts(runCtx, jetStream, m.config.start, m.engine)
 	if err != nil {
 		sub.Drain()
 		runCancel()
@@ -278,9 +278,9 @@ func drainSubscriptions(ctx context.Context, subscriptions []fnats.IJetStreamSub
 	}
 	return nil
 }
-func (m *Mod) Engine() *coresaga.Engine       { return m.engine }
-func (m *Mod) Store() *MongoStore             { return m.store }
-func (m *Mod) Transport() *JetStreamPublisher { return m.transport }
+func (m *Mod) Engine() *coresaga.Engine                { return m.engine }
+func (m *Mod) Store() *coresaga.MongoStore             { return m.store }
+func (m *Mod) Transport() *coresaga.JetStreamPublisher { return m.transport }
 func (m *Mod) checkHealth(ctx context.Context) health.Result {
 	if m.engine == nil || !m.running.Load() {
 		return health.Result{Status: health.StatusFail, Message: "not initialized"}

@@ -17,9 +17,9 @@ import (
 // EtcdMod implements app.Mod for etcd connectivity.
 // Provides IEtcd, IDiscovery, and IElectionFactory via Registry.
 type EtcdMod struct {
-	client    *etcdClient
-	discovery *discovery
-	election  *electionFactory
+	client    *fetcd.Client
+	discovery *fetcd.Discovery
+	election  *fetcd.ElectionFactory
 	cfg       *fetcd.Config
 
 	// service info for auto-registration
@@ -112,26 +112,25 @@ func serviceMetadata(cfg *viper.Viper, svcType string, addr string) map[string]s
 }
 
 func (m *EtcdMod) Provide(r *app.Registry) error {
-	client, err := newEtcdClient(m.cfg)
+	client, err := fetcd.NewClient(m.cfg)
 	if err != nil {
 		return err
 	}
 	m.client = client
-	m.discovery = newDiscovery(client.cli, m.cfg.ServicePrefix, m.cfg.LeaseTTL)
-	m.discovery.retryMinInterval = m.cfg.RegisterRetryMinInterval
-	m.discovery.retryMaxInterval = m.cfg.RegisterRetryMaxInterval
-	m.election = newElectionFactory(client.cli)
+	m.discovery = fetcd.NewDiscovery(client.Raw(), m.cfg.ServicePrefix, m.cfg.LeaseTTL)
+	m.discovery.SetRetryIntervals(m.cfg.RegisterRetryMinInterval, m.cfg.RegisterRetryMaxInterval)
+	m.election = fetcd.NewElectionFactory(client.Raw())
 	healthReg, ok := app.Lookup[*health.Registry](r, mods.ModHealth)
 	if !ok || healthReg == nil {
 		return errors.New("etcd mod: health registry not found")
 	}
 	healthReg.Register("etcd", health.CheckerFunc(func(ctx context.Context) health.Result {
-		if m.client == nil || m.client.cli == nil {
+		if m.client == nil || m.client.Raw() == nil {
 			return health.Result{Status: health.StatusFail, Message: "client not initialized"}
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		_, err := m.client.cli.Status(checkCtx, m.cfg.Endpoints[0])
+		_, err := m.client.Raw().Status(checkCtx, m.cfg.Endpoints[0])
 		if err != nil {
 			return health.Result{Status: health.StatusFail, Message: "status failed", Err: err}
 		}
@@ -150,7 +149,7 @@ func (m *EtcdMod) Start() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := m.client.cli.Status(ctx, m.cfg.Endpoints[0])
+	_, err := m.client.Raw().Status(ctx, m.cfg.Endpoints[0])
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	engine "github.com/tjbdwanghaibo/roost-core/dataengine/engine"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -18,8 +19,8 @@ import (
 	fmongo "github.com/tjbdwanghaibo/roost-core/mongo"
 	fnats "github.com/tjbdwanghaibo/roost-core/nats"
 	corenest "github.com/tjbdwanghaibo/roost-core/nest"
+	"github.com/tjbdwanghaibo/roost-core/nestwal"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
-	"github.com/tjbdwanghaibo/roost-kit/nestwal"
 )
 
 type Mod struct {
@@ -27,9 +28,9 @@ type Mod struct {
 	access        *entity.ManagerAccess
 	cfg           modConfig
 	registry      *app.Registry
-	store         *MongoStore
+	store         *engine.MongoStore
 	runtimeMu     sync.RWMutex
-	runtime       *Runtime
+	runtime       *engine.Runtime
 	jetStream     fnats.IJetStream
 	remoteManager entity.IRemoteEntityManager
 
@@ -48,15 +49,15 @@ func WithRemoteProjection(enabled bool) ModOption {
 }
 
 type modConfig struct {
-	mongo           MongoStoreConfig
+	mongo           engine.MongoStoreConfig
 	wal             nestwal.Options
-	projector       ProjectorOptions
-	outbox          OutboxWorkerOptions
+	projector       engine.ProjectorOptions
+	outbox          engine.OutboxWorkerOptions
 	effectPrefix    string
 	effectStream    fnats.JetStreamConfig
 	startupTimeout  time.Duration
 	shutdownTimeout time.Duration
-	pipelined       pipelinedRuntimeConfig
+	pipelined       engine.PipelinedRuntimeConfig
 }
 
 func NewMod(options ...ModOption) *Mod {
@@ -133,7 +134,7 @@ func (mod *Mod) Init(cfg *viper.Viper) error {
 		wal.MaxUnackedAge = value
 	}
 	wal.OnFatal = mod.onFatal
-	projector := DefaultProjectorOptions()
+	projector := engine.DefaultProjectorOptions()
 	if value := cfg.GetDuration("dataengine.projection.retry_min"); value > 0 {
 		projector.RetryMin = value
 	}
@@ -151,7 +152,7 @@ func (mod *Mod) Init(cfg *viper.Viper) error {
 	if owner == "" {
 		owner = fmt.Sprintf("dataengine-%d", sid)
 	}
-	outbox := OutboxWorkerOptions{
+	outbox := engine.OutboxWorkerOptions{
 		Owner: owner, Workers: positive(cfg.GetInt("dataengine.outbox.workers"), 2),
 		BatchSize:     positive(cfg.GetInt("dataengine.outbox.batch_size"), 64),
 		LeaseDuration: duration(cfg.GetDuration("dataengine.outbox.lease_duration"), 30*time.Second),
@@ -171,7 +172,7 @@ func (mod *Mod) Init(cfg *viper.Viper) error {
 		stream = "ROOST_EFFECTS"
 	}
 	mod.cfg = modConfig{
-		mongo: MongoStoreConfig{DefaultDatabase: database, ServerID: sid,
+		mongo: engine.MongoStoreConfig{DefaultDatabase: database, ServerID: sid,
 			TransactionReceiptTTL: duration(cfg.GetDuration("dataengine.transaction_receipt_ttl"), 30*24*time.Hour),
 			ReceiptTTL:            duration(cfg.GetDuration("dataengine.receipt_ttl"), 30*24*time.Hour)},
 		wal: wal, projector: projector, outbox: outbox, effectPrefix: prefix,
@@ -184,7 +185,7 @@ func (mod *Mod) Init(cfg *viper.Viper) error {
 		},
 		startupTimeout:  duration(cfg.GetDuration("dataengine.startup_timeout"), 30*time.Second),
 		shutdownTimeout: duration(cfg.GetDuration("dataengine.shutdown_timeout"), 30*time.Second),
-		pipelined: pipelinedRuntimeConfig{
+		pipelined: engine.PipelinedRuntimeConfig{
 			Allowlist: cfg.GetStringSlice("nest.pipelined.allowlist"), Async: cfg.GetBool("nest.pipelined.async"),
 			AsyncWorkers: cfg.GetInt("nest.pipelined.async_workers"), AsyncQueueCap: cfg.GetInt("nest.pipelined.async_queue_capacity"),
 		},
@@ -207,7 +208,7 @@ func (mod *Mod) Provide(registry *app.Registry) error {
 	if !ok || jetStream == nil {
 		return fmt.Errorf("dataengine mod: capability %q not found", mods.ModNatsJetStream)
 	}
-	store, err := NewMongoStore(mongoClient, mod.cfg.mongo)
+	store, err := engine.NewMongoStore(mongoClient, mod.cfg.mongo)
 	if err != nil {
 		return err
 	}
@@ -220,7 +221,7 @@ func (mod *Mod) Provide(registry *app.Registry) error {
 		if !ok {
 			return errors.New("dataengine mod: remote manager has no commit applier")
 		}
-		remoteStore, ok := app.Lookup[RemoteProjectionStore](registry, mods.ModRemoteEntityAtomicStore)
+		remoteStore, ok := app.Lookup[engine.RemoteProjectionStore](registry, mods.ModRemoteEntityAtomicStore)
 		if !ok || remoteStore == nil {
 			return fmt.Errorf("dataengine mod: capability %q not found", mods.ModRemoteEntityAtomicStore)
 		}
@@ -257,23 +258,23 @@ func (mod *Mod) Start() error {
 	if err != nil {
 		return err
 	}
-	projector, err := NewProjector(wal, mod.store, mod.cfg.projector)
+	projector, err := engine.NewProjector(wal, mod.store, mod.cfg.projector)
 	if err != nil {
 		_ = wal.Close(ctx)
 		return err
 	}
-	outboxStore, err := NewMongoOutboxStore(mod.store)
+	outboxStore, err := engine.NewMongoOutboxStore(mod.store)
 	if err != nil {
 		_ = projector.Close(ctx)
 		return err
 	}
 	publisher := &jetStreamOutboxPublisher{client: mod.jetStream, prefix: mod.cfg.effectPrefix}
-	outbox, err := NewOutboxWorker(outboxStore, publisher, mod.cfg.outbox)
+	outbox, err := engine.NewOutboxWorker(outboxStore, publisher, mod.cfg.outbox)
 	if err != nil {
 		_ = projector.Close(ctx)
 		return err
 	}
-	runtime, err := newRuntime(mod.store, wal, projector, outbox, mod.access, mod.remoteManager, mod.onFatal, mod.cfg.pipelined)
+	runtime, err := engine.NewRuntime(mod.store, wal, projector, outbox, mod.access, mod.remoteManager, mod.onFatal, mod.cfg.pipelined)
 	if err != nil {
 		_ = projector.Close(ctx)
 		return err
@@ -316,7 +317,7 @@ func (mod *Mod) StopWithContext(ctx context.Context) error {
 	return err
 }
 
-func (mod *Mod) Runtime() *Runtime {
+func (mod *Mod) Runtime() *engine.Runtime {
 	if mod == nil {
 		return nil
 	}
@@ -324,7 +325,7 @@ func (mod *Mod) Runtime() *Runtime {
 	defer mod.runtimeMu.RUnlock()
 	return mod.runtime
 }
-func (mod *Mod) Repository() *EntityRepository {
+func (mod *Mod) Repository() *engine.EntityRepository {
 	runtime := mod.Runtime()
 	if runtime == nil {
 		return nil
@@ -428,16 +429,13 @@ func (mod *Mod) checkHealth(ctx context.Context) health.Result {
 	if err := runtime.Outbox.RefreshBacklog(ctx); err != nil {
 		slog.Warn("dataengine: outbox backlog probe failed during health check", "err", err)
 	}
-	return health.Result{Status: health.StatusOK, Message: dataEngineHealthMessage(runtime.WAL.Stats(), runtime.Projector.Stats(), runtime.Outbox.Stats())}
+	return health.Result{Status: health.StatusOK, Message: engine.HealthMessage(runtime.WAL.Stats(), runtime.Projector.Stats(), runtime.Outbox.Stats())}
 }
 
 // dataEngineHealthMessage is the one line an operator reads first. Both sides
 // of the outbox are on it: publish failures (the bus) and store failures (the
 // claim / ack / nack round-trips to Mongo) — a store that is down looks like a
 // healthy worker with a growing backlog otherwise.
-func dataEngineHealthMessage(walStats nestwal.Stats, projectorStats ProjectorStats, outboxStats OutboxWorkerStats) string {
-	return fmt.Sprintf("wal_unacked=%d wal_oldest=%s projection_failures=%d outbox_pending=%d outbox_oldest=%s publish_failures=%d store_failures=%d fatal_projection_conflicts=%d", projectorStats.WALUnacked, walStats.OldestUnackedAge, projectorStats.ProjectionFailures, outboxStats.Pending, outboxStats.OldestAge, outboxStats.PublishFailures, outboxStats.StoreFailures, projectorStats.FatalProjectionConflicts)
-}
 
 var _ corenest.PipelinedTransactionCommitter = (*Mod)(nil)
 var _ corenest.TransactionReleaseNotifier = (*Mod)(nil)
@@ -447,7 +445,7 @@ type jetStreamOutboxPublisher struct {
 	prefix string
 }
 
-func (publisher *jetStreamOutboxPublisher) Publish(ctx context.Context, item OutboxItem) error {
+func (publisher *jetStreamOutboxPublisher) Publish(ctx context.Context, item engine.OutboxItem) error {
 	if publisher == nil || publisher.client == nil || item.Effect.ID == "" || item.Effect.Topic == "" {
 		return errors.New("dataengine outbox: invalid JetStream publish")
 	}

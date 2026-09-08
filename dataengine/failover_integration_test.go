@@ -4,6 +4,7 @@ package dataengine
 
 import (
 	"context"
+	engine "github.com/tjbdwanghaibo/roost-core/dataengine/engine"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -90,12 +91,12 @@ func TestRealNATSOutageDoesNotBlockProjectionAndRecoversOutbox(t *testing.T) {
 	}
 	assertDocumentVersion(t, fx, "outage_players", 601, 1)
 	waitFor(t, 5*time.Second, "outbox item to remain pending during outage", func() bool {
-		return collectionCount(fx, outboxCollection) == 1
+		return collectionCount(fx, engine.OutboxCollection) == 1
 	})
 
 	healEnvironment(t)
 	waitFor(t, 20*time.Second, "outbox replay after NATS recovery", func() bool {
-		return collectionCount(fx, outboxCollection) == 0 && handled.Load() == 1
+		return collectionCount(fx, engine.OutboxCollection) == 0 && handled.Load() == 1
 	})
 	if got := handled.Load(); got != 1 {
 		t.Fatalf("effect deliveries=%d, want exactly 1", got)

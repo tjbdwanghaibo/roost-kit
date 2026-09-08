@@ -9,9 +9,9 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-core/entity"
 	fmongo "github.com/tjbdwanghaibo/roost-core/mongo"
+	"github.com/tjbdwanghaibo/roost-core/mongo/mongotest"
 	fnats "github.com/tjbdwanghaibo/roost-core/nats"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
-	"github.com/tjbdwanghaibo/roost-kit/mongo/mongotest"
 )
 
 type modJetStream struct{ streams int }
