@@ -10,6 +10,7 @@
 
 ### Added
 
+- **gap map 采样器跳过 `*_gen.go`**（B-25）：生成文件是同一模板在每个包的实例，其守卫在模板所在处钉一次即可；采样器现在只统计不采样，并在包级与总计里报告跳过的守卫数。
 - **dataengine 仓库装载路径的其余拒绝钉住**（U-0101，C2，B-24 第三项）。nightly gap map 里 `dataengine` 20 条采样 15 条无覆盖。
   未注册构建器的 kind、无持久 DAO 的 kind（`ErrEntityAggregateNotFound`）、DAO 不实现 `PersistedDaoLoader`、DAO 解码出别的 id
   （`ErrEntityAggregateCorrupt`）、存储 schema 与 DAO 不一致且无迁移器（`ErrMigrationUnsupported`）、构造缺 manager / store、nil 仓库
