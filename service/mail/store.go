@@ -3,7 +3,7 @@ package mail
 import (
 	"context"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // EnvelopeStore holds envelopes. Envelopes are written once and never

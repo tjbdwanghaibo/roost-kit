@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 
-	"github.com/tjbdwanghaibo/roost-service/directory"
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
+	"github.com/tjbdwanghaibo/roost-kit/service/directory"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // namesFailingCommitOnce is a directory whose first Commit is lost — the

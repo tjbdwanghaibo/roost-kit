@@ -9,7 +9,7 @@
 // The names are prefixed "service." so they cannot collide with roost-kit's
 // infrastructure capabilities — a service named "chat" and a hypothetical
 // kit transport named "chat" would otherwise be the same key.
-package servicemods
+package mods
 
 import "github.com/tjbdwanghaibo/roost-core/app"
 

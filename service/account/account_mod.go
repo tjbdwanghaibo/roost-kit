@@ -8,8 +8,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // Mod wires an account Service into an app and registers it as a capability.
@@ -77,19 +76,19 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 		return fmt.Errorf("account mod: %v are required and have no defaults; each of them "+
 			"was absent in the implementation this replaces, and the absence looked like a default", missing)
 	}
-	prefix, err := servicemods.KeyPrefix(cfg, "account")
+	prefix, err := mods.KeyPrefix(cfg, "account")
 	if err != nil {
 		return err
 	}
-	sessionSecret, err := servicemods.Secret(cfg, "account.session_secret")
+	sessionSecret, err := mods.Secret(cfg, "account.session_secret")
 	if err != nil {
 		return err
 	}
-	sessionTTL, err := servicemods.Duration(cfg, "account.session_ttl", DefaultSessionTTL)
+	sessionTTL, err := mods.Duration(cfg, "account.session_ttl", DefaultSessionTTL)
 	if err != nil {
 		return err
 	}
-	claimTTL, err := servicemods.Duration(cfg, "account.claim_ttl", DefaultClaimTTL)
+	claimTTL, err := mods.Duration(cfg, "account.claim_ttl", DefaultClaimTTL)
 	if err != nil {
 		return err
 	}
@@ -99,7 +98,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 
 // Provide builds the service and registers it.
 func (m *Mod) Provide(r *app.Registry) error {
-	client, err := servicemods.Redis(r)
+	client, err := mods.Redis(r)
 	if err != nil {
 		return err
 	}

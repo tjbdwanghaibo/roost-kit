@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/tjbdwanghaibo/roost-core/security"
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // OrderStore holds orders. It is versioned, so a delivery attempt cannot be

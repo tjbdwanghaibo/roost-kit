@@ -1,4 +1,4 @@
-package service_test
+package kit_test
 
 import (
 	"os"
@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// The Redis-backed suites are build-tagged and skip themselves when
+// The service Redis-backed suites (kit/service) are build-tagged and skip themselves when
 // REDIS_ADDR is unset, so nothing in `go test ./...` can tell whether they
 // ever run. That guarantee lives in the workflow: an integration job that
 // sets the variable, runs with the tag and fails on a REDIS_ADDR skip. This

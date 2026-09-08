@@ -1,4 +1,4 @@
-package servicemods
+package mods
 
 import (
 	"fmt"
@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/viper"
 	"github.com/tjbdwanghaibo/roost-core/app"
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
-	"github.com/tjbdwanghaibo/roost-kit/mods"
 )
 
 // Redis returns the Redis capability, or an error naming what is missing.
@@ -17,9 +16,9 @@ import (
 // fail the same way when it is absent: with the capability name, at Provide
 // time, rather than with a nil dereference on the first request.
 func Redis(r *app.Registry) (fredis.IRedis, error) {
-	client, ok := app.Lookup[fredis.IRedis](r, mods.ModRedis)
+	client, ok := app.Lookup[fredis.IRedis](r, ModRedis)
 	if !ok || client == nil {
-		return nil, fmt.Errorf("servicemods: capability %q not found; add roost-kit/redis.NewRedisMod()", mods.ModRedis)
+		return nil, fmt.Errorf("servicemods: capability %q not found; add roost-kit/redis.NewRedisMod()", ModRedis)
 	}
 	return client, nil
 }

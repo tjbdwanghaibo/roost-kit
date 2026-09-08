@@ -7,15 +7,15 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	kitmods "github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/account"
-	"github.com/tjbdwanghaibo/roost-service/chat"
-	"github.com/tjbdwanghaibo/roost-service/global"
-	"github.com/tjbdwanghaibo/roost-service/global/activity"
-	"github.com/tjbdwanghaibo/roost-service/mail"
-	"github.com/tjbdwanghaibo/roost-service/match"
-	"github.com/tjbdwanghaibo/roost-service/platform"
-	"github.com/tjbdwanghaibo/roost-service/rank"
-	"github.com/tjbdwanghaibo/roost-service/session"
+	"github.com/tjbdwanghaibo/roost-kit/service/account"
+	"github.com/tjbdwanghaibo/roost-kit/service/chat"
+	"github.com/tjbdwanghaibo/roost-kit/service/global"
+	"github.com/tjbdwanghaibo/roost-kit/service/global/activity"
+	"github.com/tjbdwanghaibo/roost-kit/service/mail"
+	"github.com/tjbdwanghaibo/roost-kit/service/match"
+	"github.com/tjbdwanghaibo/roost-kit/service/platform"
+	"github.com/tjbdwanghaibo/roost-kit/service/rank"
+	"github.com/tjbdwanghaibo/roost-kit/service/session"
 )
 
 // app resolves a Mod's DependsOn by Mod NAME. The generated ClientMods used

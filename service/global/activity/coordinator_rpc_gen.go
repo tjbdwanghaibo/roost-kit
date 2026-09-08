@@ -21,8 +21,8 @@ import (
 	"github.com/spf13/viper"
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-core/bus"
+	"github.com/tjbdwanghaibo/roost-core/servicerpc"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
-	"github.com/tjbdwanghaibo/roost-kit/servicerpc"
 )
 
 // ServiceType is the bus service type Coordinator answers on. The client and

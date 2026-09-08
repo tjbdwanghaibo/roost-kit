@@ -34,7 +34,7 @@ import (
 	"time"
 
 	"github.com/tjbdwanghaibo/roost-core/errcode"
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // Error codes.

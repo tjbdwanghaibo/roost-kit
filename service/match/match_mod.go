@@ -10,8 +10,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // Mod wires a match Store into an app and registers it as a capability.
@@ -76,11 +75,11 @@ func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
 //	  key_prefix: roost:match   # required, no default
 //	  ticket_ttl: 2m            # optional, defaults to DefaultTicketTTL
 func (m *Mod) Init(cfg *viper.Viper) error {
-	prefix, err := servicemods.KeyPrefix(cfg, "match")
+	prefix, err := mods.KeyPrefix(cfg, "match")
 	if err != nil {
 		return err
 	}
-	ttl, err := servicemods.Duration(cfg, "match.ticket_ttl", DefaultTicketTTL)
+	ttl, err := mods.Duration(cfg, "match.ticket_ttl", DefaultTicketTTL)
 	if err != nil {
 		return err
 	}
@@ -94,7 +93,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 
 // Provide builds the store and registers it.
 func (m *Mod) Provide(r *app.Registry) error {
-	client, err := servicemods.Redis(r)
+	client, err := mods.Redis(r)
 	if err != nil {
 		return err
 	}

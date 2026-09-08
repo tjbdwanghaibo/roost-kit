@@ -14,9 +14,8 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-core/bus"
 	"github.com/tjbdwanghaibo/roost-core/errcode"
-	kitmods "github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
+	"github.com/tjbdwanghaibo/roost-kit/mods"
 )
 
 // --- drift: the client, the handlers and the interface must agree ---
@@ -341,8 +340,8 @@ func TestBothModsPublishTheSameCapabilityName(t *testing.T) {
 			"know which deployment it is in, and a process could hold both",
 			owner.Name(), client.Name())
 	}
-	if owner.Name() != servicemods.ModMail {
-		t.Fatalf("the Mods publish %q, want %q", owner.Name(), servicemods.ModMail)
+	if owner.Name() != mods.ModMail {
+		t.Fatalf("the Mods publish %q, want %q", owner.Name(), mods.ModMail)
 	}
 }
 
@@ -351,7 +350,7 @@ func TestBothModsPublishTheSameCapabilityName(t *testing.T) {
 func TestTheClientModPublishesTheInterfaceNotTheConcreteType(t *testing.T) {
 	cfg := viper.New()
 	registry := app.NewRegistry(cfg)
-	if err := registry.Register(kitmods.ModBus, newFakeBus()); err != nil {
+	if err := registry.Register(mods.ModBus, newFakeBus()); err != nil {
 		t.Fatal(err)
 	}
 	mod := NewClientMod()
@@ -362,7 +361,7 @@ func TestTheClientModPublishesTheInterfaceNotTheConcreteType(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The lookup a consumer writes, once, for both deployments.
-	if service, ok := app.Lookup[Mail](registry, servicemods.ModMail); !ok || service == nil {
+	if service, ok := app.Lookup[Mail](registry, mods.ModMail); !ok || service == nil {
 		t.Fatal("app.Lookup[Mail] did not resolve; the capability is not published as the interface")
 	}
 	// And NOT as either concrete type.
@@ -376,11 +375,11 @@ func TestTheClientModPublishesTheInterfaceNotTheConcreteType(t *testing.T) {
 	// that satisfies Mail and nothing else. Converting to the interface at the
 	// call site would NOT achieve this: `Value: Mail(x)` stores an any whose
 	// dynamic type is still x's, so the assertion succeeds anyway.
-	if _, concrete := app.Lookup[*Service](registry, servicemods.ModMail); concrete {
+	if _, concrete := app.Lookup[*Service](registry, mods.ModMail); concrete {
 		t.Fatal("the capability resolves as *Service; a consumer can bind to the local type " +
 			"and will break when mail moves into its own process")
 	}
-	if _, concrete := app.Lookup[*BusClient](registry, servicemods.ModMail); concrete {
+	if _, concrete := app.Lookup[*BusClient](registry, mods.ModMail); concrete {
 		t.Fatal("the capability resolves as *BusClient; a consumer can bind to the remote type " +
 			"and will break in the process that owns mail")
 	}
@@ -397,7 +396,7 @@ func TestTheClientModFailsWithoutTheBus(t *testing.T) {
 	if err == nil {
 		t.Fatal("the client Mod provided with no bus capability")
 	}
-	if !strings.Contains(err.Error(), string(kitmods.ModBus)) {
+	if !strings.Contains(err.Error(), string(mods.ModBus)) {
 		t.Fatalf("the error does not name the missing capability: %v", err)
 	}
 }
@@ -407,7 +406,7 @@ func TestTheClientModFailsWithoutTheBus(t *testing.T) {
 func TestTheServerRefusesToRunOnAClientCapability(t *testing.T) {
 	cfg := viper.New()
 	registry := app.NewRegistry(cfg)
-	if err := registry.Register(kitmods.ModBus, newFakeBus()); err != nil {
+	if err := registry.Register(mods.ModBus, newFakeBus()); err != nil {
 		t.Fatal(err)
 	}
 	client, err := NewBusClient(newFakeBus(), "", 0)
@@ -437,7 +436,7 @@ func TestTheServerRefusesAMissingCapability(t *testing.T) {
 	cfg := viper.New()
 	// No mail capability at all.
 	registry := app.NewRegistry(cfg)
-	if err := registry.Register(kitmods.ModBus, newFakeBus()); err != nil {
+	if err := registry.Register(mods.ModBus, newFakeBus()); err != nil {
 		t.Fatal(err)
 	}
 	if err := NewServer().Init(registry); err == nil {
@@ -455,7 +454,7 @@ func TestTheServerRefusesAMissingCapability(t *testing.T) {
 	if err == nil {
 		t.Fatal("the server started with no bus")
 	}
-	if !strings.Contains(err.Error(), string(kitmods.ModBus)) {
+	if !strings.Contains(err.Error(), string(mods.ModBus)) {
 		t.Fatalf("the error does not name the missing bus: %v", err)
 	}
 }

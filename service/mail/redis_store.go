@@ -10,7 +10,7 @@ import (
 	"time"
 
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // RedisStores are the three stores this package needs, over Redis.

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 
-	"github.com/tjbdwanghaibo/roost-service/directory"
+	"github.com/tjbdwanghaibo/roost-kit/service/directory"
 )
 
 // RedisStores are the four stores this package needs, over Redis, plus the

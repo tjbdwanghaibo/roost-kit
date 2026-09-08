@@ -8,8 +8,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // Mod wires a session Service into an app and registers it as a capability.
@@ -55,11 +54,11 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 			"resources and cannot release them is the leak this package prevents, and a default " +
 			"that did nothing would make leaking the out-of-the-box behaviour")
 	}
-	prefix, err := servicemods.KeyPrefix(cfg, "session")
+	prefix, err := mods.KeyPrefix(cfg, "session")
 	if err != nil {
 		return err
 	}
-	ttl, err := servicemods.Duration(cfg, "session.run_ttl", DefaultTTL)
+	ttl, err := mods.Duration(cfg, "session.run_ttl", DefaultTTL)
 	if err != nil {
 		return err
 	}
@@ -67,7 +66,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 	// caller's retry behaviour and getting it wrong is not visible: past the
 	// ttl a retried Enter is indistinguishable from a new one, and the caller
 	// gets a second run.
-	requestTTL, err := servicemods.RequiredDuration(cfg, "session.request_ttl")
+	requestTTL, err := mods.RequiredDuration(cfg, "session.request_ttl")
 	if err != nil {
 		return err
 	}
@@ -77,7 +76,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 
 // Provide builds the service and registers it.
 func (m *Mod) Provide(r *app.Registry) error {
-	client, err := servicemods.Redis(r)
+	client, err := mods.Redis(r)
 	if err != nil {
 		return err
 	}

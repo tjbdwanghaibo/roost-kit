@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // sweepRecorder wraps a real store and records which queues the background

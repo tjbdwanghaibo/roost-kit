@@ -7,9 +7,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // Store is chat persistence, and it is also where authorization happens.

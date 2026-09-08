@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/tjbdwanghaibo/roost-core/errcode"
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // The segment this package is allocated, and how much of it is paired.

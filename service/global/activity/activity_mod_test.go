@@ -8,8 +8,6 @@ import (
 	"github.com/spf13/viper"
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
-
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
 )
 
 func modConfig() *viper.Viper {
@@ -76,7 +74,7 @@ func TestModInitAndProvideContract(t *testing.T) {
 	if got := mod.Name(); got != CapabilityName {
 		t.Fatalf("the mod is named %q but publishes %q", got, CapabilityName)
 	}
-	if got := mod.Name(); got != servicemods.ModGlobalActivity {
+	if got := mod.Name(); got != mods.ModGlobalActivity {
 		t.Fatalf("the mod is named %q, which the name table does not list", got)
 	}
 	var asAny any = mod

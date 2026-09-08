@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // RunStore holds runs. Versioned, so there is no unconditional write — the

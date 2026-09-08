@@ -7,8 +7,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // Mod wires the routing and lease service into an app and registers it as a
@@ -53,11 +52,11 @@ func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
 // grace_window, dispatch_attempts, dispatch_backoff — moved with the service,
 // to activity.Mod's own section.
 func (m *Mod) Init(cfg *viper.Viper) error {
-	prefix, err := servicemods.KeyPrefix(cfg, "global")
+	prefix, err := mods.KeyPrefix(cfg, "global")
 	if err != nil {
 		return err
 	}
-	leaseTTL, err := servicemods.Duration(cfg, "global.lease_ttl", DefaultLeaseTTL)
+	leaseTTL, err := mods.Duration(cfg, "global.lease_ttl", DefaultLeaseTTL)
 	if err != nil {
 		return err
 	}
@@ -67,7 +66,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 
 // Provide builds the service and registers it.
 func (m *Mod) Provide(r *app.Registry) error {
-	client, err := servicemods.Redis(r)
+	client, err := mods.Redis(r)
 	if err != nil {
 		return err
 	}

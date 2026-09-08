@@ -10,8 +10,6 @@ import (
 	"github.com/spf13/viper"
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
-
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
 )
 
 // Mod wires a chat Service into an app and registers it as a capability.
@@ -90,11 +88,11 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 		return fmt.Errorf("chat mod: %v are required and have no defaults; a permissive policy "+
 			"is what the client-settable Trusted bool amounted to", missing)
 	}
-	prefix, err := servicemods.KeyPrefix(cfg, "chat")
+	prefix, err := mods.KeyPrefix(cfg, "chat")
 	if err != nil {
 		return err
 	}
-	retention, err := servicemods.Duration(cfg, "chat.retention_age", 0)
+	retention, err := mods.Duration(cfg, "chat.retention_age", 0)
 	if err != nil {
 		return err
 	}
@@ -144,7 +142,7 @@ func resolvePruneChannels(store Store, channels []Channel) ([]ChannelRef, error)
 
 // Provide builds the service and registers it.
 func (m *Mod) Provide(r *app.Registry) error {
-	client, err := servicemods.Redis(r)
+	client, err := mods.Redis(r)
 	if err != nil {
 		return err
 	}

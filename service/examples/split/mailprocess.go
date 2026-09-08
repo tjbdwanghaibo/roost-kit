@@ -4,7 +4,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	kitredis "github.com/tjbdwanghaibo/roost-kit/redis"
 
-	"github.com/tjbdwanghaibo/roost-service/mail"
+	"github.com/tjbdwanghaibo/roost-kit/service/mail"
 )
 
 // MailProcess wires the process that OWNS mail.

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/tjbdwanghaibo/roost-core/errcode"
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // The pairing table, the segment's contiguity and its exact count are pinned

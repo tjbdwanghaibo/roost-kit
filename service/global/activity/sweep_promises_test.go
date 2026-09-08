@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // A bounded sweep takes the earliest deadline first, so an activity that has

@@ -7,10 +7,10 @@ import (
 	"github.com/spf13/viper"
 	"github.com/tjbdwanghaibo/roost-core/app"
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
+	kitredis "github.com/tjbdwanghaibo/roost-core/redis"
 	kitmods "github.com/tjbdwanghaibo/roost-kit/mods"
-	kitredis "github.com/tjbdwanghaibo/roost-kit/redis"
 
-	"github.com/tjbdwanghaibo/roost-service/mail"
+	"github.com/tjbdwanghaibo/roost-kit/service/mail"
 )
 
 // The same consumer code resolves in both deployments.

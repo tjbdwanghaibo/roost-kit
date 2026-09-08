@@ -8,8 +8,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // Mod wires a platform Service into an app and registers it as a capability.
@@ -78,26 +77,26 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 		return fmt.Errorf("platform mod: %v are required and have no defaults; a permissive "+
 			"verifier is account takeover and a no-op deliverer takes money without delivering", missing)
 	}
-	prefix, err := servicemods.KeyPrefix(cfg, "platform")
+	prefix, err := mods.KeyPrefix(cfg, "platform")
 	if err != nil {
 		return err
 	}
 	// Refused at Init, not at call time. An unset payment secret in the
 	// implementation this replaces turned every provider callback into an
 	// invalid-signature refusal: a silent outage that looked like an attack.
-	sessionSecret, err := servicemods.Secret(cfg, "platform.session_secret")
+	sessionSecret, err := mods.Secret(cfg, "platform.session_secret")
 	if err != nil {
 		return err
 	}
-	paymentSecret, err := servicemods.Secret(cfg, "platform.payment_secret")
+	paymentSecret, err := mods.Secret(cfg, "platform.payment_secret")
 	if err != nil {
 		return err
 	}
-	sessionTTL, err := servicemods.Duration(cfg, "platform.session_ttl", DefaultSessionTTL)
+	sessionTTL, err := mods.Duration(cfg, "platform.session_ttl", DefaultSessionTTL)
 	if err != nil {
 		return err
 	}
-	backoff, err := servicemods.Duration(cfg, "platform.delivery_backoff", DefaultDeliveryBackoff)
+	backoff, err := mods.Duration(cfg, "platform.delivery_backoff", DefaultDeliveryBackoff)
 	if err != nil {
 		return err
 	}
@@ -115,7 +114,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 
 // Provide builds the service and registers it.
 func (m *Mod) Provide(r *app.Registry) error {
-	client, err := servicemods.Redis(r)
+	client, err := mods.Redis(r)
 	if err != nil {
 		return err
 	}

@@ -1,4 +1,4 @@
-package servicemods
+package mods
 
 import (
 	"strings"

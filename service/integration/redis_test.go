@@ -12,18 +12,18 @@ import (
 	"time"
 
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
-	kitredis "github.com/tjbdwanghaibo/roost-kit/redis"
+	kitredis "github.com/tjbdwanghaibo/roost-core/redis"
 
-	"github.com/tjbdwanghaibo/roost-service/account"
-	"github.com/tjbdwanghaibo/roost-service/chat"
-	"github.com/tjbdwanghaibo/roost-service/directory"
-	"github.com/tjbdwanghaibo/roost-service/global"
-	"github.com/tjbdwanghaibo/roost-service/global/activity"
-	"github.com/tjbdwanghaibo/roost-service/mail"
-	"github.com/tjbdwanghaibo/roost-service/match"
-	"github.com/tjbdwanghaibo/roost-service/platform"
-	"github.com/tjbdwanghaibo/roost-service/rank"
-	"github.com/tjbdwanghaibo/roost-service/session"
+	"github.com/tjbdwanghaibo/roost-kit/service/account"
+	"github.com/tjbdwanghaibo/roost-kit/service/chat"
+	"github.com/tjbdwanghaibo/roost-kit/service/directory"
+	"github.com/tjbdwanghaibo/roost-kit/service/global"
+	"github.com/tjbdwanghaibo/roost-kit/service/global/activity"
+	"github.com/tjbdwanghaibo/roost-kit/service/mail"
+	"github.com/tjbdwanghaibo/roost-kit/service/match"
+	"github.com/tjbdwanghaibo/roost-kit/service/platform"
+	"github.com/tjbdwanghaibo/roost-kit/service/rank"
+	"github.com/tjbdwanghaibo/roost-kit/service/session"
 )
 
 func client(t *testing.T) fredis.IRedis {

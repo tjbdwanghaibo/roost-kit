@@ -7,8 +7,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // Mod wires a rank Store into an app and registers it as a capability.
@@ -55,7 +54,7 @@ func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
 //	rank:
 //	  key_prefix: roost:rank   # required, no default
 func (m *Mod) Init(cfg *viper.Viper) error {
-	prefix, err := servicemods.KeyPrefix(cfg, "rank")
+	prefix, err := mods.KeyPrefix(cfg, "rank")
 	if err != nil {
 		return err
 	}
@@ -65,7 +64,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 
 // Provide builds the store and registers it.
 func (m *Mod) Provide(r *app.Registry) error {
-	client, err := servicemods.Redis(r)
+	client, err := mods.Redis(r)
 	if err != nil {
 		return err
 	}

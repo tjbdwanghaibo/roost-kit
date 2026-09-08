@@ -8,8 +8,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // Mod wires a Directory into an app and registers it as a capability.
@@ -37,7 +36,7 @@ func NewMod(normalize Normalizer, reporter servicemetrics.Reporter) *Mod {
 }
 
 // Name implements app.Mod.
-func (m *Mod) Name() app.ModName { return servicemods.ModDirectory }
+func (m *Mod) Name() app.ModName { return mods.ModDirectory }
 
 // DependsOn implements app.ModDependencyProvider.
 func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
@@ -54,7 +53,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 		return fmt.Errorf("directory mod: a normalizer is required; it decides which raw keys " +
 			"are the same key, which is not a deployment setting")
 	}
-	prefix, err := servicemods.KeyPrefix(cfg, "directory")
+	prefix, err := mods.KeyPrefix(cfg, "directory")
 	if err != nil {
 		return err
 	}
@@ -62,7 +61,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 	// when the caller dies, which is the defect this primitive exists to
 	// prevent. There is no default because the right value depends on how
 	// long the caller's commit path takes.
-	ttl, err := servicemods.RequiredDuration(cfg, "directory.reservation_ttl")
+	ttl, err := mods.RequiredDuration(cfg, "directory.reservation_ttl")
 	if err != nil {
 		return err
 	}
@@ -72,7 +71,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 
 // Provide builds the directory and registers it.
 func (m *Mod) Provide(r *app.Registry) error {
-	client, err := servicemods.Redis(r)
+	client, err := mods.Redis(r)
 	if err != nil {
 		return err
 	}

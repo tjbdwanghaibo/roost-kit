@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // NewRedisOrders builds the order store over Redis.

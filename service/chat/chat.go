@@ -73,9 +73,9 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 
 	"github.com/tjbdwanghaibo/roost-core/errcode"
 )

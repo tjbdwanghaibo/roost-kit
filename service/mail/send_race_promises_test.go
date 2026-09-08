@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // vanishingSends models the ledger race the guard exists for: our claim loses

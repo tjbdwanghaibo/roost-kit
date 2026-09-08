@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // RedisStores are the stores this package needs, over Redis: one for routing

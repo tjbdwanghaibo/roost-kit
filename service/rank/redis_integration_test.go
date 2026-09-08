@@ -12,7 +12,7 @@ import (
 	"time"
 
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
-	kitredis "github.com/tjbdwanghaibo/roost-kit/redis"
+	kitredis "github.com/tjbdwanghaibo/roost-core/redis"
 )
 
 // These tests run the Lua scripts against a real Redis, because the unit-test

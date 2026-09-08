@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // vanishingOrders loses the insert to a racer whose row is gone by the time it

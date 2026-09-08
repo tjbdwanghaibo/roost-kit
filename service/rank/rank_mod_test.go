@@ -7,8 +7,6 @@ import (
 	"github.com/spf13/viper"
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
-
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
 )
 
 // The key prefix is required and has no default. A default would be the same
@@ -87,7 +85,7 @@ func TestModDeclaresItsRedisDependency(t *testing.T) {
 }
 
 func TestModName(t *testing.T) {
-	if got := NewMod(nil).Name(); got != servicemods.ModRank {
-		t.Fatalf("the mod is named %q, want %q", got, servicemods.ModRank)
+	if got := NewMod(nil).Name(); got != mods.ModRank {
+		t.Fatalf("the mod is named %q, want %q", got, mods.ModRank)
 	}
 }

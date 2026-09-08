@@ -10,8 +10,8 @@ import (
 
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // RedisClient is the slice of redis.IRedis a RedisStore uses.

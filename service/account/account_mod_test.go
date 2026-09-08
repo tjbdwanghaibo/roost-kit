@@ -7,8 +7,6 @@ import (
 	"github.com/spf13/viper"
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
-
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
 )
 
 func modConfig() *viper.Viper {
@@ -70,7 +68,7 @@ func TestModInitAndProvideContract(t *testing.T) {
 	if err := mod.Init(modConfig()); err != nil {
 		t.Fatal(err)
 	}
-	if got := mod.Name(); got != servicemods.ModAccount {
+	if got := mod.Name(); got != mods.ModAccount {
 		t.Fatalf("the mod is named %q", got)
 	}
 	var asAny any = mod

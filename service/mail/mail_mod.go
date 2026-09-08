@@ -8,8 +8,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // Mod wires a mail Service into an app and registers it as a capability.
@@ -52,7 +51,7 @@ func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
 //	  send_ttl: 24h            # required; see below
 //	  claim_lease: 30s         # optional, defaults to DefaultClaimLease
 func (m *Mod) Init(cfg *viper.Viper) error {
-	prefix, err := servicemods.KeyPrefix(cfg, "mail")
+	prefix, err := mods.KeyPrefix(cfg, "mail")
 	if err != nil {
 		return err
 	}
@@ -60,11 +59,11 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 	// horizon: past it a retried send is indistinguishable from a new one and
 	// the recipient gets the mail twice. That horizon is a property of the
 	// caller's transport, so this package cannot pick it.
-	sendTTL, err := servicemods.RequiredDuration(cfg, "mail.send_ttl")
+	sendTTL, err := mods.RequiredDuration(cfg, "mail.send_ttl")
 	if err != nil {
 		return err
 	}
-	claimLease, err := servicemods.Duration(cfg, "mail.claim_lease", DefaultClaimLease)
+	claimLease, err := mods.Duration(cfg, "mail.claim_lease", DefaultClaimLease)
 	if err != nil {
 		return err
 	}
@@ -74,7 +73,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 
 // Provide builds the service and registers it.
 func (m *Mod) Provide(r *app.Registry) error {
-	client, err := servicemods.Redis(r)
+	client, err := mods.Redis(r)
 	if err != nil {
 		return err
 	}

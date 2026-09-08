@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 	"time"
 )
 

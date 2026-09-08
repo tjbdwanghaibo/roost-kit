@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // ledgerThatFailsOnce is the request ledger with its first Create lost — the

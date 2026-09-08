@@ -17,19 +17,18 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/bus"
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
 	"github.com/tjbdwanghaibo/roost-core/security"
-	kitmods "github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/account"
-	"github.com/tjbdwanghaibo/roost-service/chat"
-	"github.com/tjbdwanghaibo/roost-service/directory"
-	"github.com/tjbdwanghaibo/roost-service/global"
-	"github.com/tjbdwanghaibo/roost-service/global/activity"
-	"github.com/tjbdwanghaibo/roost-service/mail"
-	"github.com/tjbdwanghaibo/roost-service/match"
-	"github.com/tjbdwanghaibo/roost-service/platform"
-	"github.com/tjbdwanghaibo/roost-service/rank"
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
-	"github.com/tjbdwanghaibo/roost-service/session"
+	"github.com/tjbdwanghaibo/roost-kit/mods"
+	"github.com/tjbdwanghaibo/roost-kit/service/account"
+	"github.com/tjbdwanghaibo/roost-kit/service/chat"
+	"github.com/tjbdwanghaibo/roost-kit/service/directory"
+	"github.com/tjbdwanghaibo/roost-kit/service/global"
+	"github.com/tjbdwanghaibo/roost-kit/service/global/activity"
+	"github.com/tjbdwanghaibo/roost-kit/service/mail"
+	"github.com/tjbdwanghaibo/roost-kit/service/match"
+	"github.com/tjbdwanghaibo/roost-kit/service/platform"
+	"github.com/tjbdwanghaibo/roost-kit/service/rank"
+	"github.com/tjbdwanghaibo/roost-kit/service/session"
 )
 
 // This is the end-to-end proof for the deployment surface: every service Mod
@@ -123,7 +122,7 @@ func bootstrap(t *testing.T) (*app.Registry, *viper.Viper) {
 	registry := app.NewRegistry(cfg)
 	// Stand in for roost-kit's RedisMod, which is what publishes this
 	// capability in a real process.
-	if err := registry.Register(kitmods.ModRedis, c); err != nil {
+	if err := registry.Register(mods.ModRedis, c); err != nil {
 		t.Fatal(err)
 	}
 	for _, mod := range serviceMods(t) {
@@ -146,7 +145,7 @@ func bootstrap(t *testing.T) (*app.Registry, *viper.Viper) {
 // repo will look up and not find.
 func TestEveryDeclaredCapabilityIsPublished(t *testing.T) {
 	registry, _ := bootstrap(t)
-	for _, name := range servicemods.All {
+	for _, name := range mods.All {
 		if _, ok := registry.Get(name); !ok {
 			t.Fatalf("capability %q is in the name table but no Mod published it", name)
 		}
@@ -162,7 +161,7 @@ func TestEveryPublishedCapabilityIsUsable(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("account", func(t *testing.T) {
-		service, ok := app.Lookup[account.Accounts](registry, servicemods.ModAccount)
+		service, ok := app.Lookup[account.Accounts](registry, mods.ModAccount)
 		if !ok {
 			t.Fatal("the account capability is not an account.Accounts")
 		}
@@ -181,7 +180,7 @@ func TestEveryPublishedCapabilityIsUsable(t *testing.T) {
 	})
 
 	t.Run("chat", func(t *testing.T) {
-		service, ok := app.Lookup[chat.Messaging](registry, servicemods.ModChat)
+		service, ok := app.Lookup[chat.Messaging](registry, mods.ModChat)
 		if !ok {
 			t.Fatal("the chat capability is not a chat.Messaging")
 		}
@@ -194,7 +193,7 @@ func TestEveryPublishedCapabilityIsUsable(t *testing.T) {
 	})
 
 	t.Run("directory", func(t *testing.T) {
-		dir, ok := app.Lookup[directory.Directory](registry, servicemods.ModDirectory)
+		dir, ok := app.Lookup[directory.Directory](registry, mods.ModDirectory)
 		if !ok {
 			t.Fatal("the directory capability is not a directory.Directory")
 		}
@@ -204,7 +203,7 @@ func TestEveryPublishedCapabilityIsUsable(t *testing.T) {
 	})
 
 	t.Run("global", func(t *testing.T) {
-		service, ok := app.Lookup[global.Routing](registry, servicemods.ModGlobal)
+		service, ok := app.Lookup[global.Routing](registry, mods.ModGlobal)
 		if !ok {
 			t.Fatal("the global capability is not a global.Routing")
 		}
@@ -217,7 +216,7 @@ func TestEveryPublishedCapabilityIsUsable(t *testing.T) {
 	})
 
 	t.Run("global activity", func(t *testing.T) {
-		coordinator, ok := app.Lookup[activity.Coordinator](registry, servicemods.ModGlobalActivity)
+		coordinator, ok := app.Lookup[activity.Coordinator](registry, mods.ModGlobalActivity)
 		if !ok {
 			t.Fatal("the global activity capability is not an activity.Coordinator")
 		}
@@ -234,7 +233,7 @@ func TestEveryPublishedCapabilityIsUsable(t *testing.T) {
 		// the day mail moved into its own — so mail's capability is now a
 		// wrapper that satisfies mail.Mail and nothing else, and this test was
 		// the first thing it caught.
-		service, ok := app.Lookup[mail.Mail](registry, servicemods.ModMail)
+		service, ok := app.Lookup[mail.Mail](registry, mods.ModMail)
 		if !ok {
 			t.Fatal("the mail capability is not a mail.Mail")
 		}
@@ -247,7 +246,7 @@ func TestEveryPublishedCapabilityIsUsable(t *testing.T) {
 	})
 
 	t.Run("match", func(t *testing.T) {
-		store, ok := app.Lookup[match.Matchmaker](registry, servicemods.ModMatch)
+		store, ok := app.Lookup[match.Matchmaker](registry, mods.ModMatch)
 		if !ok {
 			t.Fatal("the match capability is not a match.Matchmaker")
 		}
@@ -259,7 +258,7 @@ func TestEveryPublishedCapabilityIsUsable(t *testing.T) {
 	})
 
 	t.Run("platform", func(t *testing.T) {
-		service, ok := app.Lookup[platform.Platform](registry, servicemods.ModPlatform)
+		service, ok := app.Lookup[platform.Platform](registry, mods.ModPlatform)
 		if !ok {
 			t.Fatal("the platform capability is not a platform.Platform")
 		}
@@ -293,7 +292,7 @@ func TestEveryPublishedCapabilityIsUsable(t *testing.T) {
 	})
 
 	t.Run("rank", func(t *testing.T) {
-		store, ok := app.Lookup[rank.Rank](registry, servicemods.ModRank)
+		store, ok := app.Lookup[rank.Rank](registry, mods.ModRank)
 		if !ok {
 			t.Fatal("the rank capability is not a rank.Rank")
 		}
@@ -304,7 +303,7 @@ func TestEveryPublishedCapabilityIsUsable(t *testing.T) {
 	})
 
 	t.Run("session", func(t *testing.T) {
-		service, ok := app.Lookup[session.Session](registry, servicemods.ModSession)
+		service, ok := app.Lookup[session.Session](registry, mods.ModSession)
 		if !ok {
 			t.Fatal("the session capability is not a session.Session")
 		}
@@ -330,7 +329,7 @@ func TestEveryModWritesUnderItsConfiguredPrefix(t *testing.T) {
 	root := prefix(t, "confined")
 	cfg := modConfig(root)
 	registry := app.NewRegistry(cfg)
-	if err := registry.Register(kitmods.ModRedis, c); err != nil {
+	if err := registry.Register(mods.ModRedis, c); err != nil {
 		t.Fatal(err)
 	}
 	for _, mod := range serviceMods(t) {
@@ -423,7 +422,7 @@ func driveThroughRegistry(t *testing.T, registry *app.Registry, root string) {
 	// operation and is not on the interface. So the role that needs a server
 	// row is created directly against the store, which is what an operator
 	// tool or a migration would do.
-	acct := app.MustLookup[account.Accounts](registry, servicemods.ModAccount)
+	acct := app.MustLookup[account.Accounts](registry, mods.ModAccount)
 	acctStores, err := account.NewRedisStores(client(t), root+":account", time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -443,7 +442,7 @@ func driveThroughRegistry(t *testing.T, registry *app.Registry, root string) {
 		t.Fatal(err)
 	}
 
-	chatSvc := app.MustLookup[chat.Messaging](registry, servicemods.ModChat)
+	chatSvc := app.MustLookup[chat.Messaging](registry, mods.ModChat)
 	if _, err := chatSvc.Publish(ctx, chat.Sender{RoleID: 1, Name: "role-1"}, chat.PublishRequest{
 		Channel: chat.Channel{Kind: chat.ChannelWorld, Target: 7},
 		Type:    "text", Body: []byte("hello"), RequestID: "r1",
@@ -451,12 +450,12 @@ func driveThroughRegistry(t *testing.T, registry *app.Registry, root string) {
 		t.Fatal(err)
 	}
 
-	dir := app.MustLookup[directory.Directory](registry, servicemods.ModDirectory)
+	dir := app.MustLookup[directory.Directory](registry, mods.ModDirectory)
 	if _, err := dir.Reserve(ctx, "Zed", "owner-1", 0); err != nil {
 		t.Fatal(err)
 	}
 
-	globalSvc := app.MustLookup[global.Routing](registry, servicemods.ModGlobal)
+	globalSvc := app.MustLookup[global.Routing](registry, mods.ModGlobal)
 	if _, err := globalSvc.Bind(ctx, 7, "group-a", 100); err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +463,7 @@ func driveThroughRegistry(t *testing.T, registry *app.Registry, root string) {
 		t.Fatal(err)
 	}
 
-	mailSvc := app.MustLookup[mail.Mail](registry, servicemods.ModMail)
+	mailSvc := app.MustLookup[mail.Mail](registry, mods.ModMail)
 	if _, err := mailSvc.Send(ctx, mail.SendRequest{
 		Audience: mail.AudienceDirect, Recipients: []int64{7}, Subject: "reward",
 		ExpiresInSeconds: 3600, RequestID: "r1",
@@ -472,14 +471,14 @@ func driveThroughRegistry(t *testing.T, registry *app.Registry, root string) {
 		t.Fatal(err)
 	}
 
-	matchStore := app.MustLookup[match.Matchmaker](registry, servicemods.ModMatch)
+	matchStore := app.MustLookup[match.Matchmaker](registry, mods.ModMatch)
 	if _, err := matchStore.Enqueue(ctx,
 		match.Queue{Mode: "ranked", GroupSize: 2, Partition: "eu"},
 		match.Subject{Kind: "player", ID: 1, Score: 100}, "r1"); err != nil {
 		t.Fatal(err)
 	}
 
-	platformSvc := app.MustLookup[platform.Platform](registry, servicemods.ModPlatform)
+	platformSvc := app.MustLookup[platform.Platform](registry, mods.ModPlatform)
 	raw := []byte(`{"order_id":"o1","player_id":1001,"channel":"store",` +
 		`"product_id":"gems-100","amount_minor":499,"currency":"USD"}`)
 	if _, err := platformSvc.HandleCallback(ctx, raw,
@@ -487,19 +486,19 @@ func driveThroughRegistry(t *testing.T, registry *app.Registry, root string) {
 		t.Fatal(err)
 	}
 
-	rankStore := app.MustLookup[rank.Rank](registry, servicemods.ModRank)
+	rankStore := app.MustLookup[rank.Rank](registry, mods.ModRank)
 	if _, err := rankStore.Submit(ctx,
 		rank.Board{ID: "arena", Scope: rank.ScopeServer, ScopeID: 1, Season: 1},
 		rank.Score{OwnerID: 1, Value: 10}, rank.UpdateSet, ""); err != nil {
 		t.Fatal(err)
 	}
 
-	sessionSvc := app.MustLookup[session.Session](registry, servicemods.ModSession)
+	sessionSvc := app.MustLookup[session.Session](registry, mods.ModSession)
 	if _, err := sessionSvc.Enter(ctx, 1, session.EnterRequest{Kind: "d7", RequestID: "r1"}); err != nil {
 		t.Fatal(err)
 	}
 
-	coordinator := app.MustLookup[activity.Coordinator](registry, servicemods.ModGlobalActivity)
+	coordinator := app.MustLookup[activity.Coordinator](registry, mods.ModGlobalActivity)
 	if _, err := coordinator.OpenActivity(ctx,
 		activity.Key{GroupID: "group-a", ActivityID: "act-1", Phase: activity.PhaseSettle},
 		[]int32{7}); err != nil {
@@ -521,7 +520,7 @@ func TestTheOwningModPublishesMailAsTheInterfaceOnly(t *testing.T) {
 	c := client(t)
 	cfg := modConfig(prefix(t, "shape"))
 	registry := app.NewRegistry(cfg)
-	if err := registry.Register(kitmods.ModRedis, c); err != nil {
+	if err := registry.Register(mods.ModRedis, c); err != nil {
 		t.Fatal(err)
 	}
 	mod := mail.NewMod(nil, nil)
@@ -531,10 +530,10 @@ func TestTheOwningModPublishesMailAsTheInterfaceOnly(t *testing.T) {
 	if err := mod.Provide(registry); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := app.Lookup[mail.Mail](registry, servicemods.ModMail); !ok {
+	if _, ok := app.Lookup[mail.Mail](registry, mods.ModMail); !ok {
 		t.Fatal("the capability does not resolve as mail.Mail")
 	}
-	if _, concrete := app.Lookup[*mail.Service](registry, servicemods.ModMail); concrete {
+	if _, concrete := app.Lookup[*mail.Service](registry, mods.ModMail); concrete {
 		t.Fatal("the owning Mod published the concrete *mail.Service; a consumer can bind to " +
 			"it, compile, pass, and then fail on the day mail moves into its own process")
 	}
@@ -569,23 +568,23 @@ func TestEveryOwningModPublishesTheInterfaceAndNotTheImplementation(t *testing.T
 		asFace    func(*app.Registry, app.ModName) bool
 		asConcret func(*app.Registry, app.ModName) bool
 	}{
-		{"account", servicemods.ModAccount,
+		{"account", mods.ModAccount,
 			has[account.Accounts], has[*account.Service]},
-		{"activity", servicemods.ModGlobalActivity,
+		{"activity", mods.ModGlobalActivity,
 			has[activity.Coordinator], has[*activity.Service]},
-		{"chat", servicemods.ModChat,
+		{"chat", mods.ModChat,
 			has[chat.Messaging], has[*chat.Service]},
-		{"global", servicemods.ModGlobal,
+		{"global", mods.ModGlobal,
 			has[global.Routing], has[*global.Service]},
-		{"mail", servicemods.ModMail,
+		{"mail", mods.ModMail,
 			has[mail.Mail], has[*mail.Service]},
-		{"match", servicemods.ModMatch,
+		{"match", mods.ModMatch,
 			has[match.Matchmaker], has[match.Store]},
-		{"platform", servicemods.ModPlatform,
+		{"platform", mods.ModPlatform,
 			has[platform.Platform], has[*platform.Service]},
-		{"rank", servicemods.ModRank,
+		{"rank", mods.ModRank,
 			has[rank.Rank], has[rank.Store]},
-		{"session", servicemods.ModSession,
+		{"session", mods.ModSession,
 			has[session.Session], has[*session.Service]},
 	} {
 		t.Run(probe.pkg, func(t *testing.T) {
@@ -622,10 +621,10 @@ func TestTheTwoMailModsCannotShareAProcess(t *testing.T) {
 	c := client(t)
 	cfg := modConfig(prefix(t, "exclusive"))
 	registry := app.NewRegistry(cfg)
-	if err := registry.Register(kitmods.ModRedis, c); err != nil {
+	if err := registry.Register(mods.ModRedis, c); err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.Register(kitmods.ModBus, stubBus{}); err != nil {
+	if err := registry.Register(mods.ModBus, stubBus{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -645,17 +644,17 @@ func TestTheTwoMailModsCannotShareAProcess(t *testing.T) {
 	if err == nil {
 		t.Fatal("both mail Mods provided into one registry")
 	}
-	if !strings.Contains(err.Error(), string(servicemods.ModMail)) {
+	if !strings.Contains(err.Error(), string(mods.ModMail)) {
 		t.Fatalf("the error does not name the conflicting capability: %v", err)
 	}
 
 	// And the other order fails too, so the exclusion is not an artefact of
 	// which one happens to be registered first.
 	reversed := app.NewRegistry(cfg)
-	if err := reversed.Register(kitmods.ModRedis, c); err != nil {
+	if err := reversed.Register(mods.ModRedis, c); err != nil {
 		t.Fatal(err)
 	}
-	if err := reversed.Register(kitmods.ModBus, stubBus{}); err != nil {
+	if err := reversed.Register(mods.ModBus, stubBus{}); err != nil {
 		t.Fatal(err)
 	}
 	remote2 := mail.NewClientMod()
@@ -683,11 +682,11 @@ func TestOnlyTheMailServerRegistersHandlers(t *testing.T) {
 	c := client(t)
 	cfg := modConfig(prefix(t, "handlers"))
 	registry := app.NewRegistry(cfg)
-	if err := registry.Register(kitmods.ModRedis, c); err != nil {
+	if err := registry.Register(mods.ModRedis, c); err != nil {
 		t.Fatal(err)
 	}
 	counting := &countingBus{}
-	if err := registry.Register(kitmods.ModBus, counting); err != nil {
+	if err := registry.Register(mods.ModBus, counting); err != nil {
 		t.Fatal(err)
 	}
 
@@ -722,7 +721,7 @@ func TestTheMailClientModRegistersNoHandlers(t *testing.T) {
 	cfg := modConfig(prefix(t, "clienthandlers"))
 	registry := app.NewRegistry(cfg)
 	counting := &countingBus{}
-	if err := registry.Register(kitmods.ModBus, counting); err != nil {
+	if err := registry.Register(mods.ModBus, counting); err != nil {
 		t.Fatal(err)
 	}
 	mod := mail.NewClientMod()
@@ -811,7 +810,7 @@ var _ bus.IBus = (*countingBus)(nil)
 // The central name table and each service's generated CapabilityName must
 // agree.
 //
-// They are two literals of the same name — servicemods.All exists so a
+// They are two literals of the same name — mods.All exists so a
 // collision across services is visible by reading one file, and the generated
 // constant exists so a service's transport does not depend on that file. Two
 // literals drift, so the equality is asserted rather than trusted: a Mod
@@ -830,18 +829,18 @@ func TestTheNameTableAgreesWithEachGeneratedCapability(t *testing.T) {
 		generated app.ModName
 		table     app.ModName
 	}{
-		{"account", account.CapabilityName, servicemods.ModAccount},
-		{"global", global.CapabilityName, servicemods.ModGlobal},
-		{"chat", chat.CapabilityName, servicemods.ModChat},
-		{"activity", activity.CapabilityName, servicemods.ModGlobalActivity},
-		{"mail", mail.CapabilityName, servicemods.ModMail},
-		{"match", match.CapabilityName, servicemods.ModMatch},
-		{"platform", platform.CapabilityName, servicemods.ModPlatform},
-		{"rank", rank.CapabilityName, servicemods.ModRank},
-		{"session", session.CapabilityName, servicemods.ModSession},
+		{"account", account.CapabilityName, mods.ModAccount},
+		{"global", global.CapabilityName, mods.ModGlobal},
+		{"chat", chat.CapabilityName, mods.ModChat},
+		{"activity", activity.CapabilityName, mods.ModGlobalActivity},
+		{"mail", mail.CapabilityName, mods.ModMail},
+		{"match", match.CapabilityName, mods.ModMatch},
+		{"platform", platform.CapabilityName, mods.ModPlatform},
+		{"rank", rank.CapabilityName, mods.ModRank},
+		{"session", session.CapabilityName, mods.ModSession},
 	}
 	table := map[app.ModName]bool{}
-	for _, name := range servicemods.All {
+	for _, name := range mods.All {
 		table[name] = true
 	}
 	seen := map[app.ModName]string{}
@@ -851,7 +850,7 @@ func TestTheNameTableAgreesWithEachGeneratedCapability(t *testing.T) {
 				pair.pkg, pair.generated, pair.table)
 		}
 		if !table[pair.generated] {
-			t.Fatalf("%s generates capability %q, which servicemods.All does not list; a "+
+			t.Fatalf("%s generates capability %q, which mods.All does not list; a "+
 				"collision with another service would be invisible", pair.pkg, pair.generated)
 		}
 		if other, dup := seen[pair.generated]; dup {
@@ -929,9 +928,9 @@ func TestTheOperatorSurfacesAreNotReachableThroughTheBusCapability(t *testing.T)
 		// where Admin IS expected to be reachable.
 		local app.ModName
 	}{
-		{"platform", servicemods.ModPlatform, has[platform.Admin], platform.LocalCapabilityName},
-		{"session", servicemods.ModSession, has[session.Admin], session.LocalCapabilityName},
-		{"activity", servicemods.ModGlobalActivity, has[activity.Admin], activity.LocalCapabilityName},
+		{"platform", mods.ModPlatform, has[platform.Admin], platform.LocalCapabilityName},
+		{"session", mods.ModSession, has[session.Admin], session.LocalCapabilityName},
+		{"activity", mods.ModGlobalActivity, has[activity.Admin], activity.LocalCapabilityName},
 	} {
 		t.Run(probe.pkg, func(t *testing.T) {
 			if probe.asAdmin(registry, probe.public) {
@@ -1017,7 +1016,7 @@ func TestTheOwnerOnlyCapabilityHoldsTheImplementation(t *testing.T) {
 // contract, not an accident of how this test is written.
 func TestEveryServerServesInTheOwningProcess(t *testing.T) {
 	registry, cfg := bootstrap(t)
-	if err := registry.Register(kitmods.ModBus, &countingBus{}); err != nil {
+	if err := registry.Register(mods.ModBus, &countingBus{}); err != nil {
 		t.Fatal(err)
 	}
 	_ = cfg

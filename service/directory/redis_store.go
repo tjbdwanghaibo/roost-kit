@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // NewRedisState builds the versioned state a Directory runs on.

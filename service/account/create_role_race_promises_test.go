@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // slotsVanishingOnce makes the slot row disappear exactly when CreateRole

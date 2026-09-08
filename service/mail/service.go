@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // Config wires a Service.

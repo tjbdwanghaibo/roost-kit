@@ -8,8 +8,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 
-	"github.com/tjbdwanghaibo/roost-service/servicemetrics"
-	"github.com/tjbdwanghaibo/roost-service/servicemods"
+	"github.com/tjbdwanghaibo/roost-kit/service/servicemetrics"
 )
 
 // Mod wires the activity coordination service into an app and registers it as
@@ -59,7 +58,7 @@ func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
 // The prefix may still point at the same root — each service owning its own
 // keyspace setting is the point, not that the keyspaces have to differ.
 func (m *Mod) Init(cfg *viper.Viper) error {
-	prefix, err := servicemods.KeyPrefix(cfg, "activity")
+	prefix, err := mods.KeyPrefix(cfg, "activity")
 	if err != nil {
 		return err
 	}
@@ -67,15 +66,15 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 	// horizon: past it a replayed progress request is indistinguishable from a
 	// new one and the progress is applied twice. That horizon belongs to the
 	// caller's transport, so this service cannot pick it.
-	reservationTTL, err := servicemods.RequiredDuration(cfg, "activity.reservation_ttl")
+	reservationTTL, err := mods.RequiredDuration(cfg, "activity.reservation_ttl")
 	if err != nil {
 		return err
 	}
-	graceWindow, err := servicemods.Duration(cfg, "activity.grace_window", DefaultGraceWindow)
+	graceWindow, err := mods.Duration(cfg, "activity.grace_window", DefaultGraceWindow)
 	if err != nil {
 		return err
 	}
-	dispatchBackoff, err := servicemods.Duration(cfg, "activity.dispatch_backoff", DefaultDispatchBackoff)
+	dispatchBackoff, err := mods.Duration(cfg, "activity.dispatch_backoff", DefaultDispatchBackoff)
 	if err != nil {
 		return err
 	}
@@ -93,7 +92,7 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 
 // Provide builds the service and registers it.
 func (m *Mod) Provide(r *app.Registry) error {
-	client, err := servicemods.Redis(r)
+	client, err := mods.Redis(r)
 	if err != nil {
 		return err
 	}

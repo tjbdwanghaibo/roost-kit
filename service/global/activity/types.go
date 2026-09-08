@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/tjbdwanghaibo/roost-core/errcode"
-	"github.com/tjbdwanghaibo/roost-kit/versionstore"
+	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
 // Package activity is the cross-server activity coordination service:
