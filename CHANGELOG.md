@@ -10,6 +10,7 @@
 
 ### Added
 
+- **gap map 采样器跳过 `*_gen.go`**（B-25）：生成文件是同一模板在每个包的实例，其守卫在模板所在处钉一次即可；采样器现在只统计不采样，并在包级与总计里报告跳过的守卫数。
 - **mail 生成传输层的装配拒绝与 Redis 存储参数守卫钉住**（U-0103，C2，B-24 尾项）。nightly gap map 里 `mail` 20 条采样 16 条无覆盖，
   其中 8 条在生成的 `mail_rpc_gen.go`，与其余 11 个服务共用同一模板。钉住：`RegisterHandlers` 缺 bus / service、`NewBusClient` 缺 bus、
   nil 客户端调用、Server 装在只持有客户端的进程（"published but … not"）/ 缺本地实现 / 缺 bus、ClientMod 负超时 / 缺 bus；Redis：nil 客户端、
