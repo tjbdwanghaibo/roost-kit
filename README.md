@@ -83,7 +83,7 @@ import (
 	"time"
 
 	corenest "github.com/tjbdwanghaibo/roost-core/nest"
-	"github.com/tjbdwanghaibo/roost-kit/nestwal"
+	"github.com/tjbdwanghaibo/roost-core/nestwal"
 )
 
 func record(id byte, entityID int64, payload string) corenest.CommitRecord {
@@ -219,7 +219,7 @@ ticket lsn=1 durable, watermark DurableLSN=1
 import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-core/bus"
-	kitdata "github.com/tjbdwanghaibo/roost-kit/dataengine"
+	kitdata "github.com/tjbdwanghaibo/roost-core/dataengine/engine"
 	kitnest "github.com/tjbdwanghaibo/roost-kit/nest"
 	"github.com/tjbdwanghaibo/roost-kit/mongo"
 	"github.com/tjbdwanghaibo/roost-kit/nats"
@@ -536,16 +536,15 @@ Remote 路径使用显式 delete intent，并继续经过 ownership marker、loc
 
   | 仓库 | 模块路径 | 角色 |
   | --- | --- | --- |
-  | roost-core | `github.com/tjbdwanghaibo/roost-core` | 生命周期、Registry、Nest 引擎、稳定接口与设计文档 |
-  | roost-kit（本仓库） | `github.com/tjbdwanghaibo/roost-kit` | 基础设施 Mod 与中间件实现 |
+  | roost-core | `github.com/tjbdwanghaibo/roost-core` | 契约 + 实现：Nest、Data Engine、Saga、Remote Entity、客户端、同步、技能系统（`skill/`，原 roost-skill） |
+  | roost-kit（本仓库） | `github.com/tjbdwanghaibo/roost-kit` | 装配层：配置解析、Mod、生命周期、运维入口；`service/` 通用游戏服务（原 roost-service） |
   | roost-codegen | `github.com/tjbdwanghaibo/roost-codegen` | DAO/Sender 等代码生成 |
-  | roost-skill | `github.com/tjbdwanghaibo/roost-skill` | 技能/战斗玩法组件 |
 
 - **本地联调**：在共同父目录建 workspace，勿把 `go.work` 提交进任何仓库：
 
   ```bash
   cd /path/to/workspace
-  go work init ./roost-core ./roost-kit ./roost-skill ./roost-codegen
+  go work init ./roost-core ./roost-kit ./roost-codegen
   ```
 
   需要业务工程时再执行 `go work use ./your-service`。发布/standalone 验证必须使用
