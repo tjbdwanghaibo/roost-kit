@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	engine "github.com/tjbdwanghaibo/roost-core/dataengine/engine"
 	"net/http"
 	"os"
 	"sync/atomic"
@@ -129,7 +130,7 @@ func TestToxicNATSLatencyKeepsTheCommitOnTheDurablePath(t *testing.T) {
 
 	proxy.reset(t)
 	waitFor(t, 30*time.Second, "effect delivery after latency cleared", func() bool {
-		return collectionCount(fx, outboxCollection) == 0 && handled.Load() == 1
+		return collectionCount(fx, engine.OutboxCollection) == 0 && handled.Load() == 1
 	})
 	if got := handled.Load(); got != 1 {
 		t.Fatalf("effect deliveries=%d, want exactly 1", got)
@@ -161,12 +162,12 @@ func TestToxicNATSConnectionResetDeliversTheEffectExactlyOnce(t *testing.T) {
 	}
 	assertDocumentVersion(t, fx, "toxic_players", 702, 1)
 	waitFor(t, 5*time.Second, "outbox item to remain pending while connections reset", func() bool {
-		return collectionCount(fx, outboxCollection) == 1
+		return collectionCount(fx, engine.OutboxCollection) == 1
 	})
 
 	proxy.reset(t)
 	waitFor(t, 30*time.Second, "outbox replay after the network healed", func() bool {
-		return collectionCount(fx, outboxCollection) == 0 && handled.Load() == 1
+		return collectionCount(fx, engine.OutboxCollection) == 0 && handled.Load() == 1
 	})
 	if got := handled.Load(); got != 1 {
 		t.Fatalf("effect deliveries=%d, want exactly 1", got)
@@ -212,7 +213,7 @@ func TestToxicNATSHalfOpenAckLossIsBoundedAndDeliversExactlyOnce(t *testing.T) {
 	waitFor(t, 20*time.Second, "a bounded publish failure while the ack path is black-holed", func() bool {
 		return fx.runtime.Outbox.Stats().PublishFailures >= 1
 	})
-	if got := collectionCount(fx, outboxCollection); got != 1 {
+	if got := collectionCount(fx, engine.OutboxCollection); got != 1 {
 		t.Fatalf("outbox items=%d while half-open, want the effect retained", got)
 	}
 	if got := handled.Load(); got != 0 {
@@ -221,7 +222,7 @@ func TestToxicNATSHalfOpenAckLossIsBoundedAndDeliversExactlyOnce(t *testing.T) {
 
 	proxy.reset(t)
 	waitFor(t, 30*time.Second, "outbox replay after the network healed", func() bool {
-		return collectionCount(fx, outboxCollection) == 0 && handled.Load() >= 1
+		return collectionCount(fx, engine.OutboxCollection) == 0 && handled.Load() >= 1
 	})
 	time.Sleep(2 * time.Second) // give a duplicate every chance to show up
 	if got := handled.Load(); got != 1 {

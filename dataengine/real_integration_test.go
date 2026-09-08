@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	engine "github.com/tjbdwanghaibo/roost-core/dataengine/engine"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -263,7 +264,7 @@ func TestRealMixedProjectionSegmentsPreserveOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if processed, err := projector.replayPass(fx.context()); err != nil || processed != 3 {
+	if processed, err := projector.ReplayPass(fx.context()); err != nil || processed != 3 {
 		t.Fatalf("processed=%d err=%v", processed, err)
 	}
 
@@ -315,16 +316,17 @@ func TestRealProjectionOnlyMongoAckFailureRestartPreservesSameEntityOrder(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstProjector.cancel()
-	awaitChan(t, firstProjector.done, "the first projector to finish its pass")
+	if err := firstProjector.Close(context.Background()); err != nil {
+		t.Fatalf("stop first projector: %v", err)
+	}
 	for i := range records {
 		if _, err := wal.Append(fx.context(), records[i]); err != nil {
 			t.Fatal(err)
 		}
 	}
 	ackErr := errors.New("injected checkpoint failure after Mongo success")
-	firstProjector.ack = func(context.Context, corenest.CommitFence) error { return ackErr }
-	processed, err := firstProjector.replayPass(fx.context())
+	firstProjector.OverrideAck(func(context.Context, corenest.CommitFence) error { return ackErr })
+	processed, err := firstProjector.ReplayPass(fx.context())
 	if !errors.Is(err, ackErr) || processed != 1 {
 		t.Fatalf("pre-restart processed=%d err=%v", processed, err)
 	}
@@ -410,8 +412,9 @@ func TestRealMongoMixedRatioWALReplayAckThroughput(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			projector.cancel()
-			<-projector.done
+			if err := projector.Close(context.Background()); err != nil {
+				t.Errorf("stop projector: %v", err)
+			}
 			for i := range records {
 				if _, err := wal.Append(fx.context(), records[i]); err != nil {
 					t.Fatal(err)
@@ -422,10 +425,10 @@ func TestRealMongoMixedRatioWALReplayAckThroughput(t *testing.T) {
 			}
 			ack := wal.Ack
 			ackCalls := 0
-			projector.ack = func(ctx context.Context, fence corenest.CommitFence) error {
+			projector.OverrideAck(func(ctx context.Context, fence corenest.CommitFence) error {
 				ackCalls++
 				return ack(ctx, fence)
-			}
+			})
 
 			started := time.Now()
 			if err := projector.Flush(fx.context()); err != nil {
@@ -533,4 +536,32 @@ func TestRealSagaReceiptTransactionThroughput(t *testing.T) {
 	assertCollectionCount(t, fx, engine.TransactionCollection, records)
 	assertCollectionCount(t, fx, engine.ReceiptCollection, records)
 	t.Logf("Saga receipt transactions: %s (%.0f records/s)", elapsed, float64(records)/elapsed.Seconds())
+}
+
+func assertWALReplayIDs(t *testing.T, wal *nestwal.WAL, want []coredata.TransactionID) {
+	t.Helper()
+	got := make([]coredata.TransactionID, 0, len(want))
+	if err := wal.Replay(context.Background(), func(_ corenest.CommitFence, record coredata.CommitRecord) error {
+		got = append(got, record.ID)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("replay transaction IDs=%v want=%v", got, want)
+	}
+}
+
+func assertWALReplayCount(t *testing.T, wal *nestwal.WAL, want int) {
+	t.Helper()
+	got := 0
+	if err := wal.Replay(context.Background(), func(corenest.CommitFence, coredata.CommitRecord) error {
+		got++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("replay records=%d want=%d", got, want)
+	}
 }
