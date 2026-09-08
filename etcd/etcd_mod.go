@@ -15,13 +15,13 @@ import (
 	"github.com/spf13/viper"
 )
 
-// EtcdMod implements app.Mod for etcd connectivity.
-// Provides IEtcd, IDiscovery, and IElectionFactory via Registry.
+// EtcdMod implements app.Mod for etcd connectivity. It parses configuration,
+// asks core to assemble client / discovery / elections on one connection,
+// publishes them as capabilities and forwards lifecycle calls; it holds no
+// raw clientv3 handle (P3b).
 type EtcdMod struct {
-	client    *etcddriver.Client
-	discovery *etcddriver.Discovery
-	election  *etcddriver.ElectionFactory
-	cfg       *fetcd.Config
+	asm *etcddriver.Assembly
+	cfg *fetcd.Config
 
 	// service info for auto-registration
 	serviceInfo *fetcd.ServiceInfo
@@ -113,55 +113,43 @@ func serviceMetadata(cfg *viper.Viper, svcType string, addr string) map[string]s
 }
 
 func (m *EtcdMod) Provide(r *app.Registry) error {
-	client, err := etcddriver.NewClient(m.cfg)
+	asm, err := etcddriver.Assemble(m.cfg)
 	if err != nil {
 		return err
 	}
-	m.client = client
-	m.discovery = etcddriver.NewDiscovery(client.Raw(), m.cfg.ServicePrefix, m.cfg.LeaseTTL)
-	m.discovery.SetRetryIntervals(m.cfg.RegisterRetryMinInterval, m.cfg.RegisterRetryMaxInterval)
-	m.election = etcddriver.NewElectionFactory(client.Raw())
+	m.asm = asm
 	healthReg, ok := app.Lookup[*health.Registry](r, mods.ModHealth)
 	if !ok || healthReg == nil {
 		return errors.New("etcd mod: health registry not found")
 	}
 	healthReg.Register("etcd", health.CheckerFunc(func(ctx context.Context) health.Result {
-		if m.client == nil || m.client.Raw() == nil {
+		if m.asm == nil {
 			return health.Result{Status: health.StatusFail, Message: "client not initialized"}
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		_, err := m.client.Raw().Status(checkCtx, m.cfg.Endpoints[0])
-		if err != nil {
+		if err := m.asm.Ping(checkCtx); err != nil {
 			return health.Result{Status: health.StatusFail, Message: "status failed", Err: err}
 		}
 		return health.Result{Status: health.StatusOK, Message: "connected"}
 	}))
 
 	return mods.RegisterAll(r,
-		mods.Capability{Name: mods.ModEtcd, Value: fetcd.IEtcd(m.client)},
-		mods.Capability{Name: mods.ModEtcdDiscov, Value: fetcd.IDiscovery(m.discovery)},
-		mods.Capability{Name: mods.ModEtcdElection, Value: fetcd.IElectionFactory(m.election)},
+		mods.Capability{Name: mods.ModEtcd, Value: fetcd.IEtcd(m.asm.Client)},
+		mods.Capability{Name: mods.ModEtcdDiscov, Value: fetcd.IDiscovery(m.asm.Discovery)},
+		mods.Capability{Name: mods.ModEtcdElection, Value: fetcd.IElectionFactory(m.asm.Election)},
 	)
 }
 
 func (m *EtcdMod) Start() error {
-	// Ping etcd
+	if m == nil || m.asm == nil {
+		return errors.New("etcd mod: not provided")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	_, err := m.client.Raw().Status(ctx, m.cfg.Endpoints[0])
-	if err != nil {
+	if err := m.asm.Start(ctx, m.serviceInfo); err != nil {
 		return err
 	}
-
-	// Auto-register service
-	if m.serviceInfo.ServiceType != "" {
-		if err := m.discovery.Register(ctx, m.serviceInfo); err != nil {
-			return err
-		}
-	}
-
 	slog.Info("etcd mod: started", "endpoints", m.cfg.Endpoints)
 	return nil
 }
@@ -175,16 +163,13 @@ func (m *EtcdMod) Stop() {
 }
 
 func (m *EtcdMod) StopWithContext(ctx context.Context) error {
+	if m == nil || m.asm == nil {
+		return nil
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	var err error
-	if m.discovery != nil {
-		err = errors.Join(err, m.discovery.Deregister(ctx))
-	}
-	if m.client != nil {
-		m.client.Close()
-	}
+	err := m.asm.Close(ctx)
 	slog.Info("etcd mod: stopped")
 	return err
 }

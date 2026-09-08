@@ -246,6 +246,10 @@
 
 ### Changed
 
+- **P3b：Mod 瘦身**——nats / etcd / redis / dataengine / saga / remoteentity 六个 Mod 改为持有 core 的 `Assembly`：`Init` 不变，`Provide` = Lookup + `Assemble` + 注册能力 + 健康注册，
+  `Start` / `Stop` 转交；构造顺序、失败回滚与驱动内部（`Raw()`）全部在 core（core ≥ v1.15.0）。Mod 构造器签名与能力名不变；错误可见性方向的三处差异见 core `docs/history/P3b_mods.md` §3.1。
+  新护栏 `assembly_boundary_test.go`：kit 非测试代码不得调用 `.Raw()`。`saga/mod_test.go` 随 `drainSubscriptions` 搬到 core。
+  `scripts/perf/dataengine.sh` 删除（指向的 `./nestwal` 已随收敛搬走），现位于 roost-core `scripts/perf/`。
 - **go 指令 1.25.0 → 1.27.0**，与 roost-core / roost-codegen / roost-service 和
   `go.work` 统一。取 1.27.0 而不是最新的 1.27.1：一个补丁级的 go 指令什么都买不到，
   还会让停在 1.27.0 的工具链去下载一个新工具链。

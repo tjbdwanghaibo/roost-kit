@@ -3,8 +3,6 @@ package saga
 import (
 	"context"
 	"fmt"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/spf13/viper"
@@ -16,36 +14,13 @@ import (
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 )
 
+// Mod parses configuration, looks up the Mongo and JetStream capabilities,
+// hands them to core's saga.Assemble and forwards lifecycle calls. Consumer
+// subscription, engine loop and drain-then-stop live in core (P3b).
 type Mod struct {
-	lifecycleMu sync.Mutex
-	stateMu     sync.RWMutex
 	definitions []coresaga.Definition
-	config      modConfig
-	store       *coresaga.MongoStore
-	engine      *coresaga.Engine
-	transport   *coresaga.JetStreamPublisher
-	resultSub   fnats.IJetStreamSubscription
-	startSub    fnats.IJetStreamSubscription
-	cancel      context.CancelFunc
-	done        chan struct{}
-	errMu       sync.RWMutex
-	runErr      error
-	running     atomic.Bool
-}
-
-type modConfig struct {
-	store          coresaga.MongoStoreOptions
-	engine         coresaga.Options
-	prefix         string
-	stream         fnats.JetStreamConfig
-	durable        string
-	ackWait        time.Duration
-	processTimeout time.Duration
-	maxDeliver     int
-	maxPending     int
-	nakMin         time.Duration
-	nakMax         time.Duration
-	start          coresaga.NestStartConsumerConfig
+	config      coresaga.AssemblyConfig
+	asm         *coresaga.Assembly
 }
 
 func NewMod(definitions ...coresaga.Definition) *Mod {
@@ -99,11 +74,21 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 	if durable == "" {
 		durable = "roost-saga-coordinator"
 	}
-	m.config = modConfig{
-		store:  coresaga.MongoStoreOptions{Database: stringDefault(cfg.GetString("saga.database"), "saga"), SagaCollection: cfg.GetString("saga.collections.sagas"), OutboxCollection: cfg.GetString("saga.collections.outbox"), CompletionCollection: cfg.GetString("saga.collections.completions"), OperationCollection: cfg.GetString("saga.collections.operations"), CompletionReceiptTTL: durationDefault(cfg.GetDuration("saga.completion_receipt_ttl"), 30*24*time.Hour)},
-		engine: coresaga.Options{Owner: owner, CoordinatorWorkers: intDefault(cfg.GetInt("saga.coordinator_workers"), defaults.CoordinatorWorkers), PublisherWorkers: intDefault(cfg.GetInt("saga.publisher_workers"), defaults.PublisherWorkers), CoordinatorBatch: intDefault(cfg.GetInt("saga.coordinator_claim_batch"), defaults.CoordinatorBatch), PublisherBatch: intDefault(cfg.GetInt("saga.publisher_claim_batch"), defaults.PublisherBatch), LeaseDuration: durationDefault(cfg.GetDuration("saga.lease_duration"), defaults.LeaseDuration), StoreTimeout: durationDefault(cfg.GetDuration("saga.store_timeout"), defaults.StoreTimeout), PollInterval: durationDefault(cfg.GetDuration("saga.poll_interval"), defaults.PollInterval), PublishTimeout: durationDefault(cfg.GetDuration("saga.publish_timeout"), defaults.PublishTimeout), PublishBackoffMin: durationDefault(cfg.GetDuration("saga.publish_backoff_min"), defaults.PublishBackoffMin), PublishBackoffMax: durationDefault(cfg.GetDuration("saga.publish_backoff_max"), defaults.PublishBackoffMax), MaxPayloadBytes: intDefault(cfg.GetInt("saga.max_payload_bytes"), defaults.MaxPayloadBytes)},
-		prefix: prefix, durable: durable, ackWait: durationDefault(cfg.GetDuration("saga.result_ack_wait"), 30*time.Second), processTimeout: durationDefault(cfg.GetDuration("saga.result_process_timeout"), defaults.StoreTimeout), maxDeliver: intDefault(cfg.GetInt("saga.result_max_deliver"), 25_000), maxPending: intDefault(cfg.GetInt("saga.result_max_ack_pending"), 256), nakMin: durationDefault(cfg.GetDuration("saga.result_nak_backoff_min"), 250*time.Millisecond), nakMax: durationDefault(cfg.GetDuration("saga.result_nak_backoff_max"), 30*time.Second),
-		start: coresaga.NestStartConsumerConfig{
+	m.config = coresaga.AssemblyConfig{
+		Store:  coresaga.MongoStoreOptions{Database: stringDefault(cfg.GetString("saga.database"), "saga"), SagaCollection: cfg.GetString("saga.collections.sagas"), OutboxCollection: cfg.GetString("saga.collections.outbox"), CompletionCollection: cfg.GetString("saga.collections.completions"), OperationCollection: cfg.GetString("saga.collections.operations"), CompletionReceiptTTL: durationDefault(cfg.GetDuration("saga.completion_receipt_ttl"), 30*24*time.Hour)},
+		Engine: coresaga.Options{Owner: owner, CoordinatorWorkers: intDefault(cfg.GetInt("saga.coordinator_workers"), defaults.CoordinatorWorkers), PublisherWorkers: intDefault(cfg.GetInt("saga.publisher_workers"), defaults.PublisherWorkers), CoordinatorBatch: intDefault(cfg.GetInt("saga.coordinator_claim_batch"), defaults.CoordinatorBatch), PublisherBatch: intDefault(cfg.GetInt("saga.publisher_claim_batch"), defaults.PublisherBatch), LeaseDuration: durationDefault(cfg.GetDuration("saga.lease_duration"), defaults.LeaseDuration), StoreTimeout: durationDefault(cfg.GetDuration("saga.store_timeout"), defaults.StoreTimeout), PollInterval: durationDefault(cfg.GetDuration("saga.poll_interval"), defaults.PollInterval), PublishTimeout: durationDefault(cfg.GetDuration("saga.publish_timeout"), defaults.PublishTimeout), PublishBackoffMin: durationDefault(cfg.GetDuration("saga.publish_backoff_min"), defaults.PublishBackoffMin), PublishBackoffMax: durationDefault(cfg.GetDuration("saga.publish_backoff_max"), defaults.PublishBackoffMax), MaxPayloadBytes: intDefault(cfg.GetInt("saga.max_payload_bytes"), defaults.MaxPayloadBytes)},
+		Prefix: prefix,
+		Stream: fnats.JetStreamConfig{Name: stream, Subjects: []string{prefix + ".>"}, Storage: fnats.JetStreamStorageFile, MaxAge: durationDefault(cfg.GetDuration("saga.stream_max_age"), 7*24*time.Hour), Duplicates: durationDefault(cfg.GetDuration("saga.duplicate_window"), 10*time.Minute), Replicas: intDefault(cfg.GetInt("saga.replicas"), 1), MaxBytes: int64Default(cfg.GetInt64("saga.stream_max_bytes"), 8<<30)},
+		Completions: coresaga.CompletionConsumerConfig{
+			Stream: stream, Durable: durable, SubjectPrefix: prefix,
+			AckWait:        durationDefault(cfg.GetDuration("saga.result_ack_wait"), 30*time.Second),
+			ProcessTimeout: durationDefault(cfg.GetDuration("saga.result_process_timeout"), defaults.StoreTimeout),
+			MaxDeliver:     intDefault(cfg.GetInt("saga.result_max_deliver"), 25_000),
+			MaxAckPending:  intDefault(cfg.GetInt("saga.result_max_ack_pending"), 256),
+			NakBackoffMin:  durationDefault(cfg.GetDuration("saga.result_nak_backoff_min"), 250*time.Millisecond),
+			NakBackoffMax:  durationDefault(cfg.GetDuration("saga.result_nak_backoff_max"), 30*time.Second),
+		},
+		Starts: coresaga.NestStartConsumerConfig{
 			Stream:         stringDefault(cfg.GetString("saga.start_effect_stream"), "ROOST_EFFECTS"),
 			Durable:        stringDefault(cfg.GetString("saga.start_effect_durable"), "roost-saga-start"),
 			EffectPrefix:   stringDefault(cfg.GetString("saga.start_effect_prefix"), "roost.effect"),
@@ -114,9 +99,8 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 			NakBackoffMin:  durationDefault(cfg.GetDuration("saga.start_effect_nak_backoff_min"), 250*time.Millisecond),
 			NakBackoffMax:  durationDefault(cfg.GetDuration("saga.start_effect_nak_backoff_max"), 30*time.Second),
 		},
-		stream: fnats.JetStreamConfig{Name: stream, Subjects: []string{prefix + ".>"}, Storage: fnats.JetStreamStorageFile, MaxAge: durationDefault(cfg.GetDuration("saga.stream_max_age"), 7*24*time.Hour), Duplicates: durationDefault(cfg.GetDuration("saga.duplicate_window"), 10*time.Minute), Replicas: intDefault(cfg.GetInt("saga.replicas"), 1), MaxBytes: int64Default(cfg.GetInt64("saga.stream_max_bytes"), 8<<30)},
 	}
-	if m.config.store.CompletionReceiptTTL <= m.config.stream.MaxAge {
+	if m.config.Store.CompletionReceiptTTL <= m.config.Stream.MaxAge {
 		return fmt.Errorf("saga: completion receipt ttl must exceed stream max age")
 	}
 	return nil
@@ -134,25 +118,12 @@ func (m *Mod) Provide(registry *app.Registry) error {
 	if !ok || jetStream == nil {
 		return fmt.Errorf("saga mod: capability %q not found", mods.ModNatsJetStream)
 	}
-	store, err := coresaga.NewMongoStore(mongoClient, m.config.store)
+	asm, err := coresaga.Assemble(mongoClient, jetStream, m.config, m.definitions...)
 	if err != nil {
 		return err
 	}
-	transport, err := coresaga.NewJetStreamPublisher(jetStream, m.config.prefix)
-	if err != nil {
-		return err
-	}
-	engine, err := coresaga.NewEngine(store, transport, m.config.engine)
-	if err != nil {
-		return err
-	}
-	for i := range m.definitions {
-		if err := engine.Register(m.definitions[i]); err != nil {
-			return fmt.Errorf("saga mod: register definition: %w", err)
-		}
-	}
-	m.store, m.transport, m.engine = store, transport, engine
-	if err := registry.Register(mods.ModSaga, engine); err != nil {
+	m.asm = asm
+	if err := registry.Register(mods.ModSaga, asm.Engine); err != nil {
 		return err
 	}
 	healthRegistry, ok := app.Lookup[*health.Registry](registry, mods.ModHealth)
@@ -164,156 +135,56 @@ func (m *Mod) Provide(registry *app.Registry) error {
 }
 
 func (m *Mod) Start() error {
-	m.lifecycleMu.Lock()
-	defer m.lifecycleMu.Unlock()
-	if m.running.Load() {
-		return nil
-	}
-	if m.engine == nil || m.store == nil || m.transport == nil {
+	if m == nil || m.asm == nil {
 		return fmt.Errorf("saga mod: not provided")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := m.store.EnsureInfrastructure(ctx); err != nil {
-		return err
-	}
-	jetStream := m.transport.Client()
-	if err := jetStream.EnsureStream(ctx, m.config.stream); err != nil {
-		return fmt.Errorf("saga mod: ensure stream: %w", err)
-	}
-	runCtx, runCancel := context.WithCancel(context.Background())
-	sub, err := coresaga.SubscribeCompletions(runCtx, jetStream, coresaga.CompletionConsumerConfig{Stream: m.config.stream.Name, Durable: m.config.durable, SubjectPrefix: m.config.prefix, AckWait: m.config.ackWait, ProcessTimeout: m.config.processTimeout, MaxDeliver: m.config.maxDeliver, MaxAckPending: m.config.maxPending, NakBackoffMin: m.config.nakMin, NakBackoffMax: m.config.nakMax}, m.engine)
-	if err != nil {
-		runCancel()
-		return fmt.Errorf("saga mod: subscribe completions: %w", err)
-	}
-	startSub, err := coresaga.SubscribeNestStarts(runCtx, jetStream, m.config.start, m.engine)
-	if err != nil {
-		sub.Drain()
-		runCancel()
-		return fmt.Errorf("saga mod: subscribe Nest starts: %w", err)
-	}
-	m.stateMu.Lock()
-	m.cancel, m.resultSub, m.startSub, m.done = runCancel, sub, startSub, make(chan struct{})
-	done := m.done
-	m.stateMu.Unlock()
-	m.errMu.Lock()
-	m.runErr = nil
-	m.errMu.Unlock()
-	m.running.Store(true)
-	go func() {
-		defer m.running.Store(false)
-		defer close(done)
-		err := m.engine.Run(runCtx)
-		if err != nil && runCtx.Err() == nil {
-			m.errMu.Lock()
-			m.runErr = err
-			m.errMu.Unlock()
-		}
-	}()
-	return nil
+	return m.asm.Start(ctx)
 }
 
 func (m *Mod) Stop() { _ = m.StopWithContext(context.Background()) }
 func (m *Mod) StopWithContext(ctx context.Context) error {
-	if m == nil {
+	if m == nil || m.asm == nil {
 		return nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	m.lifecycleMu.Lock()
-	defer m.lifecycleMu.Unlock()
-	m.stateMu.RLock()
-	resultSub, startSub, runCancel, done := m.resultSub, m.startSub, m.cancel, m.done
-	m.stateMu.RUnlock()
-	subs := []fnats.IJetStreamSubscription{resultSub, startSub}
-	if err := drainSubscriptions(ctx, subs); err != nil {
-		for _, sub := range subs {
-			if sub != nil {
-				sub.Stop()
-			}
-		}
-		if runCancel != nil {
-			runCancel()
-		}
-		return err
-	}
-	m.stateMu.Lock()
-	m.resultSub, m.startSub, m.cancel = nil, nil, nil
-	m.stateMu.Unlock()
-	if runCancel != nil {
-		runCancel()
-	}
-	if m.engine != nil {
-		if err := m.engine.Stop(ctx); err != nil {
-			return err
-		}
-	}
-	if done != nil {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return nil
+	return m.asm.Stop(ctx)
 }
 
-func drainSubscriptions(ctx context.Context, subscriptions []fnats.IJetStreamSubscription) error {
-	for _, sub := range subscriptions {
-		if sub != nil {
-			sub.Drain()
-		}
+func (m *Mod) Engine() *coresaga.Engine {
+	if m == nil || m.asm == nil {
+		return nil
 	}
-	for _, sub := range subscriptions {
-		if sub == nil {
-			continue
-		}
-		select {
-		case <-sub.Closed():
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return nil
+	return m.asm.Engine
 }
-func (m *Mod) Engine() *coresaga.Engine                { return m.engine }
-func (m *Mod) Store() *coresaga.MongoStore             { return m.store }
-func (m *Mod) Transport() *coresaga.JetStreamPublisher { return m.transport }
+func (m *Mod) Store() *coresaga.MongoStore {
+	if m == nil || m.asm == nil {
+		return nil
+	}
+	return m.asm.Store
+}
+func (m *Mod) Transport() *coresaga.JetStreamPublisher {
+	if m == nil || m.asm == nil {
+		return nil
+	}
+	return m.asm.Transport
+}
+
 func (m *Mod) checkHealth(ctx context.Context) health.Result {
-	if m.engine == nil || !m.running.Load() {
+	if m == nil || m.asm == nil || !m.asm.Running() {
 		return health.Result{Status: health.StatusFail, Message: "not initialized"}
 	}
-	m.stateMu.RLock()
-	resultSub, startSub := m.resultSub, m.startSub
-	m.stateMu.RUnlock()
-	if subscriptionClosed(resultSub) || subscriptionClosed(startSub) {
+	if m.asm.ConsumersClosed() {
 		return health.Result{Status: health.StatusFail, Message: "durable consumer stopped"}
 	}
-	m.errMu.RLock()
-	err := m.runErr
-	m.errMu.RUnlock()
-	if err != nil {
+	if err := m.asm.RunError(); err != nil {
 		return health.Result{Status: health.StatusFail, Message: "worker stopped", Err: err}
 	}
-	if err := m.store.Ping(ctx); err != nil {
+	if err := m.asm.Store.Ping(ctx); err != nil {
 		return health.Result{Status: health.StatusFail, Message: "MongoDB unavailable", Err: err}
 	}
-	stats := m.engine.Stats()
+	stats := m.asm.Engine.Stats()
 	return health.Result{Status: health.StatusOK, Message: fmt.Sprintf("running conflicts=%d duplicates=%d publish_failures=%d store_failures=%d worker_failures=%d manual_required=%d", stats.Conflicts, stats.Duplicates, stats.PublishFailures, stats.StoreFailures, stats.WorkerFailures, stats.ManualRequired)}
-}
-
-func subscriptionClosed(subscription fnats.IJetStreamSubscription) bool {
-	if subscription == nil {
-		return true
-	}
-	select {
-	case <-subscription.Closed():
-		return true
-	default:
-		return false
-	}
 }
 
 func durationDefault(value, fallback time.Duration) time.Duration {

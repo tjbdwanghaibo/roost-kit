@@ -18,16 +18,16 @@ import (
 	"github.com/spf13/viper"
 )
 
-// NatsMod implements app.Mod for NATS connectivity.
-// It creates IClient, IRpc, and Bus instances and registers them in the Registry.
+// NatsMod implements app.Mod for NATS connectivity. Core assembles the
+// connection, JetStream and RPC client; the Mod parses configuration, builds
+// the bus from registry configuration on top of them, publishes the
+// capabilities and forwards lifecycle calls (P3b).
 type NatsMod struct {
-	client    *natsdriver.Client
-	jetStream *natsdriver.JetStreamClient
-	rpc       *natsdriver.RPCClient
-	bus       *bus.Bus
-	codec     bus.Codec
-	cfg       *fnats.Config
-	extra     natsdriver.ClientOptions
+	asm   *natsdriver.Assembly
+	bus   *bus.Bus
+	codec bus.Codec
+	cfg   *fnats.Config
+	extra natsdriver.ClientOptions
 }
 
 // NewNatsMod creates a NatsMod with an optional codec.
@@ -55,11 +55,11 @@ func (m *NatsMod) Init(cfg *viper.Viper) error {
 }
 
 func (m *NatsMod) Provide(r *app.Registry) error {
-	client, err := natsdriver.NewClient(m.cfg, m.extra)
+	asm, err := natsdriver.Assemble(m.cfg, m.extra)
 	if err != nil {
 		return err
 	}
-	m.client = client
+	m.asm = asm
 	healthReg, ok := app.Lookup[*health.Registry](r, mods.ModHealth)
 	if !ok || healthReg == nil {
 		return errors.New("nats mod: health registry not found")
@@ -69,23 +69,14 @@ func (m *NatsMod) Provide(r *app.Registry) error {
 		return errors.New("nats mod: admin registry not found")
 	}
 	healthReg.Register("nats", health.CheckerFunc(func(context.Context) health.Result {
-		if m.client == nil {
+		if m.asm == nil {
 			return health.Result{Status: health.StatusFail, Message: "client not initialized"}
 		}
-		if !m.client.Connected() {
+		if !m.asm.Connected() {
 			return health.Result{Status: health.StatusFail, Message: "not connected"}
 		}
 		return health.Result{Status: health.StatusOK, Message: "connected"}
 	}))
-	jetStream, err := natsdriver.NewJetStreamClient(client)
-	if err != nil {
-		return err
-	}
-	m.jetStream = jetStream
-
-	policy := fnats.DefaultRetryPolicy()
-	m.rpc = natsdriver.NewRPCClient(client, policy, 4)
-
 	// Create bus
 	sid := r.Config().GetInt32("sid")
 	svcType := r.Config().GetString("server_type")
@@ -98,7 +89,7 @@ func (m *NatsMod) Provide(r *app.Registry) error {
 		workerNum = 8
 	}
 
-	m.bus = bus.New(m.client, m.rpc, m.codec, bus.Config{
+	m.bus = bus.New(m.asm.Client, m.asm.RPC, m.codec, bus.Config{
 		Sid:       sid,
 		SvcType:   svcType,
 		Prefix:    prefix,
@@ -106,7 +97,7 @@ func (m *NatsMod) Provide(r *app.Registry) error {
 		QueueCap:  1024,
 	})
 	if rpcCfg, enabled := jetStreamRPCConfigFromViper(r.Config()); enabled {
-		if err := m.bus.EnableJetStreamRPC(fnats.IJetStream(m.jetStream), rpcCfg); err != nil {
+		if err := m.bus.EnableJetStreamRPC(fnats.IJetStream(m.asm.JetStream), rpcCfg); err != nil {
 			return err
 		}
 		slog.Info("nats mod: jetstream rpc enabled",
@@ -136,9 +127,9 @@ func (m *NatsMod) Provide(r *app.Registry) error {
 	}
 
 	return mods.RegisterAll(r,
-		mods.Capability{Name: mods.ModNats, Value: fnats.IClient(m.client)},
-		mods.Capability{Name: mods.ModNatsJetStream, Value: fnats.IJetStream(m.jetStream)},
-		mods.Capability{Name: mods.ModNatsRpc, Value: fnats.IRpc(m.rpc)},
+		mods.Capability{Name: mods.ModNats, Value: fnats.IClient(m.asm.Client)},
+		mods.Capability{Name: mods.ModNatsJetStream, Value: fnats.IJetStream(m.asm.JetStream)},
+		mods.Capability{Name: mods.ModNatsRpc, Value: fnats.IRpc(m.asm.RPC)},
 		mods.Capability{Name: mods.ModBus, Value: bus.IBus(m.bus)},
 	)
 }
@@ -173,19 +164,13 @@ func (m *NatsMod) StopWithContext(ctx context.Context) error {
 		}
 		m.bus = nil
 	}
-	if m.rpc != nil {
-		m.rpc.Stop()
-		m.rpc = nil
-	}
-	if m.client != nil {
-		if drainErr := m.client.DrainWithContext(ctx); drainErr != nil {
-			err = errors.Join(err, drainErr)
-			slog.Warn("nats mod: drain interrupted", "err", drainErr)
-			m.client.Close()
+	if m.asm != nil {
+		if closeErr := m.asm.Close(ctx); closeErr != nil {
+			err = errors.Join(err, closeErr)
+			slog.Warn("nats mod: drain interrupted", "err", closeErr)
 		}
-		m.client = nil
+		m.asm = nil
 	}
-	m.jetStream = nil
 	slog.Info("nats mod: stopped")
 	return err
 }

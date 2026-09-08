@@ -2,7 +2,6 @@ package dataengine
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	engine "github.com/tjbdwanghaibo/roost-core/dataengine/engine"
@@ -23,16 +22,15 @@ import (
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 )
 
+// Mod parses configuration, looks up the Mongo / JetStream / Remote Entity
+// capabilities, hands them to core's engine.Assemble and forwards lifecycle
+// calls. Construction order and failure rollback live in core (P3b).
 type Mod struct {
 	remoteEnabled bool
 	access        *entity.ManagerAccess
 	cfg           modConfig
 	registry      *app.Registry
-	store         *engine.MongoStore
-	runtimeMu     sync.RWMutex
-	runtime       *engine.Runtime
-	jetStream     fnats.IJetStream
-	remoteManager entity.IRemoteEntityManager
+	asm           *engine.Assembly
 
 	fatalMu  sync.RWMutex
 	fatalErr error
@@ -208,29 +206,26 @@ func (mod *Mod) Provide(registry *app.Registry) error {
 	if !ok || jetStream == nil {
 		return fmt.Errorf("dataengine mod: capability %q not found", mods.ModNatsJetStream)
 	}
-	store, err := engine.NewMongoStore(mongoClient, mod.cfg.mongo)
-	if err != nil {
-		return err
-	}
+	deps := engine.AssemblyDeps{Mongo: mongoClient, JetStream: jetStream, Access: mod.access, OnFatal: mod.onFatal}
 	if mod.remoteEnabled {
 		manager, ok := app.Lookup[entity.IRemoteEntityManager](registry, mods.ModRemoteEntity)
 		if !ok || manager == nil {
 			return fmt.Errorf("dataengine mod: capability %q not found", mods.ModRemoteEntity)
 		}
-		applier, ok := manager.(entity.RemoteCommitApplier)
-		if !ok {
-			return errors.New("dataengine mod: remote manager has no commit applier")
-		}
 		remoteStore, ok := app.Lookup[engine.RemoteProjectionStore](registry, mods.ModRemoteEntityAtomicStore)
 		if !ok || remoteStore == nil {
 			return fmt.Errorf("dataengine mod: capability %q not found", mods.ModRemoteEntityAtomicStore)
 		}
-		if err := store.SetRemoteProjection(remoteStore, applier); err != nil {
-			return err
-		}
-		mod.remoteManager = manager
+		deps.RemoteManager, deps.RemoteStore = manager, remoteStore
 	}
-	mod.registry, mod.store, mod.jetStream = registry, store, jetStream
+	asm, err := engine.Assemble(deps, engine.AssemblyConfig{
+		Mongo: mod.cfg.mongo, WAL: mod.cfg.wal, Projector: mod.cfg.projector, Outbox: mod.cfg.outbox,
+		EffectPrefix: mod.cfg.effectPrefix, EffectStream: mod.cfg.effectStream, Pipelined: mod.cfg.pipelined,
+	})
+	if err != nil {
+		return err
+	}
+	mod.registry, mod.asm = registry, asm
 	if err := registry.Register(mods.ModDataEngine, mod); err != nil {
 		return err
 	}
@@ -243,50 +238,12 @@ func (mod *Mod) Provide(registry *app.Registry) error {
 }
 
 func (mod *Mod) Start() error {
-	if mod == nil || mod.store == nil || mod.jetStream == nil {
+	if mod == nil || mod.asm == nil {
 		return errors.New("dataengine mod: not provided")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), mod.cfg.startupTimeout)
 	defer cancel()
-	if err := mod.store.EnsureInfrastructure(ctx); err != nil {
-		return fmt.Errorf("dataengine mod: ensure mongo infrastructure: %w", err)
-	}
-	if err := mod.jetStream.EnsureStream(ctx, mod.cfg.effectStream); err != nil {
-		return fmt.Errorf("dataengine mod: ensure effect stream: %w", err)
-	}
-	wal, err := nestwal.Open(mod.cfg.wal)
-	if err != nil {
-		return err
-	}
-	projector, err := engine.NewProjector(wal, mod.store, mod.cfg.projector)
-	if err != nil {
-		_ = wal.Close(ctx)
-		return err
-	}
-	outboxStore, err := engine.NewMongoOutboxStore(mod.store)
-	if err != nil {
-		_ = projector.Close(ctx)
-		return err
-	}
-	publisher := &jetStreamOutboxPublisher{client: mod.jetStream, prefix: mod.cfg.effectPrefix}
-	outbox, err := engine.NewOutboxWorker(outboxStore, publisher, mod.cfg.outbox)
-	if err != nil {
-		_ = projector.Close(ctx)
-		return err
-	}
-	runtime, err := engine.NewRuntime(mod.store, wal, projector, outbox, mod.access, mod.remoteManager, mod.onFatal, mod.cfg.pipelined)
-	if err != nil {
-		_ = projector.Close(ctx)
-		return err
-	}
-	if err := runtime.Start(ctx); err != nil {
-		_ = runtime.Shutdown(ctx)
-		return err
-	}
-	mod.runtimeMu.Lock()
-	mod.runtime = runtime
-	mod.runtimeMu.Unlock()
-	return nil
+	return mod.asm.Start(ctx)
 }
 
 func (mod *Mod) Stop() {
@@ -302,28 +259,14 @@ func (mod *Mod) StopWithContext(ctx context.Context) error {
 	if mod == nil {
 		return nil
 	}
-	mod.runtimeMu.RLock()
-	runtime := mod.runtime
-	mod.runtimeMu.RUnlock()
-	if runtime == nil {
-		return nil
-	}
-	err := runtime.Shutdown(ctx)
-	mod.runtimeMu.Lock()
-	if mod.runtime == runtime {
-		mod.runtime = nil
-	}
-	mod.runtimeMu.Unlock()
-	return err
+	return mod.asm.Shutdown(ctx)
 }
 
 func (mod *Mod) Runtime() *engine.Runtime {
 	if mod == nil {
 		return nil
 	}
-	mod.runtimeMu.RLock()
-	defer mod.runtimeMu.RUnlock()
-	return mod.runtime
+	return mod.asm.Runtime()
 }
 func (mod *Mod) Repository() *engine.EntityRepository {
 	runtime := mod.Runtime()
@@ -439,26 +382,6 @@ func (mod *Mod) checkHealth(ctx context.Context) health.Result {
 
 var _ corenest.PipelinedTransactionCommitter = (*Mod)(nil)
 var _ corenest.TransactionReleaseNotifier = (*Mod)(nil)
-
-type jetStreamOutboxPublisher struct {
-	client fnats.IJetStream
-	prefix string
-}
-
-func (publisher *jetStreamOutboxPublisher) Publish(ctx context.Context, item engine.OutboxItem) error {
-	if publisher == nil || publisher.client == nil || item.Effect.ID == "" || item.Effect.Topic == "" {
-		return errors.New("dataengine outbox: invalid JetStream publish")
-	}
-	payload, err := json.Marshal(nestwal.EffectEnvelope{
-		TransactionID: item.TransactionID, EffectID: item.Effect.ID, Topic: item.Effect.Topic,
-		Key: item.Effect.Key, Headers: item.Effect.Headers, Payload: item.Effect.Payload,
-	})
-	if err != nil {
-		return err
-	}
-	_, err = publisher.client.Publish(ctx, publisher.prefix+"."+strings.Trim(item.Effect.Topic, "."), payload, fnats.JetStreamPublishOptions{MsgID: item.Effect.ID})
-	return err
-}
 
 func duration(value, fallback time.Duration) time.Duration {
 	if value > 0 {

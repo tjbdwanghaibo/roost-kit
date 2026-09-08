@@ -15,12 +15,12 @@ import (
 	"github.com/spf13/viper"
 )
 
-// RedisMod implements app.Mod for Redis connectivity.
-// It creates IRedis and IDistLockFactory instances and registers them in the Registry.
+// RedisMod implements app.Mod for Redis connectivity. It parses configuration,
+// asks core to assemble the client and lock factory, publishes them as
+// capabilities and forwards lifecycle calls; it holds no driver handles (P3b).
 type RedisMod struct {
-	client *redisdriver.Client
-	locker *redisdriver.DistLockFactory
-	cfg    *fredis.Config
+	asm *redisdriver.Assembly
+	cfg *fredis.Config
 }
 
 func NewRedisMod() *RedisMod {
@@ -55,27 +55,30 @@ func (m *RedisMod) Init(cfg *viper.Viper) error {
 }
 
 func (m *RedisMod) Provide(r *app.Registry) error {
-	m.client = redisdriver.NewRedisClient(m.cfg)
-	m.locker = redisdriver.NewDistLockFactory(m.client.Raw())
+	asm, err := redisdriver.Assemble(m.cfg)
+	if err != nil {
+		return err
+	}
+	m.asm = asm
 	healthReg, ok := app.Lookup[*health.Registry](r, mods.ModHealth)
 	if !ok || healthReg == nil {
 		return fmt.Errorf("redis mod: capability %q not found", mods.ModHealth)
 	}
 	healthReg.Register("redis", health.CheckerFunc(func(ctx context.Context) health.Result {
-		if m.client == nil {
+		if m.asm == nil {
 			return health.Result{Status: health.StatusFail, Message: "client not initialized"}
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		if err := m.client.Ping(checkCtx); err != nil {
+		if err := m.asm.Ping(checkCtx); err != nil {
 			return health.Result{Status: health.StatusFail, Message: "ping failed", Err: err}
 		}
 		return health.Result{Status: health.StatusOK, Message: "connected"}
 	}))
 
 	return mods.RegisterAll(r,
-		mods.Capability{Name: mods.ModRedis, Value: fredis.IRedis(m.client)},
-		mods.Capability{Name: mods.ModRedisLock, Value: fredis.IDistLockFactory(m.locker)},
+		mods.Capability{Name: mods.ModRedis, Value: fredis.IRedis(m.asm.Client)},
+		mods.Capability{Name: mods.ModRedisLock, Value: fredis.IDistLockFactory(m.asm.Locks)},
 	)
 }
 
@@ -83,7 +86,7 @@ func (m *RedisMod) Start() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := m.client.Ping(ctx); err != nil {
+	if err := m.asm.Ping(ctx); err != nil {
 		return err
 	}
 	slog.Info("redis mod: connected", "addr", m.cfg.Addr, "cluster", m.cfg.IsCluster())
@@ -97,13 +100,13 @@ func (m *RedisMod) Stop() {
 }
 
 func (m *RedisMod) StopWithContext(_ context.Context) error {
-	if m == nil || m.client == nil {
+	if m == nil || m.asm == nil {
 		return nil
 	}
-	err := m.client.Close()
+	err := m.asm.Close()
 	if err == nil {
 		slog.Info("redis mod: closed")
-		m.client = nil
+		m.asm = nil
 	}
 	return err
 }
