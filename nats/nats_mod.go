@@ -9,6 +9,7 @@ import (
 	fctx "github.com/tjbdwanghaibo/roost-core/fctx"
 	"github.com/tjbdwanghaibo/roost-core/health"
 	fnats "github.com/tjbdwanghaibo/roost-core/nats"
+	natsdriver "github.com/tjbdwanghaibo/roost-core/nats/driver"
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 	"log/slog"
@@ -20,13 +21,13 @@ import (
 // NatsMod implements app.Mod for NATS connectivity.
 // It creates IClient, IRpc, and Bus instances and registers them in the Registry.
 type NatsMod struct {
-	client    *fnats.Client
-	jetStream *fnats.JetStreamClient
-	rpc       *fnats.RPCClient
+	client    *natsdriver.Client
+	jetStream *natsdriver.JetStreamClient
+	rpc       *natsdriver.RPCClient
 	bus       *bus.Bus
 	codec     bus.Codec
 	cfg       *fnats.Config
-	extra     fnats.ClientOptions
+	extra     natsdriver.ClientOptions
 }
 
 // NewNatsMod creates a NatsMod with an optional codec.
@@ -49,12 +50,12 @@ func (m *NatsMod) Init(cfg *viper.Viper) error {
 	m.cfg = fnats.DefaultConfig(url)
 	// nats.ignore_discovered_servers: stay on the configured URLs instead of
 	// following cluster gossip — for proxies, NAT, and fault injection.
-	m.extra = fnats.ClientOptions{IgnoreDiscoveredServers: cfg.GetBool("nats.ignore_discovered_servers")}
+	m.extra = natsdriver.ClientOptions{IgnoreDiscoveredServers: cfg.GetBool("nats.ignore_discovered_servers")}
 	return nil
 }
 
 func (m *NatsMod) Provide(r *app.Registry) error {
-	client, err := fnats.NewClient(m.cfg, m.extra)
+	client, err := natsdriver.NewClient(m.cfg, m.extra)
 	if err != nil {
 		return err
 	}
@@ -76,14 +77,14 @@ func (m *NatsMod) Provide(r *app.Registry) error {
 		}
 		return health.Result{Status: health.StatusOK, Message: "connected"}
 	}))
-	jetStream, err := fnats.NewJetStreamClient(client)
+	jetStream, err := natsdriver.NewJetStreamClient(client)
 	if err != nil {
 		return err
 	}
 	m.jetStream = jetStream
 
 	policy := fnats.DefaultRetryPolicy()
-	m.rpc = fnats.NewRPCClient(client, policy, 4)
+	m.rpc = natsdriver.NewRPCClient(client, policy, 4)
 
 	// Create bus
 	sid := r.Config().GetInt32("sid")

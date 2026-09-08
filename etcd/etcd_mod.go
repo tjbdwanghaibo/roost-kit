@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/tjbdwanghaibo/roost-core/app"
 	fetcd "github.com/tjbdwanghaibo/roost-core/etcd"
+	etcddriver "github.com/tjbdwanghaibo/roost-core/etcd/driver"
 	"github.com/tjbdwanghaibo/roost-core/health"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 	"log/slog"
@@ -17,9 +18,9 @@ import (
 // EtcdMod implements app.Mod for etcd connectivity.
 // Provides IEtcd, IDiscovery, and IElectionFactory via Registry.
 type EtcdMod struct {
-	client    *fetcd.Client
-	discovery *fetcd.Discovery
-	election  *fetcd.ElectionFactory
+	client    *etcddriver.Client
+	discovery *etcddriver.Discovery
+	election  *etcddriver.ElectionFactory
 	cfg       *fetcd.Config
 
 	// service info for auto-registration
@@ -112,14 +113,14 @@ func serviceMetadata(cfg *viper.Viper, svcType string, addr string) map[string]s
 }
 
 func (m *EtcdMod) Provide(r *app.Registry) error {
-	client, err := fetcd.NewClient(m.cfg)
+	client, err := etcddriver.NewClient(m.cfg)
 	if err != nil {
 		return err
 	}
 	m.client = client
-	m.discovery = fetcd.NewDiscovery(client.Raw(), m.cfg.ServicePrefix, m.cfg.LeaseTTL)
+	m.discovery = etcddriver.NewDiscovery(client.Raw(), m.cfg.ServicePrefix, m.cfg.LeaseTTL)
 	m.discovery.SetRetryIntervals(m.cfg.RegisterRetryMinInterval, m.cfg.RegisterRetryMaxInterval)
-	m.election = fetcd.NewElectionFactory(client.Raw())
+	m.election = etcddriver.NewElectionFactory(client.Raw())
 	healthReg, ok := app.Lookup[*health.Registry](r, mods.ModHealth)
 	if !ok || healthReg == nil {
 		return errors.New("etcd mod: health registry not found")

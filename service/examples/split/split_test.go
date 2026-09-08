@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/tjbdwanghaibo/roost-core/app"
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
-	kitredis "github.com/tjbdwanghaibo/roost-core/redis"
+	kitredis "github.com/tjbdwanghaibo/roost-core/redis/driver"
 	kitmods "github.com/tjbdwanghaibo/roost-kit/mods"
 
 	"github.com/tjbdwanghaibo/roost-kit/service/mail"

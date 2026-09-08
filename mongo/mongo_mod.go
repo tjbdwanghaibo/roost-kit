@@ -6,6 +6,7 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/app"
 	"github.com/tjbdwanghaibo/roost-core/health"
 	fmongo "github.com/tjbdwanghaibo/roost-core/mongo"
+	mongodriver "github.com/tjbdwanghaibo/roost-core/mongo/driver"
 	"github.com/tjbdwanghaibo/roost-kit/mods"
 	"log/slog"
 	"time"
@@ -18,7 +19,7 @@ import (
 type MongoMod struct {
 	client fmongo.IMongo
 	cfg    *fmongo.Config
-	policy fmongo.IndexMigrationPolicy
+	policy mongodriver.IndexMigrationPolicy
 }
 
 func NewMongoMod() *MongoMod {
@@ -52,7 +53,7 @@ func (m *MongoMod) Init(cfg *viper.Viper) error {
 	if cfg.IsSet("mongo.require_replica_set") {
 		m.cfg.RequireReplicaSet = cfg.GetBool("mongo.require_replica_set")
 	}
-	m.policy = fmongo.IndexMigrationPolicy{
+	m.policy = mongodriver.IndexMigrationPolicy{
 		AllowRecreate: cfg.GetBool("mongo.index.allow_recreate"),
 	}
 
@@ -61,7 +62,7 @@ func (m *MongoMod) Init(cfg *viper.Viper) error {
 
 func (m *MongoMod) Provide(r *app.Registry) error {
 	// mongo-driver v2 Connect does not dial immediately; Ping verifies connectivity.
-	cli, err := fmongo.NewClient(m.cfg, m.policy)
+	cli, err := mongodriver.NewClient(m.cfg, m.policy)
 	if err != nil {
 		return err
 	}
@@ -91,7 +92,7 @@ func (m *MongoMod) Start() error {
 	if err := m.client.Ping(ctx); err != nil {
 		return err
 	}
-	if client, ok := m.client.(*fmongo.Client); ok {
+	if client, ok := m.client.(*mongodriver.Client); ok {
 		if err := client.ValidateDeployment(ctx); err != nil {
 			return err
 		}

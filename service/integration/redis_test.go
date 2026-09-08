@@ -12,7 +12,7 @@ import (
 	"time"
 
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
-	kitredis "github.com/tjbdwanghaibo/roost-core/redis"
+	kitredis "github.com/tjbdwanghaibo/roost-core/redis/driver"
 
 	"github.com/tjbdwanghaibo/roost-kit/service/account"
 	"github.com/tjbdwanghaibo/roost-kit/service/chat"

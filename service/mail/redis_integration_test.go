@@ -11,7 +11,7 @@ import (
 	"time"
 
 	fredis "github.com/tjbdwanghaibo/roost-core/redis"
-	kitredis "github.com/tjbdwanghaibo/roost-core/redis"
+	kitredis "github.com/tjbdwanghaibo/roost-core/redis/driver"
 )
 
 // These tests run the batch read and the key ttl against a real Redis,
