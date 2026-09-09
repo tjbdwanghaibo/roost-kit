@@ -9,8 +9,10 @@ import (
 	"github.com/tjbdwanghaibo/roost-core/versionstore"
 )
 
-// ledgerThatFailsOnce is the request ledger with its first Create lost — the
-// Redis round trip that did not come back.
+// ledgerThatFailsOnce is the request ledger with its first write lost — the
+// Redis round trip that did not come back. Enter writes the ledger through
+// Update (RR-20260908-01 made it the RequestID's compare-and-set); Create is
+// covered too so the fake does not depend on which write the service uses.
 type ledgerThatFailsOnce struct {
 	versionstore.Store[string, LedgerEntry]
 	failed bool
@@ -22,6 +24,14 @@ func (l *ledgerThatFailsOnce) Create(ctx context.Context, key string, value Ledg
 		return versionstore.Versioned[LedgerEntry]{}, false, fmt.Errorf("ledger: connection reset")
 	}
 	return l.Store.Create(ctx, key, value)
+}
+
+func (l *ledgerThatFailsOnce) Update(ctx context.Context, key string, mutate versionstore.Mutate[LedgerEntry]) (versionstore.Versioned[LedgerEntry], bool, error) {
+	if !l.failed {
+		l.failed = true
+		return versionstore.Versioned[LedgerEntry]{}, false, fmt.Errorf("ledger: connection reset")
+	}
+	return l.Store.Update(ctx, key, mutate)
 }
 
 // Enter's last step writes the replay ledger. When that write fails the run

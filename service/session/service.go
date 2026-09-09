@@ -259,7 +259,7 @@ func (s *Service) Enter(ctx context.Context, ownerID int64, req EnterRequest) (R
 
 	// Insert-only. This is what makes "one live run per owner" hold under an
 	// owner racing itself.
-	_, claimed, err := s.cfg.Claims.Create(ctx, ownerID, Claim{
+	claimStored, claimed, err := s.cfg.Claims.Create(ctx, ownerID, Claim{
 		OwnerID: ownerID, RunID: runID, CreatedAtUnix: nowUnix,
 	})
 	if err != nil {
@@ -292,7 +292,7 @@ func (s *Service) Enter(ctx context.Context, ownerID int64, req EnterRequest) (R
 				s.discard(ctx, stored))
 		}
 		// The stale claim is gone; retake it.
-		_, claimed, err = s.cfg.Claims.Create(ctx, ownerID, Claim{
+		claimStored, claimed, err = s.cfg.Claims.Create(ctx, ownerID, Claim{
 			OwnerID: ownerID, RunID: runID, CreatedAtUnix: nowUnix,
 		})
 		if err != nil {
@@ -308,8 +308,23 @@ func (s *Service) Enter(ctx context.Context, ownerID int64, req EnterRequest) (R
 		}
 	}
 
-	if _, _, err := s.cfg.Requests.Create(ctx, req.RequestID, LedgerEntry{
-		RequestID: req.RequestID, OwnerID: ownerID, RunID: runID, CreatedAtUnix: nowUnix,
+	// The ledger write is the RequestID's only serialization point. The claim
+	// serializes "one live run per owner"; it cannot see another owner using
+	// the same RequestID, and two such entrants both read the ledger as absent
+	// before either wrote it. Update's compare-and-set inserts when the key is
+	// still absent and otherwise hands back the entry that won, so the loser
+	// can undo the run and claim it built for a request that already has an
+	// answer. (RR-20260908-01: Create's created=false used to be dropped, and
+	// both owners were told they had succeeded.)
+	var winner LedgerEntry
+	collided := false
+	if _, _, err := s.cfg.Requests.Update(ctx, req.RequestID, func(current LedgerEntry, found bool) (LedgerEntry, bool, error) {
+		collided = found
+		if found {
+			winner = current
+			return current, false, nil
+		}
+		return LedgerEntry{RequestID: req.RequestID, OwnerID: ownerID, RunID: runID, CreatedAtUnix: nowUnix}, true, nil
 	}); err != nil {
 		// The run exists and the claim names it, so it is reachable and
 		// releasable; only the replay answer is missing. Reporting the error
@@ -317,8 +332,43 @@ func (s *Service) Enter(ctx context.Context, ownerID int64, req EnterRequest) (R
 		// which is correct, because the run really is open.
 		return run, err
 	}
+	if collided {
+		// This entrant's run was never handed out and holds no resources, so
+		// both writes can be undone; a claim someone else has since replaced is
+		// left alone (version-checked delete).
+		undo := errors.Join(s.discard(ctx, stored), s.releaseClaimIfCurrent(ctx, ownerID, claimStored))
+		if winner.OwnerID != ownerID {
+			s.report.Refused("enter", "request_owner_collision")
+			return Run{}, errors.Join(fmt.Errorf("%w: request %q belongs to owner %d",
+				ErrRequestInvalid, req.RequestID, winner.OwnerID), undo)
+		}
+		if undo != nil {
+			return Run{}, undo
+		}
+		replay, ok, err := s.Get(ctx, ownerID, winner.RunID)
+		if err != nil {
+			return Run{}, err
+		}
+		if !ok {
+			return Run{}, fmt.Errorf("%w: request %q names missing run %s", ErrConflict, req.RequestID, winner.RunID)
+		}
+		s.report.Replayed("enter")
+		return replay, nil
+	}
 	s.report.Accepted("enter")
 	return run, nil
+}
+
+// releaseClaimIfCurrent removes the claim this entrant just created. A version
+// mismatch means another entrant has already replaced it and is not an error.
+func (s *Service) releaseClaimIfCurrent(ctx context.Context, ownerID int64, claim versionstore.Versioned[Claim]) error {
+	if err := s.cfg.Claims.Delete(ctx, ownerID, claim); err != nil {
+		if errors.Is(err, versionstore.ErrVersionMismatch) {
+			return nil
+		}
+		return fmt.Errorf("session: release unused claim for owner %d: %w", ownerID, err)
+	}
+	return nil
 }
 
 // discard removes a run that was created but never handed to a caller.

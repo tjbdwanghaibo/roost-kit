@@ -6,6 +6,8 @@
 
 ### Fixed
 
+- **session `Enter` 对同一 RequestID 的跨 owner 竞争不再两边都成功**（U-0154，C8；RR-20260908-01，T-50）。claim 只串行化"每个 owner 一个 live run"，串行化不了全局 RequestID；两个 owner 并发用同一个 RequestID 时都读到账本为空、各自建 run 拿 claim，最后的账本 `Create` 返回 `created=false` 却被丢弃，落败者被告知成功、重试才发现请求属于别人。
+  现在账本写入用 `Update` 的比较交换：键不存在就写入；已存在且 owner 不同，落败者撤回自己刚建的 run 与 claim（都从未交给调用方）并以 `ErrRequestInvalid: request belongs to owner X` 拒绝，计 `refused:enter:request_owner_collision`；已存在且 owner 相同按重放处理。`enter_ledger_collision_promises_test.go`（审查附录的屏障账本收进仓库）修前红。修复记录见 roost-core `docs/bugfix/RR-20260908-01.md`。
 - **mail 单读与批读对"键在但值为空"的信封答案一致**（U-0145，C8；T-48）。此前 `Get` 把空值折叠成"不存在"，`GetMany`（List 走的路）对同一个值报解码错误——同一条损坏数据，单读说邮件没了、翻页却失败。现在 `Get` 同样报解码错误。
   `get_consistency_promises_test.go` 对五种存储形状分别走两条路要求同一判决；redis 替身改用 `bytes.Clone` 拷贝，不再把空值混成 nil（此前正是这一点掩盖了差别）。
 - **activity / match / chat 的后台 sweep / prune 失败现在会计数**（U-0120 / U-0121 / U-0122，C5；T-47）。此前失败只打日志、下个 tick 重试，指标上与"无事可做"完全一样。
