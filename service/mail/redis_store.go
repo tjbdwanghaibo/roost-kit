@@ -185,9 +185,10 @@ func (s *redisEnvelopes) Get(ctx context.Context, id string) (Envelope, bool, er
 		}
 		return Envelope{}, false, fmt.Errorf("mail: read envelope %s: %w", id, err)
 	}
-	if len(raw) == 0 {
-		return Envelope{}, false, nil
-	}
+	// Absence is ErrNil above. A key that exists with an empty value is a
+	// malformed stored envelope, and it is reported the way GetMany reports
+	// it — not folded into "not found", which would make a single read say
+	// the mail is gone while the page read fails on the same bytes.
 	envelope, err := decodeEnvelope(raw)
 	if err != nil {
 		return Envelope{}, false, fmt.Errorf("mail: decode envelope %s: %w", id, err)

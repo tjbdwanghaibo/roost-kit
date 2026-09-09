@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -70,11 +71,15 @@ func (f *fakeRedisEnvelopes) Get(_ context.Context, key string) ([]byte, error) 
 	if !ok {
 		return nil, fredis.ErrNil
 	}
-	return append([]byte(nil), stored...), nil
+	return bytes.Clone(stored), nil
 }
 
 // MGet evaluates against the same map Get reads, honouring the positional
-// contract: one element per key, nil for absent ones.
+// contract: one element per key, nil for absent ones. Copies go through
+// bytes.Clone so a stored EMPTY value stays a non-nil empty slice, as Redis
+// reports it — folding it into nil would hide the difference between "no key"
+// and "a key holding nothing", which is exactly what Get and GetMany must
+// agree on.
 func (f *fakeRedisEnvelopes) MGet(_ context.Context, keys ...string) ([][]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -86,7 +91,7 @@ func (f *fakeRedisEnvelopes) MGet(_ context.Context, keys ...string) ([][]byte, 
 			out = append(out, nil)
 			continue
 		}
-		out = append(out, append([]byte(nil), stored...))
+		out = append(out, bytes.Clone(stored))
 	}
 	if f.shortReply && len(out) > 0 {
 		out = out[:len(out)-1]
