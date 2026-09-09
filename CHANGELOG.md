@@ -52,6 +52,9 @@
 
 ### Changed（测试质量）
 
+- **platform 未记录订单的拒绝、回调 / 补发空输入与玩家解析器非正 id 的守卫钉住**（U-0143，C2）。nightly gap map kit `service/platform` 20 条 7 条无覆盖。
+  `ReopenDelivery` / `SettleOutOfBand` / `AttemptDelivery` 对未记录订单报 `ErrOrderInvalid` 且不凭空建单、不触达发货器；回调空载荷与空订单 id 在解析 / 读存储前拒绝；解析器交出非正玩家 id 时 `AuthSession` 不签 token；`NewRedisOrders` 缺前缀不能构造。
+  `order_guards_promises_test.go` 三条；回退 7 处全红，采样 20 条无一无覆盖。
 - **account 角色写入的竞态拒绝与入口校验钉住**（U-0142，C2）。nightly gap map kit `service/account` 20 条 8 条无覆盖。
   `SelectRole` 在 Get 与 Update 之间角色消失 / 换了主人时报 `ErrRoleMissing` / `ErrNotPermitted` 而不是写回登录时间；`ValidateSession` 对签名有效但角色不存在的 token 报 `ErrRoleMissing`；`UpdateProfile` 对不存在的角色拒绝且不建角色；
   `CreateRole` 空账号 id、`UpsertServer` 零 id、`Identity` 空 open id、`NewRedisStores` 空前缀各以对应哨兵拒绝。
