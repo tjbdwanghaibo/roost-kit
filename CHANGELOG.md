@@ -6,6 +6,9 @@
 
 ### Fixed
 
+- **activity 服务的后台 sweep 现在真的会扫组**（U-0119，与 U-0022 同形态；T-46）。`Server.sweepGroups` 此前是返回 nil 的桩、没有任何配置入口，
+  于是没有一个进程在后台调用过 `AdvanceExpired`——宽限窗口只在有人碰到活动时才被兑现。新增 `activity.sweep_groups`（`Config.SweepGroups`），
+  循环遍历配置的组；未配置时启动时告警一次并什么都不扫。`sweep_loop_promises_test.go` 两条（配置了组在窗口过期后推进到 complete；无组不推进、干净退出），`TestModReadsSweepGroups`。
 - **`scripts/gapmap.sh` 收尾不再 `git clean`**（与 roost-core 同一份拷贝）：采样后只还原被改动的已跟踪文件，未跟踪文件原样保留。
 
 ### Added

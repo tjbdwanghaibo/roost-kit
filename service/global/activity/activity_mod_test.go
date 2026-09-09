@@ -95,3 +95,21 @@ func TestModInitAndProvideContract(t *testing.T) {
 		t.Fatalf("Start returned %v", err)
 	}
 }
+
+// U-0119: the groups a process back-stops come from configuration; blank
+// entries are dropped and a missing key means none.
+func TestModReadsSweepGroups(t *testing.T) {
+	cfg := modConfig()
+	cfg.Set("activity.sweep_groups", []string{"alliance-a", " ", "alliance-b"})
+	mod := NewMod(nil)
+	if err := mod.Init(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(mod.sweepGroups) != 2 || mod.sweepGroups[0] != "alliance-a" || mod.sweepGroups[1] != "alliance-b" {
+		t.Fatalf("sweep groups = %v", mod.sweepGroups)
+	}
+	bare := NewMod(nil)
+	if err := bare.Init(modConfig()); err != nil || bare.sweepGroups != nil {
+		t.Fatalf("no key: groups=%v err=%v", bare.sweepGroups, err)
+	}
+}

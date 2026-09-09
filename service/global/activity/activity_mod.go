@@ -2,6 +2,7 @@ package activity
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -30,6 +31,7 @@ type Mod struct {
 	graceWindow      time.Duration
 	dispatchAttempts int
 	dispatchBackoff  time.Duration
+	sweepGroups      []string
 
 	service *Service
 }
@@ -53,6 +55,7 @@ func (m *Mod) DependsOn() []app.ModName { return []app.ModName{mods.ModRedis} }
 //	  grace_window: 60s            # optional
 //	  dispatch_attempts: 5         # optional
 //	  dispatch_backoff: 5s         # optional
+//	  sweep_groups: [alliance-a]   # groups whose grace windows THIS process back-stops
 //
 // These keys were under `global:` while the service lived in that package.
 // The prefix may still point at the same root — each service owning its own
@@ -87,6 +90,12 @@ func (m *Mod) Init(cfg *viper.Viper) error {
 	}
 	m.prefix, m.reservationTTL = prefix, reservationTTL
 	m.graceWindow, m.dispatchAttempts, m.dispatchBackoff = graceWindow, dispatchAttempts, dispatchBackoff
+	m.sweepGroups = nil
+	for _, group := range cfg.GetStringSlice("activity.sweep_groups") {
+		if group = strings.TrimSpace(group); group != "" {
+			m.sweepGroups = append(m.sweepGroups, group)
+		}
+	}
 	return nil
 }
 
@@ -106,7 +115,7 @@ func (m *Mod) Provide(r *app.Registry) error {
 		Dispatches: stores.Dispatches, Windows: stores.Windows,
 		GraceWindow: m.graceWindow, ReservationTTL: m.reservationTTL,
 		DispatchBackoff: m.dispatchBackoff, DispatchMaxAttempts: m.dispatchAttempts,
-		Metrics: m.metrics,
+		SweepGroups: m.sweepGroups, Metrics: m.metrics,
 	})
 	if err != nil {
 		return err

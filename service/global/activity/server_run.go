@@ -27,6 +27,9 @@ const (
 	DispatchBatch = 64
 )
 
+// sweepEvery is SweepInterval as a variable so tests can shorten the tick.
+var sweepEvery = SweepInterval
+
 // run advances expired activities and retries due dispatches until the process
 // is shutting down.
 //
@@ -46,7 +49,7 @@ const (
 // because it is terminal: a game server will not receive its result from any
 // retry, and only a human can decide what that means for the activity.
 func (s *Server) run(ctx context.Context) error {
-	ticker := time.NewTicker(SweepInterval)
+	ticker := time.NewTicker(sweepEvery)
 	defer ticker.Stop()
 	service, ok := s.Service().(*Service)
 	if !ok {
@@ -55,12 +58,18 @@ func (s *Server) run(ctx context.Context) error {
 		// grace window stops being enforced with nothing failing.
 		return fmt.Errorf("activity server: the local capability is not a *Service, so no grace window is being enforced")
 	}
+	if len(service.SweepGroups()) == 0 {
+		// Said once, loudly, at start: a deployment may run no back-stop here,
+		// but it must not mistake that for a grace window being enforced.
+		slog.Warn("activity server: no sweep groups configured (activity.sweep_groups); " +
+			"expired activities are not advanced by this process")
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			for _, groupID := range s.sweepGroups() {
+			for _, groupID := range s.sweepGroups(service) {
 				s.sweepGroup(ctx, service, groupID)
 			}
 		}
@@ -104,8 +113,9 @@ func (s *Server) sweepGroup(ctx context.Context, service *Service, groupID strin
 	}
 }
 
-// sweepGroups is the set of groups this process sweeps.
-//
-// Empty by default, deliberately: enumerating groups would be an unbounded
-// scan, and a deployment knows its own groups.
-func (s *Server) sweepGroups() []string { return nil }
+// sweepGroups is the set of groups this process sweeps: the deployment's
+// `activity.sweep_groups`. Empty means no back-stop runs here — said once at
+// start by run — because enumerating groups would be an unbounded scan and a
+// deployment knows its own groups. Until U-0119 this returned nil with no way
+// to configure anything, so no process ever advanced an expired activity.
+func (s *Server) sweepGroups(service *Service) []string { return service.SweepGroups() }

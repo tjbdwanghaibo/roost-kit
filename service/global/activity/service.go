@@ -72,6 +72,14 @@ type Config struct {
 	// a guessable one lets any caller mark a delivery processed that never
 	// arrived.
 	NewDispatchToken func() (string, error)
+	// SweepGroups names the groups whose expired activities THIS process
+	// advances in the background (activity.sweep_groups). Enumerating groups
+	// would be an unbounded keyspace scan, so a deployment supplies them; an
+	// empty list means no back-stop runs here, and the Server says so once at
+	// start. Until U-0119 there was no way to supply them at all, so the grace
+	// window was never enforced by any process.
+	SweepGroups []string
+
 	// Metrics receives reports. A nil reporter means no reporting and never
 	// fails an operation.
 	//
@@ -173,6 +181,14 @@ func randomDispatchToken() (string, error) {
 }
 
 // --- opening an activity ---
+
+// SweepGroups is the configured set of groups this process back-stops.
+func (s *Service) SweepGroups() []string {
+	if s == nil {
+		return nil
+	}
+	return append([]string(nil), s.cfg.SweepGroups...)
+}
 
 // OpenActivity declares an aggregation: which games are expected to report the
 // phase. It is insert-only, like Bind: an activity that is already open cannot
