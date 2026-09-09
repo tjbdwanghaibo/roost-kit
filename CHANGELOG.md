@@ -52,6 +52,9 @@
 
 ### Changed（测试质量）
 
+- **mail 服务入口与 Redis 存储构造的守卫钉住**（U-0140，C2）。nightly gap map kit `service/mail` 20 条 9 条无覆盖。
+  `Send` 的过期秒数必须为正；`Deliver` / `List` / `MarkRead` / `Delete` 的玩家 id 必须为正、邮件 id 不能为空，被拒的操作不建邮箱；`NewRedisStores` 的发送账本 TTL 必须为正。
+  `entry_guards_promises_test.go` 两条；回退 9 处 7 红，`NewRedisStores` 的客户端 / 前缀两条与 `NewRedisEnvelopes` 的同文本检查互为双份，记冗余保留。
 - **etcd 本地镜像的配置守卫钉住**（U-0086，C2）。空前缀（会 watch 整个键空间）、缺 Decode / Encode / Clone、重试窗口上限低于
   下限、nil 客户端各自在构造期拒绝。`local_mirror_promises_test.go` 一条；回退三处守卫各红。
 - **mongotest 替身的拒绝契约钉住**（U-0084，C2）。这个替身替代了 kit / service 绝大多数单元测试里的 Mongo，它的拒绝就是那些
