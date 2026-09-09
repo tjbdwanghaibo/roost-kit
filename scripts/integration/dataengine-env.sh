@@ -123,13 +123,17 @@ environment_test() {
 	# (consolidation P2-②); run them against the same environment when a
 	# core checkout is at hand (sibling directory by default, ROOST_CORE_DIR
 	# to override). Absent checkout = skipped loudly, never silently green.
+	# etcd/driver and mongo/driver carry the real-service guard tests
+	# (U-0153): mongo/driver reads ROOST_DATAENGINE_IT_MONGO_URI from env.sh
+	# and spawns a standalone mongod itself; etcd/driver spawns etcd from PATH
+	# and skips loudly when the binary is absent.
 	local core_dir="${ROOST_CORE_DIR:-$repo_root/../roost-core}"
 	if [[ -f "$core_dir/go.mod" ]]; then
 		(
 			cd "$core_dir"
 			ROOST_REDIS_TEST_ADDR="$ROOST_DATAENGINE_IT_REDIS_ADDR" \
 				GOCACHE="${GOCACHE:-$ROOST_IT_GO_CACHE_DEFAULT}" \
-				go test -tags=integration ./redis -count=1
+				go test -tags=integration ./redis/... ./etcd/driver ./mongo/driver -count=1
 		)
 	else
 		echo "[roost-it] roost-core checkout not found at $core_dir; core redis fault suites NOT run" >&2

@@ -82,6 +82,9 @@ func TestToxicJetStreamRPCCallHonoursItsDeadlineWhileHalfOpen(t *testing.T) {
 	cfg.Set("nats.url", natsURL)
 	cfg.Set("nats.ignore_discovered_servers", true)
 	cfg.Set("nats.rpc.transport", "jetstream")
+	// 主题前缀也按轮次唯一：流名已经唯一，但两轮的流若共用 `roost.rpc.>` 主题，
+	// 在持久化的本机环境里第二轮会被 JetStream 以 "subjects overlap" 拒绝。
+	cfg.Set("nats.prefix", "roostit"+suffix)
 	cfg.Set("nats.rpc.request_stream", "ROOST_IT_RPC_REQ_"+suffix)
 	cfg.Set("nats.rpc.response_stream", "ROOST_IT_RPC_RESP_"+suffix)
 	cfg.Set("nats.rpc.call_timeout", 500*time.Millisecond)

@@ -58,6 +58,9 @@
 
 ### Changed（测试质量）
 
+- **nats Mod 的 Provide 对真实 NATS 钉住两条守卫**（U-0153，C2，`-tags integration`）：连上之后缺健康注册表拒绝；开了可靠总线却没有 redis Mod 拒绝。读 `ROOST_DATAENGINE_IT_NATS_URL`，随 `dataengine-env.sh test` 运行。
+- **toxic JetStream RPC 测试的主题前缀按轮次唯一**：流名早已唯一，但两轮共用 `roost.rpc.>` 主题，在持久化的本机环境里第二轮被 JetStream 以 "subjects overlap" 拒绝（CI 每次新环境所以未暴露）。
+- **`dataengine-env.sh test` 的 core 段改跑 `./redis/... ./etcd/driver ./mongo/driver`**：Redis 故障套件在 P2-② 搬到 `redis/driver` 后脚本仍只跑 `./redis`（无测试文件），故障矩阵的 Redis 切片实际上一直没在这条命令里跑；etcd / mongo 驱动的真机守卫测试一并接入（etcd 二进制缺失时明确 skip）。
 - **U-0150 留待的四条守卫钉住**（U-0152，C2）。rank：Lua 脚本返回非两元素数组时单读 / 换分报 "unexpected ... result"（覆写 Eval 的替身按脚本返回错误形状）；split 示例：授予失败且取消预留也失败时两个错误都报出（示例里恒成功的 `grantToInventory` 改为包级变量以便替换）；manager：启动途中收到关停且回滚失败时同时说明"被关停中止"与回滚原因，后续管理器不再启动。
 - **nil / 参数守卫收尾（kit 十二个包）：service/directory、nest、ops、mods、service/rank、manager、service/chat、service/global、service/global/activity、configdata、room、service/examples/split**（U-0150，C2）。各一条 `*_promises_test.go`，共 97 条守卫回退 84 红；
   Mod 的能力查找是链式同文本，空注册表只能钉住第一条（断言核对被点名的能力），其后各条记冗余（ops 84 / 87 / 90、configdata 53）；directory 160 与 Update 闭包同哨兵、mods 24 与 core `RegisterBatch` 同文本、manager 75 与 DFS 环检测同文本、configdata 77 与 `Store.Load` 的 nil 接收者同文本，均记冗余；rank 211 / 224（Lua 结果形状）、split 78（取消预留也失败）、manager 131（Start 途中被 Stop 抢先）需要更深的替身或并发编排，留待；nats Mod 的 Provide 需真连接。
