@@ -657,6 +657,11 @@ func (s *channelStore) Prune(ctx context.Context, ref ChannelRef, limit int) (in
 	if err != nil {
 		if errors.Is(err, versionstore.ErrConflict) {
 			s.metrics.Conflict("prune")
+		} else {
+			// Counted as well as returned: the retention loop only logs this,
+			// and a prune that fails on every tick must be distinguishable, in
+			// the metrics, from a channel with nothing to evict (U-0122).
+			s.metrics.Dropped("prune.failed", 1)
 		}
 		return 0, err
 	}

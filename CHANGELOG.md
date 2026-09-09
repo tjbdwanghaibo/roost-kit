@@ -6,9 +6,9 @@
 
 ### Fixed
 
-- **activity / match 的后台 sweep 失败现在会计数**（U-0120 / U-0121，C5；T-47）。此前失败只打日志、下个 tick 重试，指标上与"无事可做"完全一样。
-  activity：`dropped:sweep.advance_failed`、`dropped:sweep.due_read_failed`、`dropped:dispatch.attempt_failed`；match：`dropped:sweep.failed`（成功仍报 `ticket.expired`）。
-  `sweep_failures_promises_test.go` / `sweep_failure_promises_test.go` 各一条，去掉计数即红。chat 的 prune 循环同形态，但 chat 服务没有指标汇，记观察 O-5。
+- **activity / match / chat 的后台 sweep / prune 失败现在会计数**（U-0120 / U-0121 / U-0122，C5；T-47）。此前失败只打日志、下个 tick 重试，指标上与"无事可做"完全一样。
+  activity：`dropped:sweep.advance_failed`、`dropped:sweep.due_read_failed`、`dropped:dispatch.attempt_failed`；match：`dropped:sweep.failed`（成功仍报 `ticket.expired`）；chat 存储的 Prune：`dropped:prune.failed`（冲突仍走 `conflict:prune`）。
+  三个 `*_promises_test.go` 各一条，去掉计数即红。
 - **activity 服务的后台 sweep 现在真的会扫组**（U-0119，与 U-0022 同形态；T-46）。`Server.sweepGroups` 此前是返回 nil 的桩、没有任何配置入口，
   于是没有一个进程在后台调用过 `AdvanceExpired`——宽限窗口只在有人碰到活动时才被兑现。新增 `activity.sweep_groups`（`Config.SweepGroups`），
   循环遍历配置的组；未配置时启动时告警一次并什么都不扫。`sweep_loop_promises_test.go` 两条（配置了组在窗口过期后推进到 complete；无组不推进、干净退出），`TestModReadsSweepGroups`。
