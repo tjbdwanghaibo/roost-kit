@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- **session `Enter` 撞 RequestID 的撤回不再误删同 owner 重新取得的 claim**（U-0158，C8；RR-20260909-02，T-53）。U-0154 的撤回先删 run 再按版本删 claim：run 一没，同 owner 的新 Enter 把孤立 claim 清掉建了新 claim，而删后重建的键版本回到 1，落败者按版本删 claim 就把新的删了，owner 再进又成功、两个 run 同时 open。现在先用带 run-id 校验的 `releaseClaim` 释放 claim 再删 run——claim 指向的 run 还 open 时没人能合法替换它。`enter_collision_cleanup_promises_test.go` 修前红。修复记录见 roost-core `docs/bugfix/RR-20260909-02.md`。
 - **session `Enter` 对同一 RequestID 的跨 owner 竞争不再两边都成功**（U-0154，C8；RR-20260908-01，T-50）。claim 只串行化"每个 owner 一个 live run"，串行化不了全局 RequestID；两个 owner 并发用同一个 RequestID 时都读到账本为空、各自建 run 拿 claim，最后的账本 `Create` 返回 `created=false` 却被丢弃，落败者被告知成功、重试才发现请求属于别人。
   现在账本写入用 `Update` 的比较交换：键不存在就写入；已存在且 owner 不同，落败者撤回自己刚建的 run 与 claim（都从未交给调用方）并以 `ErrRequestInvalid: request belongs to owner X` 拒绝，计 `refused:enter:request_owner_collision`；已存在且 owner 相同按重放处理。`enter_ledger_collision_promises_test.go`（审查附录的屏障账本收进仓库）修前红。修复记录见 roost-core `docs/bugfix/RR-20260908-01.md`。
 - **mail 单读与批读对"键在但值为空"的信封答案一致**（U-0145，C8；T-48）。此前 `Get` 把空值折叠成"不存在"，`GetMany`（List 走的路）对同一个值报解码错误——同一条损坏数据，单读说邮件没了、翻页却失败。现在 `Get` 同样报解码错误。

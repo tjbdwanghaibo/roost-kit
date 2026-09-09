@@ -259,7 +259,7 @@ func (s *Service) Enter(ctx context.Context, ownerID int64, req EnterRequest) (R
 
 	// Insert-only. This is what makes "one live run per owner" hold under an
 	// owner racing itself.
-	claimStored, claimed, err := s.cfg.Claims.Create(ctx, ownerID, Claim{
+	_, claimed, err := s.cfg.Claims.Create(ctx, ownerID, Claim{
 		OwnerID: ownerID, RunID: runID, CreatedAtUnix: nowUnix,
 	})
 	if err != nil {
@@ -292,7 +292,7 @@ func (s *Service) Enter(ctx context.Context, ownerID int64, req EnterRequest) (R
 				s.discard(ctx, stored))
 		}
 		// The stale claim is gone; retake it.
-		claimStored, claimed, err = s.cfg.Claims.Create(ctx, ownerID, Claim{
+		_, claimed, err = s.cfg.Claims.Create(ctx, ownerID, Claim{
 			OwnerID: ownerID, RunID: runID, CreatedAtUnix: nowUnix,
 		})
 		if err != nil {
@@ -334,9 +334,16 @@ func (s *Service) Enter(ctx context.Context, ownerID int64, req EnterRequest) (R
 	}
 	if collided {
 		// This entrant's run was never handed out and holds no resources, so
-		// both writes can be undone; a claim someone else has since replaced is
-		// left alone (version-checked delete).
-		undo := errors.Join(s.discard(ctx, stored), s.releaseClaimIfCurrent(ctx, ownerID, claimStored))
+		// both writes can be undone. Order matters: release the claim while the
+		// run it names is still open. Nobody replaces a claim whose run is live
+		// (resolveClaim only clears one whose run is gone or lapsed), so the
+		// run-id and version checks in releaseClaim cannot hit a newcomer's
+		// claim. Discarding the run first opened exactly that window: a
+		// same-owner Enter saw the orphaned claim, took a fresh one, and — a
+		// deleted-and-recreated key restarts at version 1 — the loser's
+		// version-checked delete then removed the newcomer's claim, leaving
+		// two open runs for one owner (RR-20260909-02).
+		undo := errors.Join(s.releaseClaim(ctx, ownerID, runID), s.discard(ctx, stored))
 		if winner.OwnerID != ownerID {
 			s.report.Refused("enter", "request_owner_collision")
 			return Run{}, errors.Join(fmt.Errorf("%w: request %q belongs to owner %d",
@@ -357,18 +364,6 @@ func (s *Service) Enter(ctx context.Context, ownerID int64, req EnterRequest) (R
 	}
 	s.report.Accepted("enter")
 	return run, nil
-}
-
-// releaseClaimIfCurrent removes the claim this entrant just created. A version
-// mismatch means another entrant has already replaced it and is not an error.
-func (s *Service) releaseClaimIfCurrent(ctx context.Context, ownerID int64, claim versionstore.Versioned[Claim]) error {
-	if err := s.cfg.Claims.Delete(ctx, ownerID, claim); err != nil {
-		if errors.Is(err, versionstore.ErrVersionMismatch) {
-			return nil
-		}
-		return fmt.Errorf("session: release unused claim for owner %d: %w", ownerID, err)
-	}
-	return nil
 }
 
 // discard removes a run that was created but never handed to a caller.
