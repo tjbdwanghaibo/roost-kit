@@ -58,6 +58,7 @@
 
 ### Changed（测试质量）
 
+- **U-0150 留待的四条守卫钉住**（U-0152，C2）。rank：Lua 脚本返回非两元素数组时单读 / 换分报 "unexpected ... result"（覆写 Eval 的替身按脚本返回错误形状）；split 示例：授予失败且取消预留也失败时两个错误都报出（示例里恒成功的 `grantToInventory` 改为包级变量以便替换）；manager：启动途中收到关停且回滚失败时同时说明"被关停中止"与回滚原因，后续管理器不再启动。
 - **nil / 参数守卫收尾（kit 十二个包）：service/directory、nest、ops、mods、service/rank、manager、service/chat、service/global、service/global/activity、configdata、room、service/examples/split**（U-0150，C2）。各一条 `*_promises_test.go`，共 97 条守卫回退 84 红；
   Mod 的能力查找是链式同文本，空注册表只能钉住第一条（断言核对被点名的能力），其后各条记冗余（ops 84 / 87 / 90、configdata 53）；directory 160 与 Update 闭包同哨兵、mods 24 与 core `RegisterBatch` 同文本、manager 75 与 DFS 环检测同文本、configdata 77 与 `Store.Load` 的 nil 接收者同文本，均记冗余；rank 211 / 224（Lua 结果形状）、split 78（取消预留也失败）、manager 131（Start 途中被 Stop 抢先）需要更深的替身或并发编排，留待；nats Mod 的 Provide 需真连接。
 - **platform 未记录订单的拒绝、回调 / 补发空输入与玩家解析器非正 id 的守卫钉住**（U-0143，C2）。nightly gap map kit `service/platform` 20 条 7 条无覆盖。

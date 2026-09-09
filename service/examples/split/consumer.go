@@ -105,7 +105,10 @@ func (f *RewardFlow) Unread(ctx context.Context, verifiedPlayerID int64) (int32,
 
 // grantToInventory stands in for the game's own inventory write. It must be
 // idempotent on token; see GrantSeasonReward.
-func grantToInventory(ctx context.Context, playerID int64, token string, payload []byte) error {
+// grantToInventory is a package variable rather than a function so the
+// example's failure paths can be exercised: the grant is the one step that
+// belongs to the game, and the example has no game.
+var grantToInventory = func(ctx context.Context, playerID int64, token string, payload []byte) error {
 	_, _, _, _ = ctx, playerID, token, payload
 	return nil
 }
