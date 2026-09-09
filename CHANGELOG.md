@@ -52,6 +52,10 @@
 
 ### Changed（测试质量）
 
+- **account 角色写入的竞态拒绝与入口校验钉住**（U-0142，C2）。nightly gap map kit `service/account` 20 条 8 条无覆盖。
+  `SelectRole` 在 Get 与 Update 之间角色消失 / 换了主人时报 `ErrRoleMissing` / `ErrNotPermitted` 而不是写回登录时间；`ValidateSession` 对签名有效但角色不存在的 token 报 `ErrRoleMissing`；`UpdateProfile` 对不存在的角色拒绝且不建角色；
+  `CreateRole` 空账号 id、`UpsertServer` 零 id、`Identity` 空 open id、`NewRedisStores` 空前缀各以对应哨兵拒绝。
+  `role_guards_promises_test.go` 三条；回退 8 处全红，采样 20 条无一无覆盖。
 - **match 队列读取的未命中 / 错误传播、Cancel 与 Commit 的兜底拒绝钉住**（U-0141，C2）。nightly gap map kit `service/match` 20 条 8 条无覆盖。
   `Ticket` / `Candidates` / `Match` / `QueueLength` 对没有状态的队列是干净未命中、对状态存储错误原样上抛（不当空队列）；`Cancel` 对不存在的票报 `ErrTicketMissing` 且不动其他票；`Commit` 对"同一主体两张等待票"的损坏状态拒绝且不产生比赛；`NewRedisStore` 缺键前缀不能构造。
   `read_guards_promises_test.go` 四条；回退 8 处 7 红，`Cancel` 的队列无状态检查与其后的票查找同哨兵（`clone()` 给空表），记冗余保留。
