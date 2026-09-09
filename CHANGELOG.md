@@ -56,6 +56,7 @@
 
 ### Changed
 
+- **依赖 core v1.15.2**（cache 读穿透等待名额在取消后归还，T-51）；kit v1.14.3。这次一并把 v1.14.2 漏掉的 go.mod pin 从 v1.15.0 升到 v1.15.2。
 - **kit v1.14.2 的 go.mod 仍 pin core v1.15.0**：发版时 goproxy.cn 的 sumdb 暂时 404 导致升级未落地、tag 已推不重打；kit 的修复不依赖 core v1.15.1（T-49 是 core 内部投影时序），消费方按发布清单同时取 core v1.15.1 即可，下次 kit 发版再升 pin。
 
 ### Changed（测试质量）
