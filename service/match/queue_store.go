@@ -460,6 +460,10 @@ func (s *queueStore) Sweep(ctx context.Context, queue Queue, limit int) (int, er
 		return current, resolved > 0, nil
 	})
 	if err != nil {
+		// Counted as well as returned: the background sweep only logs this,
+		// and a sweep that fails on every tick must show up somewhere other
+		// than a log line (U-0121).
+		s.report.Dropped("sweep.failed", 1)
 		return 0, err
 	}
 	// Expired tickets are dropped data: a player who waited and got nothing.

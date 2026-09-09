@@ -81,6 +81,10 @@ func (s *Server) run(ctx context.Context) error {
 func (s *Server) sweepGroup(ctx context.Context, service *Service, groupID string) {
 	advanced, err := service.AdvanceExpired(ctx, groupID, SweepBatch)
 	if err != nil {
+		// Counted as well as logged: a sweep that fails on every tick is
+		// otherwise indistinguishable, in the metrics, from one that has
+		// nothing to do (U-0120).
+		service.report.Dropped("sweep.advance_failed", 1)
 		slog.Error("activity server: advancing expired activities failed",
 			"group_id", groupID, "err", err)
 		return
@@ -91,6 +95,7 @@ func (s *Server) sweepGroup(ctx context.Context, service *Service, groupID strin
 			"phase", activity.Key.Phase, "status", activity.Status)
 		due, err := service.DueDispatches(ctx, activity.Key, DispatchBatch)
 		if err != nil {
+			service.report.Dropped("sweep.due_read_failed", 1)
 			slog.Error("activity server: reading due dispatches failed",
 				"activity_id", activity.Key.ActivityID, "err", err)
 			continue
@@ -105,6 +110,7 @@ func (s *Server) sweepGroup(ctx context.Context, service *Service, groupID strin
 					"not receive this result", "activity_id", activity.Key.ActivityID,
 					"game_sid", dispatch.GameSID)
 			case err != nil:
+				service.report.Dropped("dispatch.attempt_failed", 1)
 				slog.Error("activity server: dispatch attempt failed",
 					"activity_id", activity.Key.ActivityID,
 					"game_sid", dispatch.GameSID, "err", err)
