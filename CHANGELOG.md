@@ -10,6 +10,9 @@
 
 ### Added
 
+- **dataengine Mod 的能力查找与生命周期守卫钉住**（U-0113，C2）。nightly gap map kit `dataengine` 10 条采样 10 条无覆盖。
+  nil 注册表、缺 Mongo / JetStream / Remote Entity / 原子存储各自点名拒绝且不发布能力；未 Provide 的 Start（含 nil Mod）拒绝；Start 之前（无论 Provide 前后）Commit / Enqueue → `ErrCommitterRequired`。
+  `mod_promises_test.go` 两条；回退 10 处守卫 8 红，2 处不红：实体访问缺失与 core `engine.Assemble` 的同名拒绝冗余；健康注册表是 `app.NewRegistry` 的内建能力，缺失不可达。
 - **gap map 采样器跳过 `*_gen.go`**（B-25）：生成文件是同一模板在每个包的实例，其守卫在模板所在处钉一次即可；采样器现在只统计不采样，并在包级与总计里报告跳过的守卫数。
 - **dataengine 仓库装载路径的其余拒绝钉住**（U-0101，C2，B-24 第三项）。nightly gap map 里 `dataengine` 20 条采样 15 条无覆盖。
   未注册构建器的 kind、无持久 DAO 的 kind（`ErrEntityAggregateNotFound`）、DAO 不实现 `PersistedDaoLoader`、DAO 解码出别的 id
