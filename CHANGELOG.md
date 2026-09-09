@@ -52,6 +52,10 @@
 - **gap map 工具**（与 roost-core 同一份拷贝）：`scripts/gapmap/revertsample.py`、`scripts/gapmap.sh`、`nightly-gapmap` 工作流。
   每日对每个有测试的包做承诺回退采样，报告进 job summary，不阻塞。
 
+### Changed
+
+- **依赖 core v1.15.1**（流水线提交落盘后立刻唤醒投影，T-49）；kit v1.14.2。
+
 ### Changed（测试质量）
 
 - **platform 未记录订单的拒绝、回调 / 补发空输入与玩家解析器非正 id 的守卫钉住**（U-0143，C2）。nightly gap map kit `service/platform` 20 条 7 条无覆盖。
