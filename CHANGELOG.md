@@ -52,6 +52,9 @@
 
 ### Changed（测试质量）
 
+- **match 队列读取的未命中 / 错误传播、Cancel 与 Commit 的兜底拒绝钉住**（U-0141，C2）。nightly gap map kit `service/match` 20 条 8 条无覆盖。
+  `Ticket` / `Candidates` / `Match` / `QueueLength` 对没有状态的队列是干净未命中、对状态存储错误原样上抛（不当空队列）；`Cancel` 对不存在的票报 `ErrTicketMissing` 且不动其他票；`Commit` 对"同一主体两张等待票"的损坏状态拒绝且不产生比赛；`NewRedisStore` 缺键前缀不能构造。
+  `read_guards_promises_test.go` 四条；回退 8 处 7 红，`Cancel` 的队列无状态检查与其后的票查找同哨兵（`clone()` 给空表），记冗余保留。
 - **mail 服务入口与 Redis 存储构造的守卫钉住**（U-0140，C2）。nightly gap map kit `service/mail` 20 条 9 条无覆盖。
   `Send` 的过期秒数必须为正；`Deliver` / `List` / `MarkRead` / `Delete` 的玩家 id 必须为正、邮件 id 不能为空，被拒的操作不建邮箱；`NewRedisStores` 的发送账本 TTL 必须为正。
   `entry_guards_promises_test.go` 两条；回退 9 处 7 红，`NewRedisStores` 的客户端 / 前缀两条与 `NewRedisEnvelopes` 的同文本检查互为双份，记冗余保留。
