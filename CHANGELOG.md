@@ -10,6 +10,10 @@
 
 ### Added
 
+- **service/session 的入口与"run 中途消失"守卫钉住**（U-0114，C2）。nightly gap map `service/session` 20 条采样 10 条无覆盖（另 10 条在 `*_gen.go`，模板处已钉）。
+  owner 非正、ForceRelease 空 run id、Redis 存储缺前缀 / 请求 TTL 非正；幂等账本指向不存在的 run → `ErrConflict` 且不新开一局；Attach / Finish / Leave 不存在的 run → `ErrRunMissing`；
+  run 在 Get 与 compare-and-set 之间消失（resolve、markReleased 各一处，用按次数"失踪"的 RunStore 包装构造）→ `ErrRunMissing`，resolve 失败不归还资源、markReleased 失败前恰好归还一次；
+  Get 不存在的 run 是 (false, nil)。`guards_promises_test.go` 五条；回退 10 处守卫各红。
 - **dataengine Mod 的能力查找与生命周期守卫钉住**（U-0113，C2）。nightly gap map kit `dataengine` 10 条采样 10 条无覆盖。
   nil 注册表、缺 Mongo / JetStream / Remote Entity / 原子存储各自点名拒绝且不发布能力；未 Provide 的 Start（含 nil Mod）拒绝；Start 之前（无论 Provide 前后）Commit / Enqueue → `ErrCommitterRequired`。
   `mod_promises_test.go` 两条；回退 10 处守卫 8 红，2 处不红：实体访问缺失与 core `engine.Assemble` 的同名拒绝冗余；健康注册表是 `app.NewRegistry` 的内建能力，缺失不可达。
