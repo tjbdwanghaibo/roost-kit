@@ -27,6 +27,16 @@ type Mailbox struct {
 	// Unread is maintained here rather than counted on read. It is the
 	// authoritative count precisely because it moves with the statuses.
 	Unread int32 `json:"unread"`
+	// SettledClaims remembers mails whose ENTRY was dropped by retention after
+	// they had been claimed. Display retention and claim identity are two
+	// different bounds: an entry carries subject, status and timestamps and is
+	// capped at MaxMailboxEntries so a mailbox stays readable, while "this mail
+	// was already claimed" has to outlive the entry or a duplicate fanout
+	// message resurrects the mail and a second token is minted for the same
+	// attachment (RR-20260910-02). CommitClaim's own comment already says the
+	// token "stays the delivery key for this mail forever"; eviction was
+	// deleting it. Capped separately by MaxSettledClaims, oldest first.
+	SettledClaims map[string]SettledClaim `json:"settled_claims,omitempty"`
 	// Evicted counts entries retention dropped, so a mailbox that is losing
 	// history says so instead of just being shorter than the client expects.
 	Evicted uint64 `json:"evicted,omitempty"`
@@ -78,11 +88,27 @@ func (e Entry) claimable(nowUnix int64) error {
 	}
 }
 
+// SettledClaim is what remains of a claimed mail after its entry was evicted:
+// the token that was the delivery key, and when the entry went.
+type SettledClaim struct {
+	Token         string `json:"token"`
+	SettledAtUnix int64  `json:"settled_at_unix"`
+}
+
 func (m *Mailbox) init(playerID int64) {
 	m.PlayerID = playerID
 	if m.Entries == nil {
 		m.Entries = make(map[string]Entry)
 	}
+	if m.SettledClaims == nil {
+		m.SettledClaims = make(map[string]SettledClaim)
+	}
+}
+
+// settledClaim reports the claim that outlived its entry, if any.
+func (m Mailbox) settledClaim(mailID string) (SettledClaim, bool) {
+	settled, ok := m.SettledClaims[mailID]
+	return settled, ok
 }
 
 // entry returns the state for one mail, and whether it was delivered.
@@ -119,6 +145,18 @@ func (m *Mailbox) setStatus(mailID string, next Status, nowUnix int64) (Entry, b
 
 // deliver records a mail as delivered to this mailbox, idempotently.
 func (m *Mailbox) deliver(mailID string, nowUnix int64) (Entry, bool) {
+	if settled, ok := m.settledClaim(mailID); ok {
+		// Already delivered and already claimed; the entry is gone only
+		// because retention dropped it. Recreating it as unread is what let a
+		// second token be minted for the same attachment, so this answers
+		// like any other redelivery of a mail already in the mailbox.
+		return Entry{
+			MailID: mailID, Status: StatusClaimed,
+			ClaimToken:      settled.Token,
+			DeliveredAtUnix: settled.SettledAtUnix,
+			UpdatedAtUnix:   settled.SettledAtUnix,
+		}, false
+	}
 	if existing, ok := m.Entries[mailID]; ok {
 		// Idempotent: a redelivered mail does not become unread again and
 		// does not increment the count a second time. The transport is
@@ -164,8 +202,48 @@ func (m *Mailbox) evict(nowUnix int64) {
 			break
 		}
 		delete(m.Entries, entry.MailID)
+		if entry.ClaimToken != "" {
+			// Keyed on the token rather than on Status: a claimed mail the
+			// player then deleted is evicted as StatusDeleted, and forgetting
+			// its claim there would reopen the same hole from the other side.
+			if m.SettledClaims == nil {
+				m.SettledClaims = make(map[string]SettledClaim)
+			}
+			m.SettledClaims[entry.MailID] = SettledClaim{Token: entry.ClaimToken, SettledAtUnix: nowUnix}
+		}
 		m.Evicted++
 		m.UpdatedAtUnix = nowUnix
+	}
+	m.evictSettledClaims()
+}
+
+// evictSettledClaims bounds the tombstones on their own, oldest first.
+//
+// The bound is sound because ReserveClaim refuses an expired envelope: a
+// resurrected mail is only re-claimable while its envelope is still valid, so
+// a tombstone only has to outlive the envelope. What remains is a narrow
+// residual — a mail whose envelope is still unexpired AND which has been
+// pushed out by MaxSettledClaims newer claimed-and-evicted mails.
+func (m *Mailbox) evictSettledClaims() {
+	if len(m.SettledClaims) <= MaxSettledClaims {
+		return
+	}
+	ids := make([]string, 0, len(m.SettledClaims))
+	for mailID := range m.SettledClaims {
+		ids = append(ids, mailID)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		left, right := m.SettledClaims[ids[i]], m.SettledClaims[ids[j]]
+		if left.SettledAtUnix == right.SettledAtUnix {
+			return ids[i] < ids[j]
+		}
+		return left.SettledAtUnix < right.SettledAtUnix
+	})
+	for _, mailID := range ids {
+		if len(m.SettledClaims) <= MaxSettledClaims {
+			break
+		}
+		delete(m.SettledClaims, mailID)
 	}
 }
 

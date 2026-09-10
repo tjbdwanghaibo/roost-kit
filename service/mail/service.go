@@ -335,7 +335,8 @@ func (s *Service) Deliver(ctx context.Context, playerID int64, mailID string, no
 	_, _, err := s.cfg.Mailboxes.Update(ctx, playerID, func(current Mailbox, _ bool) (Mailbox, bool, error) {
 		current.init(playerID)
 		delivered, refused = false, false
-		if _, exists := current.entry(mailID); !exists && current.full() {
+		_, settled := current.settledClaim(mailID)
+		if _, exists := current.entry(mailID); !exists && !settled && current.full() {
 			// Refused rather than dropped. A mailbox at its bound with
 			// nothing evictable is a situation an operator has to see; a
 			// silent discard is the loss this bound exists to prevent.
@@ -696,6 +697,14 @@ func (s *Service) ReserveClaim(ctx context.Context, playerID int64, mailID strin
 		current.init(playerID)
 		entry, ok := current.entry(mailID)
 		if !ok {
+			if _, settled := current.settledClaim(mailID); settled {
+				// The entry is gone because retention dropped it, but the
+				// claim it recorded is not: minting a second token here is
+				// exactly what let the same attachment be handed out twice
+				// (RR-20260910-02).
+				refusal = "already_claimed"
+				return current, false, fmt.Errorf("%w: mail %s", ErrAlreadyClaimed, mailID)
+			}
 			return current, false, fmt.Errorf("%w: mail %s was not delivered to player %d",
 				ErrMailMissing, mailID, playerID)
 		}
@@ -775,6 +784,23 @@ func (s *Service) CommitClaim(ctx context.Context, playerID int64, mailID string
 		current.init(playerID)
 		entry, ok := current.entry(mailID)
 		if !ok {
+			if settled, ok := current.settledClaim(mailID); ok {
+				// A late retry of the commit that already succeeded. The
+				// tombstone kept the token, so this is still answerable as
+				// the replay it is instead of "never delivered".
+				if settled.Token != token {
+					refusal = "token_mismatch"
+					return current, false, fmt.Errorf("%w: mail %s", ErrClaimTokenWrong, mailID)
+				}
+				result = Entry{
+					MailID: mailID, Status: StatusClaimed,
+					ClaimToken:      settled.Token,
+					DeliveredAtUnix: settled.SettledAtUnix,
+					UpdatedAtUnix:   settled.SettledAtUnix,
+				}
+				replayed = true
+				return current, false, nil
+			}
 			return current, false, fmt.Errorf("%w: mail %s was not delivered to player %d",
 				ErrMailMissing, mailID, playerID)
 		}

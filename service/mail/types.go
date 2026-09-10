@@ -190,6 +190,11 @@ const (
 	// Reaching it evicts the oldest terminal entries and counts them, rather
 	// than growing without limit.
 	MaxMailboxEntries = 200
+	// MaxSettledClaims bounds Mailbox.SettledClaims, the record of claims that
+	// outlived their entry. It is deliberately its own bound: entries are
+	// capped so a mailbox stays readable, claim identity is capped so it
+	// outlives the envelope it protects.
+	MaxSettledClaims = 200
 	// MaxSubjectBytes and MaxBodyBytes bound one envelope.
 	MaxSubjectBytes = 256
 	MaxBodyBytes    = 4096

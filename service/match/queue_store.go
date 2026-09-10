@@ -196,6 +196,18 @@ func (s *queueStore) Enqueue(ctx context.Context, queue Queue, subject Subject, 
 		if requestID != "" {
 			if existing, ok := current.Requests[requestID]; ok {
 				if ticket, ok := current.Tickets[existing]; ok {
+					// Whose retry is this? The request id comes from the
+					// caller, so two subjects in one queue can collide on it,
+					// and replaying without checking handed the second one the
+					// first one's ticket and score while dropping its own
+					// enqueue entirely — no request record, no queue entry.
+					// The read path has always checked this
+					// (validateOwnership); the replay branch had not
+					// (RR-20260909-05).
+					if err := validateOwnership(ticket, subject); err != nil {
+						s.report.Refused("enqueue", "request_subject_mismatch")
+						return current, false, err
+					}
 					result = ticket
 					replayed = true
 					return current, false, nil
