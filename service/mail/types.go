@@ -56,20 +56,21 @@ import (
 const (
 	CodeOK int32 = 0
 
-	CodeMailInvalid     int32 = 590101
-	CodeMailMissing     int32 = 590102
-	CodeBodyInvalid     int32 = 590103
-	CodeAudienceInvalid int32 = 590104
-	CodeNotRecipient    int32 = 590105
-	CodeExpired         int32 = 590106
-	CodeNoAttachment    int32 = 590107
-	CodeAlreadyClaimed  int32 = 590108
-	CodeClaimHeld       int32 = 590109
-	CodeClaimTokenWrong int32 = 590110
-	CodeMailboxFull     int32 = 590111
-	CodeRangeInvalid    int32 = 590112
-	CodeRequestInvalid  int32 = 590113
-	CodeConflict        int32 = 590114
+	CodeMailInvalid      int32 = 590101
+	CodeMailMissing      int32 = 590102
+	CodeBodyInvalid      int32 = 590103
+	CodeAudienceInvalid  int32 = 590104
+	CodeNotRecipient     int32 = 590105
+	CodeExpired          int32 = 590106
+	CodeNoAttachment     int32 = 590107
+	CodeAlreadyClaimed   int32 = 590108
+	CodeClaimHeld        int32 = 590109
+	CodeClaimTokenWrong  int32 = 590110
+	CodeMailboxFull      int32 = 590111
+	CodeRangeInvalid     int32 = 590112
+	CodeRequestInvalid   int32 = 590113
+	CodeConflict         int32 = 590114
+	CodeClaimHistoryFull int32 = 590115
 )
 
 // The sentinels. Each carries its code, so errors.Is keeps working unchanged
@@ -102,9 +103,18 @@ var (
 	// that is not the one this mailbox holds.
 	ErrClaimTokenWrong = errcode.Define(CodeClaimTokenWrong, "mail: claim token does not match", "")
 	ErrMailboxFull     = errcode.Define(CodeMailboxFull, "mail: mailbox is full", "")
-	ErrRangeInvalid    = errcode.Define(CodeRangeInvalid, "mail: range is invalid", "")
-	ErrRequestInvalid  = errcode.Define(CodeRequestInvalid, "mail: request is invalid", "")
-	ErrConflict        = errcode.Define(CodeConflict, "mail: conflict", "")
+	// ErrClaimHistoryFull reports that retention cannot keep one more settled
+	// claim without forgetting one that is still protecting a claimable mail.
+	// It is distinct from ErrMailboxFull: the display bound and the claim
+	// identity bound fail for different reasons and need different operator
+	// action — the first wants the player to read mail, the second means too
+	// many attachments were claimed and evicted inside one envelope lifetime.
+	// Refusing is deliberate; forgetting an identity is how the same
+	// attachment gets a second token (RR-20260911-01).
+	ErrClaimHistoryFull = errcode.Define(CodeClaimHistoryFull, "mail: claim history is full", "")
+	ErrRangeInvalid     = errcode.Define(CodeRangeInvalid, "mail: range is invalid", "")
+	ErrRequestInvalid   = errcode.Define(CodeRequestInvalid, "mail: request is invalid", "")
+	ErrConflict         = errcode.Define(CodeConflict, "mail: conflict", "")
 )
 
 // codeBySentinel is the pairing above, as data, so a test can check it rather
@@ -117,20 +127,21 @@ var (
 // error to attach to. A code nothing can produce is worse than no code: it
 // reads as coverage.
 var codeBySentinel = map[int32]error{
-	CodeMailInvalid:     ErrMailInvalid,
-	CodeMailMissing:     ErrMailMissing,
-	CodeBodyInvalid:     ErrBodyInvalid,
-	CodeAudienceInvalid: ErrAudienceInvalid,
-	CodeNotRecipient:    ErrNotRecipient,
-	CodeExpired:         ErrExpired,
-	CodeNoAttachment:    ErrNoAttachment,
-	CodeAlreadyClaimed:  ErrAlreadyClaimed,
-	CodeClaimHeld:       ErrClaimHeld,
-	CodeClaimTokenWrong: ErrClaimTokenWrong,
-	CodeMailboxFull:     ErrMailboxFull,
-	CodeRangeInvalid:    ErrRangeInvalid,
-	CodeRequestInvalid:  ErrRequestInvalid,
-	CodeConflict:        ErrConflict,
+	CodeMailInvalid:      ErrMailInvalid,
+	CodeMailMissing:      ErrMailMissing,
+	CodeBodyInvalid:      ErrBodyInvalid,
+	CodeAudienceInvalid:  ErrAudienceInvalid,
+	CodeNotRecipient:     ErrNotRecipient,
+	CodeExpired:          ErrExpired,
+	CodeNoAttachment:     ErrNoAttachment,
+	CodeAlreadyClaimed:   ErrAlreadyClaimed,
+	CodeClaimHeld:        ErrClaimHeld,
+	CodeClaimTokenWrong:  ErrClaimTokenWrong,
+	CodeMailboxFull:      ErrMailboxFull,
+	CodeRangeInvalid:     ErrRangeInvalid,
+	CodeRequestInvalid:   ErrRequestInvalid,
+	CodeConflict:         ErrConflict,
+	CodeClaimHistoryFull: ErrClaimHistoryFull,
 }
 
 // Error maps an error to the code and reason a client sees.

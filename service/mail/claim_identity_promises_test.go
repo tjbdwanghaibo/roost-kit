@@ -151,24 +151,42 @@ func TestCommitClaimReplaysAfterTheEntryWasEvicted(t *testing.T) {
 	}
 }
 
-// The tombstones have their own bound, so they cannot grow without limit.
-func TestSettledClaimsAreBounded(t *testing.T) {
+// Retention drops a settled claim when the envelope it protects can no longer
+// be claimed. U-0165 bounded these by count instead; RR-20260911-01 showed a
+// count cannot express a time window, so the count now only bounds records
+// written before the window was recorded.
+func TestSettledClaimsAgeOutWithTheirEnvelope(t *testing.T) {
 	var box Mailbox
 	box.init(1)
+	const now int64 = 1_000_000
+	box.SettledClaims["expired"] = SettledClaim{Token: "t1", SettledAtUnix: now - 100, EnvelopeExpiresAtUnix: now - 1}
+	box.SettledClaims["claimable"] = SettledClaim{Token: "t2", SettledAtUnix: now - 5000, EnvelopeExpiresAtUnix: now + 1}
+	box.evictSettledClaims(now)
+	if _, ok := box.SettledClaims["expired"]; ok {
+		t.Error("a record whose envelope can no longer be claimed was kept")
+	}
+	if _, ok := box.SettledClaims["claimable"]; !ok {
+		t.Error("a record was dropped while its envelope was still claimable, even though it was the oldest")
+	}
+
+	// Records with no recorded window are the only ones the count bound may
+	// drop, and only when the mailbox is over it.
+	var legacy Mailbox
+	legacy.init(1)
 	for i := 0; i < MaxSettledClaims+50; i++ {
-		box.SettledClaims[fmt.Sprintf("mail-%04d", i)] = SettledClaim{
+		legacy.SettledClaims[fmt.Sprintf("mail-%04d", i)] = SettledClaim{
 			Token: fmt.Sprintf("token-%d", i), SettledAtUnix: int64(i),
 		}
 	}
-	box.evictSettledClaims()
-	if len(box.SettledClaims) != MaxSettledClaims {
-		t.Fatalf("settled claims = %d, want the bound %d", len(box.SettledClaims), MaxSettledClaims)
+	legacy.SettledClaims["known-window"] = SettledClaim{Token: "keep", SettledAtUnix: 0, EnvelopeExpiresAtUnix: now + 1}
+	legacy.evictSettledClaims(now)
+	if len(legacy.SettledClaims) != MaxSettledClaims {
+		t.Fatalf("settled claims = %d, want the bound %d", len(legacy.SettledClaims), MaxSettledClaims)
 	}
-	// Oldest first: the 50 lowest settled times are the ones dropped.
-	if _, ok := box.SettledClaims["mail-0000"]; ok {
-		t.Error("the oldest tombstone survived the bound")
+	if _, ok := legacy.SettledClaims["known-window"]; !ok {
+		t.Error("the count bound dropped a record that knows its window")
 	}
-	if _, ok := box.SettledClaims[fmt.Sprintf("mail-%04d", MaxSettledClaims+49)]; !ok {
-		t.Error("the newest tombstone was dropped")
+	if _, ok := legacy.SettledClaims["mail-0000"]; ok {
+		t.Error("the oldest window-less record survived the bound")
 	}
 }

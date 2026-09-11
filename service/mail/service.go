@@ -329,12 +329,13 @@ func (s *Service) Deliver(ctx context.Context, playerID int64, mailID string, no
 		nowUnix = s.cfg.Now().Unix()
 	}
 	var (
-		delivered bool
-		refused   bool
+		delivered      bool
+		refused        bool
+		refusedSettled bool
 	)
 	_, _, err := s.cfg.Mailboxes.Update(ctx, playerID, func(current Mailbox, _ bool) (Mailbox, bool, error) {
 		current.init(playerID)
-		delivered, refused = false, false
+		delivered, refused, refusedSettled = false, false, false
 		_, settled := current.settledClaim(mailID)
 		if _, exists := current.entry(mailID); !exists && !settled && current.full() {
 			// Refused rather than dropped. A mailbox at its bound with
@@ -354,11 +355,19 @@ func (s *Service) Deliver(ctx context.Context, playerID int64, mailID string, no
 		if added {
 			current.evict(nowUnix)
 		}
+		if current.settledClaimsOverflow() {
+			refusedSettled = true
+			return current, false, fmt.Errorf("%w: player %d holds %d settled claims whose mails are still claimable",
+				ErrClaimHistoryFull, playerID, len(current.SettledClaims))
+		}
 		return current, added, nil
 	})
 	if err != nil {
-		if refused {
+		switch {
+		case refused:
 			s.report.Refused("deliver", "mailbox_full")
+		case refusedSettled:
+			s.report.Refused("deliver", "claim_history_full")
 		}
 		return err
 	}
@@ -730,6 +739,10 @@ func (s *Service) ReserveClaim(ctx context.Context, playerID int64, mailID strin
 			reserved = minted
 		}
 		entry.ClaimToken = reserved
+		// Remember how long this mail stays claimable, so the settled-claim
+		// record that outlives the entry can be kept for exactly that long
+		// (RR-20260911-01).
+		entry.ClaimEnvelopeExpiresAtUnix = envelope.ExpiresAtUnix
 		entry.ClaimDeadlineUnix = nowUnix + int64(s.cfg.ClaimLease.Seconds())
 		entry.ClaimAttempts++
 		entry.UpdatedAtUnix = nowUnix

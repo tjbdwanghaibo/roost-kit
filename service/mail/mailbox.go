@@ -62,6 +62,11 @@ type Entry struct {
 	// how long a crashed deliverer blocks the mail; it does NOT allow a
 	// different token to take over, because the token does not change.
 	ClaimDeadlineUnix int64 `json:"claim_deadline_unix,omitempty"`
+	// ClaimEnvelopeExpiresAtUnix is when the envelope this claim belongs to
+	// stops being claimable. It is copied into the settled-claim record when
+	// retention drops the entry, which is what lets that record be kept for
+	// exactly as long as the mail could still be re-claimed.
+	ClaimEnvelopeExpiresAtUnix int64 `json:"claim_envelope_expires_at_unix,omitempty"`
 	// ClaimAttempts counts reservations. It is not an idempotency key and is
 	// not part of one — it exists so an operator can see a mail whose
 	// delivery keeps failing.
@@ -93,6 +98,11 @@ func (e Entry) claimable(nowUnix int64) error {
 type SettledClaim struct {
 	Token         string `json:"token"`
 	SettledAtUnix int64  `json:"settled_at_unix"`
+	// EnvelopeExpiresAtUnix is when the envelope this claim protects stops
+	// being claimable. Retention drops the record then and not before: a count
+	// bound cannot express a time window, and the mail stays re-claimable for
+	// as long as its envelope is valid (RR-20260911-01).
+	EnvelopeExpiresAtUnix int64 `json:"envelope_expires_at_unix,omitempty"`
 }
 
 func (m *Mailbox) init(playerID int64) {
@@ -209,42 +219,70 @@ func (m *Mailbox) evict(nowUnix int64) {
 			if m.SettledClaims == nil {
 				m.SettledClaims = make(map[string]SettledClaim)
 			}
-			m.SettledClaims[entry.MailID] = SettledClaim{Token: entry.ClaimToken, SettledAtUnix: nowUnix}
+			m.SettledClaims[entry.MailID] = SettledClaim{
+				Token:                 entry.ClaimToken,
+				SettledAtUnix:         nowUnix,
+				EnvelopeExpiresAtUnix: entry.ClaimEnvelopeExpiresAtUnix,
+			}
 		}
 		m.Evicted++
 		m.UpdatedAtUnix = nowUnix
 	}
-	m.evictSettledClaims()
+	m.evictSettledClaims(nowUnix)
 }
 
-// evictSettledClaims bounds the tombstones on their own, oldest first.
+// evictSettledClaims drops the settled claims that have nothing left to
+// protect, which is a TIME question, not a count one.
 //
-// The bound is sound because ReserveClaim refuses an expired envelope: a
-// resurrected mail is only re-claimable while its envelope is still valid, so
-// a tombstone only has to outlive the envelope. What remains is a narrow
-// residual — a mail whose envelope is still unexpired AND which has been
-// pushed out by MaxSettledClaims newer claimed-and-evicted mails.
-func (m *Mailbox) evictSettledClaims() {
+// U-0165 bounded these by count and argued that was enough because
+// ReserveClaim refuses an expired envelope. That argument does not hold: a
+// count bound cannot express a time window, so an envelope with a week left
+// lost its claim identity as soon as MaxSettledClaims newer claims were
+// settled, and the mail became re-claimable under a fresh token
+// (RR-20260911-01). A record is now kept until the envelope it protects can no
+// longer be claimed.
+//
+// Records written before the expiry was recorded carry no window and cannot be
+// aged out. Only those are dropped by count, oldest first, and only when the
+// mailbox is over the bound — that bounds an upgraded mailbox without ever
+// dropping a record that knows what it is protecting.
+func (m *Mailbox) evictSettledClaims(nowUnix int64) {
+	for mailID, settled := range m.SettledClaims {
+		if settled.EnvelopeExpiresAtUnix > 0 && nowUnix >= settled.EnvelopeExpiresAtUnix {
+			delete(m.SettledClaims, mailID)
+		}
+	}
 	if len(m.SettledClaims) <= MaxSettledClaims {
 		return
 	}
-	ids := make([]string, 0, len(m.SettledClaims))
-	for mailID := range m.SettledClaims {
-		ids = append(ids, mailID)
+	legacy := make([]string, 0, len(m.SettledClaims))
+	for mailID, settled := range m.SettledClaims {
+		if settled.EnvelopeExpiresAtUnix <= 0 {
+			legacy = append(legacy, mailID)
+		}
 	}
-	sort.Slice(ids, func(i, j int) bool {
-		left, right := m.SettledClaims[ids[i]], m.SettledClaims[ids[j]]
+	sort.Slice(legacy, func(i, j int) bool {
+		left, right := m.SettledClaims[legacy[i]], m.SettledClaims[legacy[j]]
 		if left.SettledAtUnix == right.SettledAtUnix {
-			return ids[i] < ids[j]
+			return legacy[i] < legacy[j]
 		}
 		return left.SettledAtUnix < right.SettledAtUnix
 	})
-	for _, mailID := range ids {
+	for _, mailID := range legacy {
 		if len(m.SettledClaims) <= MaxSettledClaims {
 			break
 		}
 		delete(m.SettledClaims, mailID)
 	}
+}
+
+// settledClaimsOverflow reports that retention could not get the settled
+// claims under their bound without forgetting an identity that is still
+// protecting a claimable envelope. Delivery refuses instead: silently dropping
+// one is how the same attachment gets a second token, and an operator has to
+// see this the way they see a mailbox that cannot be brought under its bound.
+func (m Mailbox) settledClaimsOverflow() bool {
+	return len(m.SettledClaims) > MaxSettledClaims
 }
 
 // full reports whether the mailbox is at its bound with nothing evictable, so
@@ -267,6 +305,16 @@ func (m Mailbox) clone() Mailbox {
 		out.Entries = make(map[string]Entry, len(m.Entries))
 		for id, entry := range m.Entries {
 			out.Entries[id] = entry
+		}
+	}
+	// Every mutable collection, not just Entries: `out := m` copies the map
+	// HEADER, so a caller mutating the returned snapshot was reaching straight
+	// into the stored settled claims and deleting a claim identity without
+	// going through Store.Update (RR-20260911-02).
+	if m.SettledClaims != nil {
+		out.SettledClaims = make(map[string]SettledClaim, len(m.SettledClaims))
+		for id, settled := range m.SettledClaims {
+			out.SettledClaims[id] = settled
 		}
 	}
 	return out
