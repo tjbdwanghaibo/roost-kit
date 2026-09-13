@@ -334,6 +334,13 @@ func (s *Service) Deliver(ctx context.Context, playerID int64, mailID string, no
 		refusedSettled bool
 	)
 	_, _, err := s.cfg.Mailboxes.Update(ctx, playerID, func(current Mailbox, _ bool) (Mailbox, bool, error) {
+		// Work on a private copy. The store hands the callback a struct
+		// copy whose maps still alias the stored value, so mutating them
+		// and then returning save=false left the store changed anyway —
+		// a refused delivery had already inserted its entry and its
+		// tombstone while Unread and Version kept their old values
+		// (RR-20260911-05). match's callbacks have always cloned first.
+		current = current.clone()
 		current.init(playerID)
 		delivered, refused, refusedSettled = false, false, false
 		_, settled := current.settledClaim(mailID)
@@ -585,6 +592,13 @@ func (s *Service) transition(
 		changed bool
 	)
 	_, _, err := s.cfg.Mailboxes.Update(ctx, playerID, func(current Mailbox, found bool) (Mailbox, bool, error) {
+		// Work on a private copy. The store hands the callback a struct
+		// copy whose maps still alias the stored value, so mutating them
+		// and then returning save=false left the store changed anyway —
+		// a refused delivery had already inserted its entry and its
+		// tombstone while Unread and Version kept their old values
+		// (RR-20260911-05). match's callbacks have always cloned first.
+		current = current.clone()
 		changed = false
 		if !found {
 			return current, false, fmt.Errorf("%w: player %d has no mailbox", ErrMailMissing, playerID)
@@ -699,6 +713,13 @@ func (s *Service) ReserveClaim(ctx context.Context, playerID int64, mailID strin
 		refusal string
 	)
 	_, _, err = s.cfg.Mailboxes.Update(ctx, playerID, func(current Mailbox, found bool) (Mailbox, bool, error) {
+		// Work on a private copy. The store hands the callback a struct
+		// copy whose maps still alias the stored value, so mutating them
+		// and then returning save=false left the store changed anyway —
+		// a refused delivery had already inserted its entry and its
+		// tombstone while Unread and Version kept their old values
+		// (RR-20260911-05). match's callbacks have always cloned first.
+		current = current.clone()
 		refusal = ""
 		if !found {
 			return current, false, fmt.Errorf("%w: player %d has no mailbox", ErrMailMissing, playerID)
@@ -790,6 +811,13 @@ func (s *Service) CommitClaim(ctx context.Context, playerID int64, mailID string
 		refusal  string
 	)
 	_, _, err := s.cfg.Mailboxes.Update(ctx, playerID, func(current Mailbox, found bool) (Mailbox, bool, error) {
+		// Work on a private copy. The store hands the callback a struct
+		// copy whose maps still alias the stored value, so mutating them
+		// and then returning save=false left the store changed anyway —
+		// a refused delivery had already inserted its entry and its
+		// tombstone while Unread and Version kept their old values
+		// (RR-20260911-05). match's callbacks have always cloned first.
+		current = current.clone()
 		replayed, refusal = false, ""
 		if !found {
 			return current, false, fmt.Errorf("%w: player %d has no mailbox", ErrMailMissing, playerID)
@@ -871,6 +899,13 @@ func (s *Service) CancelClaim(ctx context.Context, playerID int64, mailID string
 	nowUnix := s.cfg.Now().Unix()
 	var released bool
 	_, _, err := s.cfg.Mailboxes.Update(ctx, playerID, func(current Mailbox, found bool) (Mailbox, bool, error) {
+		// Work on a private copy. The store hands the callback a struct
+		// copy whose maps still alias the stored value, so mutating them
+		// and then returning save=false left the store changed anyway —
+		// a refused delivery had already inserted its entry and its
+		// tombstone while Unread and Version kept their old values
+		// (RR-20260911-05). match's callbacks have always cloned first.
+		current = current.clone()
 		released = false
 		if !found {
 			return current, false, nil
