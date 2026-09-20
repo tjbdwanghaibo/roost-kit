@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [v1.14.18] - 2026-09-20
+
+### Changed
+
+- **本仓库并入 roost-core，这是最后一个版本。** 全部内容从 roost-core v1.16.0 起位于 `roost-core/kit/`（模块路径 `github.com/tjbdwanghaibo/roost-core/kit/…`），带完整历史搬入。旧 tag 永远可用；升级用 `roost project upgrade --consolidate`。方案见 roost-core `docs/ARCHITECTURE_V3_SINGLE_MODULE_PLAN.zh-CN.md`。
+
 ### Changed
 
 - core pin 升到 v1.15.18（U-0265 `SmallSafeMap` 的 BSON 编码、U-0266 `OpTimeout` 覆盖写闸排队）。
